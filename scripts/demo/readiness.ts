@@ -1,0 +1,21 @@
+import {isMainModule} from './cli.ts';
+import {assertProjectAllowed,assertNoForbiddenFields} from './guards.ts';
+import {configuredProjectAllowlist,DEMO_COMPANY_ID,DEMO_ERP_USER_ID,DEMO_ROLE_ID} from './config.ts';
+import {createDemoAdminContext} from './firebaseAdmin.ts';
+import {resolveOfficialDemoAuthUser} from './identity.ts';
+import {buildCompleteDemoPlan} from './datasets/complete.ts';
+import {verifyPlan,verifyPersistedPlan} from './verify.ts';
+import {buildManifest} from './manifest.ts';
+import {loadManifest} from './runner.ts';
+
+type Status='PASS'|'WARNING'|'BLOCKED'|'FAIL';type Check={status:Status,name:string,detail:string};
+export async function runReadiness(env=process.env){const checks:Check[]=[];const add=(status:Status,name:string,detail:string)=>checks.push({status,name,detail});let context;
+ try{context=createDemoAdminContext(env);add('PASS','admin-context','Trusted Firebase Admin context initialized.')}catch(e){add('BLOCKED','admin-context',e instanceof Error?e.message:String(e));return finish(checks)}
+ try{assertProjectAllowed(context.projectId,configuredProjectAllowlist(env));add('PASS','project-allowlist',`Project ${context.projectId} is explicitly allowlisted.`)}catch(e){add('FAIL','project-allowlist',e instanceof Error?e.message:String(e));return finish(checks)}
+ let authUser;try{authUser=await resolveOfficialDemoAuthUser(context.auth);add('PASS','official-auth-account','Official Firebase Auth account exists and is enabled.')}catch(e){add('BLOCKED','official-auth-account',e instanceof Error?e.message:String(e));return finish(checks)}
+ const plan=buildCompleteDemoPlan(authUser.uid),issues=verifyPlan(plan);if(issues.length)add('FAIL','deterministic-plan',`${issues.length} verification issue(s).`);else add('PASS','deterministic-plan',`${plan.documents.length} deterministic documents verified.`);try{assertNoForbiddenFields(plan.documents);add('PASS','secret-policy','No forbidden credential or identity fields in the plan.')}catch(e){add('FAIL','secret-policy',e instanceof Error?e.message:String(e))}
+ const user=plan.documents.find(d=>d.collection==='users'&&d.id===DEMO_ERP_USER_ID),role=plan.documents.find(d=>d.collection==='roles'&&d.id===DEMO_ROLE_ID);if(user?.data.companyId===DEMO_COMPANY_ID&&user.data.isSuperAdmin===false)add('PASS','demo-identity','Canonical Demo user is company-bound and non-super-admin.');else add('FAIL','demo-identity','Canonical Demo user contract is invalid.');if(role&&['companies','users','roles'].every(m=>(role.data.permissions as any)?.[m]?.create===false))add('PASS','demo-role','Administrative role capabilities are denied.');else add('FAIL','demo-role','Demo role contains unsafe administrative permissions.');
+ try{const stored=await loadManifest(context.db),expected=buildManifest(plan);await verifyPersistedPlan(context.db,plan);if(stored.checksum!==expected.checksum)throw new Error('Persisted manifest checksum differs from the deterministic plan.');add('PASS','persisted-graph',`${plan.documents.length} persisted documents and manifest verified.`)}catch(e){const message=e instanceof Error?e.message:String(e);if(message.includes('Verified demo manifest does not exist'))add('WARNING','persisted-graph','Demo has not been seeded yet; apply is permitted after all identity and project checks pass.');else add('BLOCKED','persisted-graph',message)}
+ add(env.DEMO_RESET_SCHEDULE_ENABLED==='true'?'PASS':'WARNING','scheduled-reset',env.DEMO_RESET_SCHEDULE_ENABLED==='true'?'Scheduled reset explicitly enabled.':'Set DEMO_RESET_SCHEDULE_ENABLED=true in the trusted scheduler after deployment.');add('PASS','upload-policy','Reachable product, survey, engineering, profile, and commissioning uploads use authorized company/user prefixes.');add('PASS','side-effect-policy','Demo role and backend tenant policy block integration-secret/external provider configuration.');return finish(checks)}
+function finish(checks:Check[]){for(const c of checks)console.log(`[${c.status}] ${c.name}: ${c.detail}`);const critical=checks.some(c=>c.status==='FAIL'||c.status==='BLOCKED');if(critical)process.exitCode=2;return{checks,ready:!critical}}
+if(isMainModule(import.meta.url))runReadiness().catch(e=>{console.error(`[FAIL] readiness: ${e instanceof Error?e.message:String(e)}`);process.exitCode=2});

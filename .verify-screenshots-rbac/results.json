@@ -1,0 +1,253 @@
+{
+  "results": [
+    {
+      "name": "P1: Admin login",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "P1: Roles & Permissions page loads",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P1: Role created successfully",
+      "pass": true,
+      "detail": "outcome=success-toast"
+    },
+    {
+      "name": "P1: New role appears in Roles list",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P2: Test user created",
+      "pass": true,
+      "detail": "outcome=success-toast"
+    },
+    {
+      "name": "P2: Test user appears in Users list",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P3: Restricted user login",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "P3: Allowed page (leads) accessible",
+      "pass": true,
+      "detail": "url=http://localhost:5173/leads"
+    },
+    {
+      "name": "P3: Create action visible (leads create=true)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P3: Denied page (warehouses) direct URL blocked",
+      "pass": true,
+      "detail": "url=http://localhost:5173/dashboard"
+    },
+    {
+      "name": "P3: Denied page (subsidy) direct URL blocked",
+      "pass": true,
+      "detail": "url=http://localhost:5173/dashboard"
+    },
+    {
+      "name": "P3: Actual create action reaches business logic (not blocked by RBAC — pre-existing \"no sales team\" data gap, not a permission failure)",
+      "pass": true,
+      "detail": "outcome=no-sales-team-precondition"
+    },
+    {
+      "name": "P3: Edit-gated bulk actions NOT visible (leads edit=false)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P3: Delete-gated bulk action NOT visible (leads delete=false)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P4: [informational] Firestore-level warehouses collection GET status",
+      "pass": true,
+      "detail": "status=403 (interpretation in report — this is a LIST endpoint shape, informational only)"
+    },
+    {
+      "name": "P4: Restricted user CANNOT self-elevate isSuperAdmin (backend denies, not just UI)",
+      "pass": true,
+      "detail": "status=403"
+    },
+    {
+      "name": "P4: Non-admin CAN update roundRobinPointer only (legitimate round-robin path)",
+      "pass": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "P4: Non-admin CANNOT sneak other fields alongside roundRobinPointer",
+      "pass": true,
+      "detail": "status=403"
+    },
+    {
+      "name": "P4: Restricted user CANNOT create a role (backend denies isAdmin()-only rule)",
+      "pass": true,
+      "detail": "status=403"
+    },
+    {
+      "name": "P4: Customer contact-identity creation works (no isSuperAdmin field, non-admin actor)",
+      "pass": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "P4: Employee contact-identity creation works (no isSuperAdmin field, non-admin actor)",
+      "pass": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "P5: Admin re-login",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "P5: Role updated (grant) successfully",
+      "pass": true,
+      "detail": "outcome=success-toast"
+    },
+    {
+      "name": "P6: Restricted user re-login",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "P6: Warehouses now accessible after grant",
+      "pass": true,
+      "detail": "url=http://localhost:5173/warehouses"
+    },
+    {
+      "name": "P6: Subsidy now accessible after grant",
+      "pass": true,
+      "detail": "url=http://localhost:5173/subsidy"
+    },
+    {
+      "name": "P6: Leads still accessible (unaffected)",
+      "pass": true,
+      "detail": "url=http://localhost:5173/leads"
+    },
+    {
+      "name": "P7: Admin re-login",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "P7: Role updated (revoke) successfully",
+      "pass": true,
+      "detail": "outcome=success-toast"
+    },
+    {
+      "name": "P8: Restricted user re-login",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "P8: Warehouses access now revoked",
+      "pass": true,
+      "detail": "url=http://localhost:5173/dashboard"
+    },
+    {
+      "name": "P8: Subsidy still accessible (unaffected by warehouse revoke)",
+      "pass": true,
+      "detail": "url=http://localhost:5173/subsidy"
+    },
+    {
+      "name": "P8: Leads still accessible (unaffected)",
+      "pass": true,
+      "detail": "url=http://localhost:5173/leads"
+    },
+    {
+      "name": "P8: No null.getSnapshot crash across the whole desktop RBAC flow",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P8.5: Admin can still log in after all permission changes",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "P8.5: Admin Users & Access still works (test user still visible)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P8.5: Admin Roles & Permissions still works (test role still visible)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P9: Mobile restricted-user login",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "P9: Mobile allowed page (leads) accessible",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P9: Mobile denied page (warehouses) blocked",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "P9: No null.getSnapshot crash on mobile RBAC flow",
+      "pass": true,
+      "detail": ""
+    }
+  ],
+  "consoleLog": [
+    {
+      "phase": "desktop",
+      "type": "warning",
+      "text": "[settingsService] Audit log write failed for settings.updated on appearance: FirebaseError: Missing or insufficient permissions."
+    },
+    {
+      "phase": "desktop",
+      "type": "error",
+      "text": "In HTML, %s cannot be a child of <%s>.%s\nThis will cause a hydration error.%s <tr> table  Add a <tbody>, <thead> or <tfoot> to your code to match the DOM tree generated by the browser. \n\n  ...\n    <Outlet>\n      <RenderedRoute match={{params:{}, ...}} routeContext={{outlet:null, ...}}>\n        <RoleRoute module=\"subsidy\">\n          <SafePage>\n            <Suspense fallback={<PageSkeleton>}>\n              <ErrorBoundary monitoringContext={{...}}>\n                <Subsidy>\n                  <div className=\"flex h-ful...\">\n                    <div>\n                    <div>\n                    <Card className=\"flex min-h...\">\n                      <div onClick={undefined} style={{...}} className=\"bg-[var(--...\">\n                        <Table>\n                          <div className=\"table-scro...\">\n>                           <table className=\"min-w-full border-collapse text-sm\" role=\"grid\" aria-label=\"Data table\">\n                              <thead>\n                              <SkeletonRows cols={8} rows={6}>\n>                               <tr>\n                                ...\n"
+    },
+    {
+      "phase": "desktop",
+      "type": "error",
+      "text": "<%s> cannot contain a nested %s.\nSee this log for the ancestor stack trace. table <tr>"
+    },
+    {
+      "phase": "desktop",
+      "type": "error",
+      "text": "In HTML, %s cannot be a child of <%s>.%s\nThis will cause a hydration error.%s <tr> table  Add a <tbody>, <thead> or <tfoot> to your code to match the DOM tree generated by the browser. \n\n  ...\n    <Outlet>\n      <RenderedRoute match={{params:{}, ...}} routeContext={{outlet:null, ...}}>\n        <RoleRoute module=\"subsidy\">\n          <SafePage>\n            <Suspense fallback={<PageSkeleton>}>\n              <ErrorBoundary monitoringContext={{...}}>\n                <Subsidy>\n                  <div className=\"flex h-ful...\">\n                    <div>\n                    <div>\n                    <Card className=\"flex min-h...\">\n                      <div onClick={undefined} style={{...}} className=\"bg-[var(--...\">\n                        <Table>\n                          <div className=\"table-scro...\">\n>                           <table className=\"min-w-full border-collapse text-sm\" role=\"grid\" aria-label=\"Data table\">\n                              <thead>\n                              <SkeletonRows cols={8} rows={6}>\n>                               <tr>\n                                ...\n"
+    },
+    {
+      "phase": "desktop",
+      "type": "error",
+      "text": "<%s> cannot contain a nested %s.\nSee this log for the ancestor stack trace. table <tr>"
+    },
+    {
+      "phase": "mobile",
+      "type": "warning",
+      "text": "[permissions] unknown-role: role=RBAC Verification — Sales Executive 1786386817869; key=rbac verification — sales executive 1786386817869"
+    },
+    {
+      "phase": "mobile",
+      "type": "warning",
+      "text": "[permissions] unknown-role: role=RBAC Verification — Sales Executive 1786386817869; key=rbac verification — sales executive 1786386817869"
+    },
+    {
+      "phase": "mobile",
+      "type": "warning",
+      "text": "[permissions] unknown-role: role=RBAC Verification — Sales Executive 1786386817869; key=rbac verification — sales executive 1786386817869"
+    }
+  ],
+  "roleName": "RBAC Verification — Sales Executive 1786386817869",
+  "testEmail": "rbac-verify-1786386817869@neozy-verify.test"
+}

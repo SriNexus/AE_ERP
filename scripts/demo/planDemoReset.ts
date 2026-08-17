@@ -1,0 +1,4 @@
+import {buildCompleteDemoPlan} from './datasets/complete.ts';
+import {DEMO_RESETTABLE_COLLECTIONS} from './config.ts';
+import {assertDeletionCeiling,assertSafeDeleteDocument} from './guards.ts';
+const plan=buildCompleteDemoPlan('DRY-RUN-PLAN-ONLY-AUTH-UID');const resettable=new Set<string>(DEMO_RESETTABLE_COLLECTIONS);const deletions=plan.documents.filter(d=>resettable.has(d.collection)&&!d.preserveOnReset).reverse();deletions.forEach(assertSafeDeleteDocument);assertDeletionCeiling(deletions.length);console.log(JSON.stringify({mode:'reset-plan-only',writes:false,deleteCount:deletions.length,preserved:plan.documents.filter(d=>!resettable.has(d.collection)||d.preserveOnReset).reduce<Record<string,number>>((a,d)=>(a[d.collection]=(a[d.collection]||0)+1,a),{}),firstDeleted:deletions.slice(0,5).map(d=>`${d.collection}/${d.id}`)},null,2));

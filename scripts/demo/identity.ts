@@ -1,0 +1,2 @@
+import { OFFICIAL_DEMO_EMAIL } from './config.ts';
+export async function resolveOfficialDemoAuthUser(auth:any){try{const user=await auth.getUserByEmail(OFFICIAL_DEMO_EMAIL);if(user.disabled)throw new Error('Official demo Firebase Auth account is disabled.');return user}catch(error:any){if(error?.code==='auth/user-not-found')throw new Error(`Firebase Authentication account ${OFFICIAL_DEMO_EMAIL} does not exist. Create it in Firebase Authentication first; the tooling never creates or accepts its password.`);throw error}}

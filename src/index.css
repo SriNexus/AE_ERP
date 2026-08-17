@@ -1,0 +1,193 @@
+@config "../tailwind.config.ts";
+@import "tailwindcss";
+@import "./styles/tokens.css";
+
+html { font-size: calc(16px * var(--personal-font-scale, 1)); }
+html.compact-ui { --spacing-density: 0.875; }
+html.compact-ui .app-shell__main { padding-top: calc(1rem * var(--spacing-density)); }
+html.high-contrast { filter: contrast(1.08); }
+html.reduce-motion *, html.reduce-motion *::before, html.reduce-motion *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+
+html, body, #root { max-width: 100%; overflow-x: hidden; }
+body { background-color: var(--color-bg); color: var(--color-text); font-family: 'Inter', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+body.modal-open { overflow: hidden; }
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
+[data-theme="dark"] ::-webkit-scrollbar-thumb, .dark ::-webkit-scrollbar-thumb { background: #475569; }
+@keyframes fadeIn   { from { opacity:0; transform:translateY(8px);  } to { opacity:1; transform:none; } }
+@keyframes slideIn  { from { opacity:0; transform:translateX(-12px);} to { opacity:1; transform:none; } }
+@keyframes scaleIn  { from { opacity:0; transform:scale(.96);       } to { opacity:1; transform:scale(1); } }
+@keyframes shimmer  { from { background-position:-200% 0; } to { background-position:200% 0; } }
+.animate-fadeIn  { animation: fadeIn .18s ease-out both; }
+.animate-slideIn { animation: slideIn .2s ease-out both; }
+.animate-scaleIn { animation: scaleIn .15s ease-out both; }
+.skeleton { background: linear-gradient(90deg,#f1f5f9 25%,#e2e8f0 50%,#f1f5f9 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 6px; }
+[data-theme="dark"] .skeleton, .dark .skeleton { background: linear-gradient(90deg,#1e293b 25%,#334155 50%,#1e293b 75%); background-size: 200% 100%; }
+@media print { .no-print { display: none !important; } .print-break { page-break-before: always; } body { background: #fff !important; color: #000 !important; } }
+.print-only { display: none; }
+*:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; border-radius: 4px; }
+
+/* ── Mobile shell styles ─────────────────────────────────── */
+
+.mobile-shell {
+  --safe-area-bottom: constant(safe-area-inset-bottom, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, var(--safe-area-bottom));
+  --safe-area-top: constant(safe-area-inset-top, 0px);
+  --safe-area-top: env(safe-area-inset-top, var(--safe-area-top));
+}
+
+.mobile-bottom-nav {
+  padding-bottom: var(--safe-area-bottom);
+}
+
+.mobile-topbar {
+  padding-top: var(--safe-area-top);
+  background: transparent;
+}
+
+.mobile-topbar--home {
+  --mobile-topbar-image-opacity: 0.7;
+  position: relative;
+  overflow: hidden;
+  background: transparent;
+}
+
+.mobile-topbar--home::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+
+  opacity: var(--mobile-topbar-image-opacity);
+
+  background-image: url("./assets/mobile/header/mobile-header-light.webp");
+  background-repeat: no-repeat;
+  background-position: center center;
+  background-size: cover;
+
+  transform: scale(1.02);
+}
+
+[data-theme="dark"] .mobile-topbar--home,
+html.dark .mobile-topbar--home {
+  --mobile-topbar-image-opacity: 0.7;
+}
+
+[data-theme="dark"] .mobile-topbar--home::before,
+html.dark .mobile-topbar--home::before {
+  background-image: url("./assets/mobile/header/mobile-header-dark.webp");
+}
+
+/* Shell switching is handled by React's conditional rendering
+   in App.tsx (useMobileDetect). No CSS display:none rules needed
+   — the unused shell is simply never mounted on the other viewport. */
+*, *::before, *::after { transition-property: color, background-color, border-color, box-shadow, opacity, transform; transition-duration: 120ms; transition-timing-function: ease; }
+/* ── Modal enter/exit animations ──────────────────────────── */
+@keyframes modal-backdrop-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-backdrop-exit  { from { opacity: 1; } to { opacity: 0; } }
+@keyframes modal-panel-enter    { from { opacity: 0; transform: scale(0.96) translateY(6px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes modal-panel-exit     { from { opacity: 1; transform: scale(1) translateY(0); } to { opacity: 0; transform: scale(0.96) translateY(6px); } }
+.animate-modal-backdrop-enter { animation: modal-backdrop-enter 200ms ease-out both; }
+.animate-modal-backdrop-exit  { animation: modal-backdrop-exit  200ms ease-in both; }
+.animate-modal-panel-enter    { animation: modal-panel-enter    200ms ease-out both; }
+.animate-modal-panel-exit     { animation: modal-panel-exit     200ms ease-in both; }
+
+@keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.4} }
+.pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+/* ── Right-side drawer slide animations (notifications, etc.) ── */
+@keyframes drawer-in  { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes drawer-out { from { transform: translateX(0); } to { transform: translateX(100%); } }
+.animate-drawer-in  { animation: drawer-in  220ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.animate-drawer-out { animation: drawer-out 180ms ease-in both; }
+
+/* ── Login page animations ──────────────────────────────── */
+@keyframes login-logo-fade {
+  from { opacity: 0; transform: scale(0.97); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes login-fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+
+
+.dropdown-shadow { box-shadow: var(--shadow-dropdown); }
+.count-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; border-radius: 9999px; min-width: 1.25rem; height: 1.25rem; padding: 0 0.375rem; }
+.app-shell { display: flex; height: 100vh; overflow: hidden; background-color: var(--color-bg); }
+.app-shell__sidebar { height: 100vh; display: flex; flex-direction: column; flex-shrink: 0; z-index: 30; background-color: var(--color-sidebar-bg); border-right: 1px solid var(--color-sidebar-border); transition: width 500ms cubic-bezier(0.22,1,0.36,1); will-change: width; }
+.app-shell__content { display: flex; flex-direction: column; flex: 1; min-width: 0; max-width: 100%; overflow: hidden; }
+
+/* Transparent wrapper — TopBar owns its own layout entirely */
+.app-shell__topbar-wrapper { flex-shrink: 0; display: block; }
+
+.app-shell__main { flex: 1; display: flex; flex-direction: column; overflow: hidden auto; min-width: 0; max-width: 100%; padding: 1.25rem; }
+.app-shell__main.modal-open { overflow: hidden; }
+
+.kpi-grid-2 {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.kpi-grid-3 {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.kpi-grid-4 {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.kpi-grid-5 {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.kpi-grid-6 {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (min-width: 640px) {
+  .kpi-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .kpi-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .kpi-grid-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .kpi-grid-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (min-width: 1024px) {
+  .kpi-grid-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .kpi-grid-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+
+.table-scroll-wrapper {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+@media (max-width: 767px) {
+  .table-scroll-wrapper table {
+    min-width: 480px;
+  }
+}
+
+.kpi-grid-7 {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (min-width: 640px) {
+  .kpi-grid-7 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (min-width: 1024px) {
+  .kpi-grid-7 { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+}
+
+/* ── Tutorial spotlight pulse (used by the guided-walkthrough engine) ── */
+@keyframes tour-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}

@@ -1,0 +1,10 @@
+import {DEMO_COMPANY_ID,DEMO_SEED_ID} from './config.ts';
+export const DEMO_RESET_LEASE_COLLECTION='demo_operations';
+export const DEMO_RESET_LEASE_ID=`${DEMO_COMPANY_ID}-reset`;
+export const DEMO_RESET_LEASE_MS=15*60*1000;
+export type ResetLease={companyId:string;seedId:string;owner:string;status:'running'|'failed'|'complete';acquiredAt:string;expiresAt:string;updatedAt:string;error?:string};
+export interface ResetLeaseStore{runExclusive<T>(fn:(current:ResetLease|null)=>Promise<{result:T;next:ResetLease}>):Promise<T>}
+export function createLease(owner:string,now=new Date(),current:ResetLease|null=null):ResetLease{if(!owner.trim())throw new Error('Reset lease owner is required.');if(current?.status==='running'&&Date.parse(current.expiresAt)>now.getTime())throw new Error(`Demo reset is already running under lease ${current.owner}.`);return{companyId:DEMO_COMPANY_ID,seedId:DEMO_SEED_ID,owner,status:'running',acquiredAt:now.toISOString(),updatedAt:now.toISOString(),expiresAt:new Date(now.getTime()+DEMO_RESET_LEASE_MS).toISOString()}}
+export async function acquireResetLease(store:ResetLeaseStore,owner:string,now=new Date()){return store.runExclusive(async current=>{const next=createLease(owner,now,current);return{result:next,next}})}
+export async function finishResetLease(store:ResetLeaseStore,lease:ResetLease,status:'complete'|'failed',error?:string,now=new Date()){return store.runExclusive(async current=>{if(!current||current.owner!==lease.owner)throw new Error('Reset lease ownership was lost.');const next={...current,status,updatedAt:now.toISOString(),expiresAt:now.toISOString(),...(error?{error:error.slice(0,500)}:{})};return{result:next,next}})}
+export function firestoreResetLeaseStore(db:any):ResetLeaseStore{return{async runExclusive(fn){return db.runTransaction(async(tx:any)=>{const ref=db.collection(DEMO_RESET_LEASE_COLLECTION).doc(DEMO_RESET_LEASE_ID),snap=await tx.get(ref),current=snap.exists?snap.data() as ResetLease:null,{result,next}=await fn(current);tx.set(ref,next,{merge:false});return result})}}}

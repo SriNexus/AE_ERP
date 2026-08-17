@@ -1,0 +1,21 @@
+// THROWAWAY, LOCAL-EMULATOR-ONLY ruleset. Never used by production, never
+// referenced by firebase.json (the real config still points at the actual
+// firestore.rules). Exists solely so Phase 5.2 runtime validation can test
+// the Customer Workspace's OWN save/conflict/dirty-nav logic in isolation
+// from a separately-discovered, out-of-scope defect in the real
+// firestore.rules: its non-memoized hasUserProfile()/sameCompany() permission
+// helper chain, invoked redundantly (both by a specific match block AND the
+// generic catch-all, since `customers` is absent from isSpecialCollection())
+// on every single write, exhausts Firestore's real rules-evaluation
+// expression budget ("maximum of 1000 expressions") — confirmed via
+// firestore-debug.log, not a hypothesis. See
+// CUSTOMER_WORKSPACE_FINAL_PRODUCTION_CERTIFICATION.md for the full writeup;
+// this file only unblocks local runtime testing, it does not fix anything.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}

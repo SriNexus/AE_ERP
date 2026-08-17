@@ -1,0 +1,30 @@
+name: Guarded Demo Reset
+on:
+  schedule:
+    - cron: '30 20 * * *'
+  workflow_dispatch: {}
+concurrency:
+  group: neozy-public-demo-reset
+  cancel-in-progress: false
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEMO_FIREBASE_PROJECT_ID: ${{ vars.DEMO_FIREBASE_PROJECT_ID }}
+      DEMO_ALLOWED_FIREBASE_PROJECTS: ${{ vars.DEMO_ALLOWED_FIREBASE_PROJECTS }}
+      DEMO_RESET_SCHEDULE_ENABLED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.DEMO_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEMO_GCP_SERVICE_ACCOUNT }}
+      - run: npm ci
+      - run: npm run demo:seed
+      - run: npm run demo:reset -- --apply --confirm=RESET-company-demo-neozy

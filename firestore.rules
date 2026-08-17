@@ -1,0 +1,937 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwnerIdentity() {
+      return signedIn()
+        && request.auth.token.email is string
+        && request.auth.token.email == 'shreeniwas.tripathi0@gmail.com';
+    }
+
+    function authMapPath() {
+      return /databases/$(database)/documents/user_auth_maps/$(request.auth.uid);
+    }
+
+    function hasAuthMap() {
+      return signedIn() && exists(authMapPath());
+    }
+
+    function currentUserId() {
+      return isOwnerIdentity() ? 'owner:' + request.auth.uid : (hasUserProfile() ? get(authMapPath()).data.userId : '');
+    }
+
+    // LEAN currentUser(): reads the actor's ERP users doc via the mapping's
+    // userId (users/{map.userId}) — the SAME doc the login resolver selected
+    // (authIdentity.resolveAuthenticatedErpUser). For uid-keyed users the map
+    // userId == auth.uid (identical doc); for master-identity users it is the
+    // users/MUSR-{companyId}-{phone} doc. The mapping is self-owned and
+    // validated at write time (validOwnMapping) and at read time
+    // (hasValidAuthMap verifies the target exists with the token email + map
+    // companyId), so the mapped doc is the canonical identity, never a guess.
+    // Single get() (engine-cached across clauses) keeps the rule under the
+    // 1000-expression budget; the pre-flattening indirection multiplied the
+    // budget ~6-8x in rules that call currentUser() several times
+    // (isAdmin -> isSuperAdmin -> currentUser, roleMatches x4) and silently
+    // denied legitimate updates/reads (live-bisect F4/G2/J2/K3).
+    function currentUser() {
+      return get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data;
+    }
+
+    // LEAN identity core. The Rules engine counts every sub-expression toward
+    // the 1000-expression per-request budget, and repeated helper invocation
+    // (isAdmin -> isSuperAdmin -> hasUserProfile -> ...) multiplies the cost.
+    // Two principles keep every rule under budget:
+    //   1. The mapping doc (user_auth_maps/{authUid}) is validated AT WRITE
+    //      TIME by validOwnMapping (keys whitelist, email matches the token,
+    //      and the referenced users doc exists with matching email+companyId),
+    //      and users docs can never be deleted (allow delete: if false) nor
+    //      have companyId changed by Admins — so reads only need to re-anchor
+    //      the mapping's userId/companyId/email to the signed-in token.
+    //   2. Company identity is read from the MAPPING (cheap, cached) instead
+    //      of re-walking the users doc via currentUser() (extra get).
+    // The actor's ERP identity is the MAPPING's userId. For master-identity
+    // users (users/MUSR-{companyId}-{phone} — the canonical production shape
+    // for real accounts) that id legitimately differs from the Firebase Auth
+    // UID, so the old `userId == request.auth.uid` anchor denied EVERY
+    // company-scoped rule for real users (live-bisect: Admin settings + user
+    // aggregation 403 storm with a fully-correct tenant context; the 82/82
+    // battery passed only because its UAT users were uid-keyed). The binding
+    // that matters is EMAIL + tenant: the mapping (self-owned —
+    // user_auth_maps/{authUid} can only be written by that UID, validated by
+    // validOwnMapping, which requires the mapped users doc to EXIST with the
+    // token email + map companyId) must carry the verified token email.
+    // NOTE: the mapped users doc is intentionally NOT re-verified at read
+    // time — the email/company coherence is enforced at the WRITE boundary
+    // (validOwnMapping) and the login resolver; re-reading it here pushed
+    // roleMatches/canReadProjectScoped past the 1000-expression budget
+    // (live-bisect F4/G2/J2/K3 403 on legitimate requests, 78/82 battery).
+    function hasValidAuthMap() {
+      return signedIn()
+        && hasAuthMap()
+        && get(authMapPath()).data.userId is string
+        && get(authMapPath()).data.companyId is string
+        && get(authMapPath()).data.email == request.auth.token.email;
+    }
+
+    function hasUserProfile() {
+      return hasValidAuthMap();
+    }
+
+    function isSuperAdmin() {
+      return isOwnerIdentity() || (hasUserProfile() && currentUser().isSuperAdmin == true);
+    }
+
+    function isAdmin() {
+      return isOwnerIdentity() || isSuperAdmin() || (hasUserProfile() && currentUser().role == 'Admin');
+    }
+
+    function roleMatches(pattern) {
+      return hasUserProfile() && currentUser().role.matches(pattern);
+    }
+
+    // GAP-01 remediation (independent Vendor Lock audit, 2026-08-14): the
+    // Channel Partner spec (§7/§45, LOCKED) treats `TL` as behaviorally
+    // equivalent to `Manager` for the Channel Partner / Registration domain;
+    // permissions.ts already aliases `tl -> Manager` at the JS canDo() layer,
+    // but that alias never reached the rules text, so a literal `role: 'TL'`
+    // failed every roleMatches('Manager') check in the scheme_registrations
+    // block below. Scoped deliberately to that block only — do not reuse for
+    // unrelated roleMatches('Manager') checks elsewhere in this file without
+    // separately auditing them (out of Vendor Lock scope).
+    function isSchemeRegManagerRole() {
+      return roleMatches('Manager') || roleMatches('TL');
+    }
+
+    function userCompanyId() {
+      return hasUserProfile() ? get(authMapPath()).data.companyId : '';
+    }
+
+    function hasCompanyId(data) {
+      return data.companyId is string && data.companyId.size() > 0;
+    }
+
+    // Cheap-first ordering: the same-company branch short-circuits before
+    // the (heavier) super-admin check for the common in-tenant case.
+    function sameCompany(data) {
+      return isOwnerIdentity()
+        || (hasCompanyId(data) && data.companyId == userCompanyId())
+        || isSuperAdmin();
+    }
+
+    function companyIdUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['companyId']);
+    }
+
+    function selfAccessFieldsUnchanged() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'displayName', 'email', 'phone', 'avatarUrl', 'signatureUrl', 'updatedAt', 'updatedBy']);
+    }
+
+    // ── Data-driven section model (manager-department coherence) ────────────
+    // A user's department is the department of their role; users docs carry a
+    // denormalized department + isManager (recomputed by the canonical user
+    // hook at every write). A reporting manager must be the report's own
+    // manager, a super-admin, or a manager-role holder in the same company,
+    // the same department / the cross-section 'Management' layer. This blocks
+    // invalid combinations server-side (e.g. Sales Executive reporting to a
+    // Warehouse Manager, or a cross-company manager reference). The get() on
+    // the manager doc is engine-cached across the clauses, keeping the rule
+    // well under the expression budget (verified live).
+    //
+    // CRITICAL (live-bisect, E1/E3/N2 403): Firestore rules FAIL CLOSED on
+    // reading a missing map field — `data.managerId is string` does NOT return
+    // false for a payload without the field, it denies the whole request. ALL
+    // optional-field reads MUST gate on data.keys().hasAny([...]) first so a
+    // missing field yields false (clause skipped) instead of a hard denial.
+    function hasManagerId(data) {
+      return data.keys().hasAny(['managerId']) && data.managerId is string && data.managerId.size() > 0;
+    }
+
+    function hasOrgField(data, field) {
+      return data.keys().hasAny([field]);
+    }
+
+    // NOTE: deliberately does NOT call isSuperAdmin() (the actor chain) — an
+    // actor-term here re-evaluated the identity chain and misattributed the
+    // missing-field denial above to the expression budget. The manager's OWN
+    // super-admin status is checked on the manager doc instead, and the actor's
+    // authority is already established by the enclosing isAdmin()/sameCompany()
+    // terms, so no exemption term is needed.
+    function managerScopeMatches() {
+      return !hasManagerId(request.resource.data)
+        || (
+          hasOrgField(get(/databases/$(database)/documents/users/$(request.resource.data.managerId)).data, 'isSuperAdmin')
+          && get(/databases/$(database)/documents/users/$(request.resource.data.managerId)).data.isSuperAdmin == true
+        )
+        || (
+          hasOrgField(get(/databases/$(database)/documents/users/$(request.resource.data.managerId)).data, 'isManager')
+          && get(/databases/$(database)/documents/users/$(request.resource.data.managerId)).data.isManager == true
+          && hasOrgField(get(/databases/$(database)/documents/users/$(request.resource.data.managerId)).data, 'department')
+          && hasOrgField(get(/databases/$(database)/documents/users/$(request.resource.data.managerId)).data, 'companyId')
+          && get(/databases/$(database)/documents/users/$(request.resource.data.managerId)).data.companyId == request.resource.data.companyId
+          && (
+            (hasOrgField(request.resource.data, 'department')
+              && get(/databases/$(database)/documents/users/$(request.resource.data.managerId)).data.department == request.resource.data.department)
+            || get(/databases/$(database)/documents/users/$(request.resource.data.managerId)).data.department == 'Management'
+          )
+        );
+    }
+
+    // An update that does NOT change the manager assignment or the department
+    // skips the manager-coherence check — so editing unrelated fields (name,
+    // status, phone) of a legacy user with a stale/invalid manager reference
+    // remains possible instead of hard-locking user management. Any change to
+    // managerId OR department re-validates the resulting state.
+    function managerAssignmentUnchanged() {
+      return hasOrgField(request.resource.data, 'managerId') == hasOrgField(resource.data, 'managerId')
+        && (!hasOrgField(request.resource.data, 'managerId') || request.resource.data.managerId == resource.data.managerId)
+        && hasOrgField(request.resource.data, 'department') == hasOrgField(resource.data, 'department')
+        && (!hasOrgField(request.resource.data, 'department') || request.resource.data.department == resource.data.department);
+    }
+
+    // Phase 1 (Channel Partner identity): `users.channelPartnerId` may only be
+    // ESTABLISHED once (absent → value, the controlled `linkPartnerUser` dual
+    // write). Once present it is immutable — a plain client update cannot
+    // re-point or clear the link. Mirrors the hasManagerId() idiom: reads of
+    // an optional field MUST gate on keys().hasAny() first, or a missing
+    // field becomes a hard rules denial instead of a skipped clause.
+    function channelPartnerLinkUnchanged() {
+      return !resource.data.keys().hasAny(['channelPartnerId'])
+        || (request.resource.data.keys().hasAny(['channelPartnerId'])
+            && request.resource.data.channelPartnerId == resource.data.channelPartnerId);
+    }
+
+    // Phase 1 (Channel Partner identity): canonical partner self-read — the
+    // partner's own record resolves through the user-side denormalized link
+    // users/{uid}.channelPartnerId == {partnerId} (set by linkPartnerUser), in
+    // addition to the partner-side legacy `userId` field. get() is engine-
+    // cached; this branch only evaluates for role 'Partner' actors.
+    function partnerLinkedToSelf(partnerId) {
+      return hasUserProfile()
+        && get(/databases/$(database)/documents/users/$(currentUserId())).data.keys().hasAny(['channelPartnerId'])
+        && get(/databases/$(database)/documents/users/$(currentUserId())).data.channelPartnerId == partnerId;
+    }
+
+    // Phase 1 (Channel Partner identity): partner-side mirror of
+    // channelPartnerLinkUnchanged — `channel_partners.userId` is the OTHER half
+    // of the controlled linkPartnerUser dual-write (users.channelPartnerId
+    // <-> channel_partners.userId). Once a REAL userId is present it is
+    // immutable, so a direct same-company update cannot desync the pair by
+    // clearing/re-pointing the partner side. Absent OR empty-string means "not
+    // linked" (matches the hasManagerId idiom; the demo seed uses '' for the
+    // unlinked partner), so the FIRST controlled link is still allowed.
+    function partnerUserIdUnchanged() {
+      return !resource.data.keys().hasAny(['userId'])
+        || resource.data.userId == ''
+        || (request.resource.data.keys().hasAny(['userId'])
+            && request.resource.data.userId == resource.data.userId);
+    }
+
+    function canCreateCompanyScoped() {
+      return signedIn() && sameCompany(request.resource.data);
+    }
+
+    function canReadCompanyScoped() {
+      return signedIn() && sameCompany(resource.data);
+    }
+
+    function canUpdateCompanyScoped() {
+      return signedIn() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged();
+    }
+
+    function isPartner() {
+      return hasUserProfile() && currentUser().role == 'Partner';
+    }
+
+    function isProjectScopedRole() {
+      return hasUserProfile() && currentUser().role in ['Surveyor', 'Engineer', 'InstallationLead', 'ServiceTechnician', 'ComplianceOfficer'];
+    }
+
+    function canReadProjectScoped(data) {
+      return sameCompany(data)
+        && (
+          isAdmin()
+          || currentUser().role == 'Director'
+          || !isProjectScopedRole()
+          || data.assignedSurveyor == currentUserId()
+          || data.assignedInstaller == currentUserId()
+          || data.salesOwner == currentUserId()
+          || data.designerId == currentUserId()
+        );
+    }
+
+    // ── Phase 6 (Channel Partner — Vendor Lock / Scheme Registration) ──────
+    // Team scope: a channel_partners doc's managerId is the TL/Manager's ERP
+    // user id (assignPartnerManager). Manager access to a partner's records
+    // requires being THAT partner's manager — never a broad Manager role
+    // match — so Manager A cannot reach Manager B's agents. Identity reads
+    // reuse the Phase 1 canonical helpers (partnerLinkedToSelf /
+    // currentUserId); every get() is engine-cached and each clause
+    // short-circuits, keeping the rules well under the expression budget.
+    function schemeRegManagerOfPartner(partnerId) {
+      return partnerId is string && partnerId.size() > 0
+        && exists(/databases/$(database)/documents/channel_partners/$(partnerId))
+        && hasOrgField(get(/databases/$(database)/documents/channel_partners/$(partnerId)).data, 'managerId')
+        && get(/databases/$(database)/documents/channel_partners/$(partnerId)).data.managerId == currentUserId();
+    }
+
+    // Read scope (spec §19): partner self via users.channelPartnerId, TL/
+    // Manager team via channel_partners.managerId, Director (view-only
+    // executive visibility), Admin. Cross-company denied by sameCompany();
+    // Accounts gets nothing.
+    function schemeRegCanRead(data) {
+      return sameCompany(data)
+        && (
+          isAdmin()
+          || roleMatches('Director')
+          || (isSchemeRegManagerRole() && schemeRegManagerOfPartner(data.partnerId))
+          || (isPartner() && partnerLinkedToSelf(data.partnerId))
+        );
+    }
+
+    // Partner create (§9.3): the partnerId being written must be the
+    // authenticated partner's OWN id AND must equal the referenced project's
+    // partnerId — a partner can never stamp a foreign partnerId or attach
+    // another partner's project.
+    function schemeRegPartnerOwnsProject(data) {
+      return isPartner()
+        && partnerLinkedToSelf(data.partnerId)
+        && data.projectId is string && data.projectId.size() > 0
+        && exists(/databases/$(database)/documents/projects/$(data.projectId))
+        && hasOrgField(get(/databases/$(database)/documents/projects/$(data.projectId)).data, 'partnerId')
+        && get(/databases/$(database)/documents/projects/$(data.projectId)).data.partnerId == data.partnerId;
+    }
+
+    // Manager create: the project's owning partner must report to the acting
+    // Manager (team scope — never a foreign partner's project).
+    function schemeRegManagerOwnsProject(data) {
+      return isSchemeRegManagerRole()
+        && data.projectId is string && data.projectId.size() > 0
+        && exists(/databases/$(database)/documents/projects/$(data.projectId))
+        && hasOrgField(get(/databases/$(database)/documents/projects/$(data.projectId)).data, 'partnerId')
+        && schemeRegManagerOfPartner(get(/databases/$(database)/documents/projects/$(data.projectId)).data.partnerId);
+    }
+
+    // Identity immutability on update: a registration can never be re-pointed
+    // at a different project, partner or company — ownership comes from the
+    // canonical chain, never a late edit.
+    function schemeRegIdentityUnchanged() {
+      return request.resource.data.partnerId == resource.data.partnerId
+        && request.resource.data.projectId == resource.data.projectId
+        && request.resource.data.companyId == resource.data.companyId;
+    }
+
+    function isSpecialCollection(collectionId) {
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations'];
+    }
+
+    match /companies/{companyId} {
+      // Settings -> Companies root-cause fix: the app deliberately treats
+      // `companies` as a GLOBAL, unscoped collection (see companyScopedQuery()
+      // and OWNERSHIP_EXEMPT_COLLECTIONS in lib/firestore.ts — both return/list
+      // it with NO companyId filter, by design, so an Admin can manage every
+      // legal-entity/branch company record, not just one). getAll() therefore
+      // issues a collection-wide query with no `where` clause at all.
+      // Firestore can only allow a listed/queried read when the rule is
+      // PROVABLY true for any possible matched document from the query's own
+      // shape — the old fallback branch below compares against the requested
+      // document's OWN id (== userCompanyId()), which a query with no id/path
+      // constraint can never satisfy for anyone but isOwnerIdentity()/
+      // isSuperAdmin() (the only branches that don't depend on the matched
+      // document at all). Every non-owner Admin got PERMISSION_DENIED on the
+      // whole list, not just their own record — the "Failed to load data"
+      // root cause. isAdmin()/Director are added as the same kind of
+      // document-independent, statically-provable predicate, matching the
+      // trust level the create/update rules below already grant isAdmin()
+      // for full company management. roleBootstrap.ts's Director role is
+      // explicitly documented as read-only executive visibility across core
+      // modules including `companies: { view: true }`.
+      allow read: if isAdmin() || roleMatches('Director') || (hasUserProfile() && companyId == userCompanyId());
+      allow create: if isAdmin() && hasCompanyId(request.resource.data) && request.resource.data.id == companyId && sameCompany(request.resource.data);
+      // Round-robin assignment exception (RBAC create-permission root cause,
+      // part 2, found via live browser verification): creating a Lead with
+      // no explicit assignee triggers getNextAssignee()'s round-robin logic,
+      // which persists its rotation pointer via a single-field update to the
+      // company doc (roundRobinPointer) — an internal operational counter
+      // with no security/branding/business-config meaning. Requiring
+      // isAdmin() for this ONE field meant no non-admin role could ever
+      // create an unassigned lead (or any flow relying on auto-assignment),
+      // even with leads:create granted. The exception is scoped tightly: it
+      // permits touching ONLY roundRobinPointer (plus the standard
+      // updatedBy/updatedAt audit fields every write already carries) —
+      // company name, branding, business mode, and everything else remain
+      // admin-only, exactly as before.
+      allow update: if (isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged()
+          && resource.data.id == companyId && request.resource.data.id == companyId)
+        || (signedIn() && hasUserProfile() && companyId == userCompanyId()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['roundRobinPointer', 'updatedBy', 'updatedAt']));
+      allow delete: if false;
+    }
+
+    // A role is a system role only when it EXPLICITLY carries isSystem==true.
+    // roles docs created before the data-driven model may lack the field — and
+    // Firestore rules FAIL CLOSED on reading a missing map field (the same
+    // live-bisected class as hasManagerId), so the check MUST gate field access
+    // on keys().hasAny(['isSystem']) first. A missing/absent field means the
+    // role is custom/manageable by company Admins.
+    function roleNotSystemProtected(data) {
+      return !data.keys().hasAny(['isSystem']) || data.isSystem != true;
+    }
+
+    match /roles/{roleId} {
+      allow read: if signedIn();
+      // System roles (isSystem=true) are protected: company Admins may manage
+      // custom roles, only Super Admins may create/modify system roles. Both
+      // the existing doc (update) and the requested doc (create/update) are
+      // checked so an Admin cannot promote a custom role to a system role via
+      // an update that adds isSystem=true.
+      allow create: if isAdmin() && (roleNotSystemProtected(request.resource.data) || isSuperAdmin());
+      allow update: if isAdmin() && (roleNotSystemProtected(resource.data) || isSuperAdmin())
+        && (roleNotSystemProtected(request.resource.data) || isSuperAdmin());
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      // A signed-in user with no mapping may only query/read the profile whose
+      // email exactly matches the verified Firebase Authentication email.
+      // resource == null must be checked first: a get() on a not-yet-created
+      // users/{id} doc (e.g. createOrResolveUserByPhone's existence probe
+      // during Admin "Add User") otherwise dereferences resource.data on a
+      // null resource, which Firestore's rule engine treats as an evaluation
+      // error and denies with PERMISSION_DENIED instead of a clean "not
+      // found" — indistinguishable from a real 403 client-side, and fatal to
+      // the create-user flow (Admin create-user runtime-failure root cause,
+      // found via live browser verification). Mirrors the same guard already
+      // used by the settings collection's get rule for the identical reason.
+      allow read: if signedIn()
+        && (resource == null
+          || request.auth.token.email == resource.data.email
+          || isOwnerIdentity()
+          || (hasUserProfile() && sameCompany(resource.data))
+          || isSuperAdmin());
+      // Contact-identity exception (RBAC create-permission root cause, found
+      // via live browser verification): creating a Lead/Customer/Employee
+      // (any role with the corresponding module's `create` permission, not
+      // just Admin) internally writes a phone-keyed master-identity contact
+      // record here via createOrResolveUserByPhone/resolveOrCreateMasterUser
+      // — this is NOT a real ERP staff account, it carries one of the fixed
+      // non-staff role markers below (never a real RBAC role name, and never
+      // for the Admin "Add User" flow, whose payload always carries the
+      // actual selected RBAC role instead of falling back to this marker).
+      // Without this exception EVERY non-Admin role was silently unable to
+      // create a lead/customer/employee whose phone number didn't already
+      // have an identity record — the normal case for a brand-new lead —
+      // even with the module's `create` permission explicitly granted.
+      // isSuperAdmin/manager/owner-email guards below still apply unchanged.
+      function isContactIdentityRole(data) {
+        return data.role in ['Lead', 'Customer', 'Employee', 'Driver', 'Vendor', 'InstallationPartner', 'FieldAgent'];
+      }
+      allow create: if (isAdmin() || (signedIn() && isContactIdentityRole(request.resource.data)))
+        && hasCompanyId(request.resource.data) && sameCompany(request.resource.data)
+        // Existence-guarded: dereferencing a field absent from the document
+        // is a rules evaluation ERROR in Firestore (denied, indistinguishable
+        // from a real 403), not a graceful `undefined`/false. Lead/Customer/
+        // Employee creation payloads never carry an isSuperAdmin field at all
+        // (only the Admin "Add User" form does) — this second, independent
+        // gap meant even an Admin's own lead creation would have been denied
+        // by this exact line once the isAdmin()-only restriction above was
+        // relaxed. Mirrors the existing hasManagerId()/hasOrgField() idiom
+        // already used elsewhere in this file for the same reason.
+        && (!request.resource.data.keys().hasAny(['isSuperAdmin']) || request.resource.data.isSuperAdmin != true || isSuperAdmin())
+        && managerScopeMatches()
+        && request.resource.data.email != 'shreeniwas.tripathi0@gmail.com';
+      // FLATTENED update rule. Live-bisect evidence: the previous deep helper
+      // nesting (isSelf -> hasValidAuthMap -> currentUserId -> currentUser x3,
+      // plus userCompanyId x2) exceeded the 1000-expression evaluation budget
+      // and denied legitimate admin role/status updates with a silent 403.
+      // This form inlines the mapping-anchored paths directly (each get() is
+      // cached by the engine), short-circuits the self-update branch first,
+      // and re-uses the SAME mapping read for tenant + identity anchoring, so
+      // the whole rule stays far under budget.
+      //
+      // Owner statement is SEPARATE and FIRST: the owner literal must never
+      // depend on a user_auth_maps doc existing (the mapping is lazy-created
+      // at first login and could be missing/purged), so the owner bypasses
+      // the anchor entirely. companyId stays immutable and the owner's own
+      // record stays protected (same global clauses as the non-owner rule).
+      allow update: if isOwnerIdentity()
+        // companyId immutable on update
+        && request.resource.data.companyId == resource.data.companyId
+        // Phase 1: channelPartnerId immutable once established.
+        && channelPartnerLinkUnchanged()
+        // Owner-record protection (existing doc email).
+        && resource.data.email != 'shreeniwas.tripathi0@gmail.com';
+      // Non-owner update rule — flattened, mapping-anchored.
+      // Anchor: the actor must have a self-owned auth map whose userId points
+      // at their ERP identity doc (master-identity MUSR-* ids are valid) and
+      // whose email == verified token email.
+      // A) self-update: own profile fields only (selfAccessFieldsUnchanged).
+      // B) admin/super-admin: actor doc role must be Admin; super-admin may
+      //    grant/revoke isSuperAdmin cross-company, company admin may manage
+      //    same-company users without changing isSuperAdmin or companyId.
+      allow update: if signedIn()
+        && exists(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid))
+        && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId is string
+        && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.email == request.auth.token.email
+        && (
+          (get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId == userId && selfAccessFieldsUnchanged())
+          || (
+            get(/databases/$(database)/documents/users/$(get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId)).data.role == 'Admin'
+            && (
+              get(/databases/$(database)/documents/users/$(get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId)).data.isSuperAdmin == true
+              || (
+                get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.companyId == resource.data.companyId
+                && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.companyId == request.resource.data.companyId
+                && (request.resource.data.isSuperAdmin == true) == (resource.data.isSuperAdmin == true)
+              )
+            )
+          )
+        )
+        // companyId immutable on update
+        && request.resource.data.companyId == resource.data.companyId
+        // Phase 1: channelPartnerId immutable once established.
+        && channelPartnerLinkUnchanged()
+        // Manager-department coherence (data-driven section model).
+        // Skipped when the assignment is unchanged (legacy-edit escape hatch);
+        // enforced whenever managerId/department actually change.
+        && (managerAssignmentUnchanged() || managerScopeMatches())
+        // Owner-record protection (existing doc email).
+        && resource.data.email != 'shreeniwas.tripathi0@gmail.com';
+      allow delete: if false;
+    }
+
+    match /user_auth_maps/{authUid} {
+      function validOwnMapping(data) {
+        return signedIn()
+          && authUid == request.auth.uid
+          && data.keys().hasOnly(['authUid', 'userId', 'companyId', 'email', 'createdAt', 'updatedAt'])
+          && data.authUid == request.auth.uid
+          && data.userId is string
+          && data.companyId is string
+          && data.email is string
+          && request.auth.token.email is string
+          && data.email == request.auth.token.email
+          && exists(/databases/$(database)/documents/users/$(data.userId))
+          && getAfter(/databases/$(database)/documents/users/$(data.userId)).data.email == request.auth.token.email
+          && getAfter(/databases/$(database)/documents/users/$(data.userId)).data.companyId == data.companyId;
+      }
+      allow get: if signedIn() && authUid == request.auth.uid;
+      allow list: if false;
+      allow create: if validOwnMapping(request.resource.data);
+      allow update: if validOwnMapping(request.resource.data)
+        && request.resource.data.authUid == resource.data.authUid
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.companyId == resource.data.companyId;
+      allow delete: if false;
+    }
+
+    match /dispatch/{dispatchId} {
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped() && request.resource.data.createdBy == currentUserId();
+      allow update: if canUpdateCompanyScoped()
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['deliveryOTPHash'])
+        && (
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['deliveryConfirmed', 'closedAt', 'closedBy'])
+          || isAdmin()
+          || roleMatches('.*Account.*')
+          || roleMatches('.*Sales.*')
+          || roleMatches('.*Dispatch.*')
+          || roleMatches('.*Warehouse.*')
+        );
+      allow delete: if false;
+    }
+
+    match /stock/{stockId} {
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped()
+        && (
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['availableQty', 'reservedQty'])
+          || isAdmin()
+          || roleMatches('.*Warehouse.*')
+          || roleMatches('.*Operations.*')
+        );
+      allow delete: if false;
+    }
+
+    match /stock_ledger/{ledgerId} {
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped()
+        && request.resource.data.transactionId is string
+        && request.resource.data.movementAt != null;
+      allow update, delete: if false;
+    }
+
+    match /notifications/{notificationId} {
+      function canSeeNotification(data) {
+        return sameCompany(data)
+          && (
+            data.recipientUserId == currentUserId()
+            || data.createdBy == currentUserId()
+            || (data.visibleTo is list && currentUserId() in data.visibleTo)
+            || isAdmin()
+          );
+      }
+      allow read: if signedIn()
+        && canSeeNotification(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if signedIn()
+        && canSeeNotification(resource.data)
+        && sameCompany(request.resource.data)
+        && companyIdUnchanged()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt', 'updatedAt', 'isDeleted', 'deletedAt', 'deletedBy']);
+      allow delete: if false;
+    }
+
+    match /tasks/{taskId} {
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    match /customer_phone_locks/{lockId} {
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped()
+        && request.resource.data.id == lockId
+        && request.resource.data.phone is string
+        && request.resource.data.customerId is string;
+      allow update: if canUpdateCompanyScoped()
+        && resource.data.id == lockId
+        && request.resource.data.id == lockId
+        && request.resource.data.phone == resource.data.phone
+        && request.resource.data.customerId == resource.data.customerId;
+      allow delete: if false;
+    }
+
+    match /error_logs/{logId} {
+      allow read: if isAdmin() && canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped();
+      allow update, delete: if false;
+    }
+
+    match /channel_partners/{partnerId} {
+      // Phase 1: partner self-read resolves through the canonical identity
+      // relationship (users.channelPartnerId → channel_partners/{id}) in
+      // addition to the legacy partner-side userId field. Company-scoped
+      // admin/management access (existing architecture) is unchanged.
+      allow read: if canReadCompanyScoped()
+        || (isPartner() && (resource.data.userId == currentUserId() || partnerLinkedToSelf(partnerId)));
+      allow create: if canCreateCompanyScoped();
+      // Phase 1: the partner-side userId link is immutable once established
+      // (only linkPartnerUser may set it — absent/'' -> value is the first
+      // controlled link; a real value can never change via a direct write).
+      allow update: if canUpdateCompanyScoped() && partnerUserIdUnchanged();
+      allow delete: if false;
+    }
+
+    // ── Phase 6 — explicit match for scheme_registrations (Vendor Lock /
+    // Scheme Registration). Overrides the generic catch-all (the collection
+    // is in isSpecialCollection, so the wildcard denies it) and enforces the
+    // partner/team/Director/Admin scope + write restrictions at rules level
+    // — never frontend-only security. Director is VIEW-ONLY (spec §18): no
+    // write branch mentions it. Accounts gets no access. Cross-company is
+    // denied by sameCompany() everywhere. Vendor Lock irreversibility is a
+    // service-machine contract (statuses), not enumerable in rules.
+    match /scheme_registrations/{id} {
+      allow read: if signedIn() && schemeRegCanRead(resource.data);
+      allow create: if signedIn() && sameCompany(request.resource.data)
+        && (isAdmin() || schemeRegPartnerOwnsProject(request.resource.data) || schemeRegManagerOwnsProject(request.resource.data));
+      // Partner self-edit: own record only, pre-completion states only
+      // (Draft/Submitted/Rejected/Failed sources) with partner-side targets
+      // (Draft/Submitted/Cancelled), identity fields immutable. Staff
+      // (Manager team / Admin) may manage team records — the service
+      // enforces the exact status machine + approval permission.
+      allow update: if signedIn() && sameCompany(request.resource.data) && companyIdUnchanged()
+        && schemeRegIdentityUnchanged()
+        && (
+          (isAdmin() || (isSchemeRegManagerRole() && schemeRegManagerOfPartner(resource.data.partnerId)))
+          || (
+            isPartner() && partnerLinkedToSelf(resource.data.partnerId)
+            && resource.data.status in ['Draft', 'Submitted', 'Rejected', 'Failed']
+            && request.resource.data.status in ['Draft', 'Submitted', 'Cancelled']
+          )
+        );
+      // Protected records: hard delete is Admin-only (the audited override
+      // path); everyone else must use the workflow's terminal transitions.
+      allow delete: if isAdmin() && sameCompany(resource.data);
+    }
+
+    match /partner_wallet_transactions/{txnId} {
+      // Company-scoped access for admin/finance/manager.
+      // Partner-specific read filtering happens at the application layer (hooks).
+      // In Phase 5 (wallet implementation), introduce a get() resolver to
+      // cross-reference partnerId -> channel_partners/{partnerId}.userId == currentUserId()
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped();
+      allow update: if isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged();
+
+      allow delete: if false;
+    }
+
+    match /commission_rules/{ruleId} {
+      allow read: if signedIn();
+      allow create: if isAdmin() && sameCompany(request.resource.data);
+      allow update: if isAdmin() && sameCompany(resource.data) && companyIdUnchanged();
+      allow delete: if false;
+    }
+
+    match /tax_invoices/{invoiceId} {
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped() && request.resource.data.status == 'Draft';
+      allow update: if canUpdateCompanyScoped()
+        && (
+          (resource.data.status == 'Draft' && request.resource.data.status in ['Draft', 'Issued', 'Cancelled'])
+          || (resource.data.status == 'Issued' && request.resource.data.status == 'Cancelled')
+        );
+      allow delete: if false;
+    }
+
+    match /document_counters/{counterId} {
+      function validCounterPayload() {
+        return signedIn()
+          && request.resource.data.keys().hasOnly(['id', 'companyId', 'docType', 'currentNumber', 'prefix', 'sequencePadding', 'createdAt', 'updatedAt', 'isDeleted'])
+          && request.resource.data.id == counterId
+          && request.resource.data.companyId is string
+          && request.resource.data.docType in ['invoice', 'quotation', 'order']
+          && request.resource.data.currentNumber is number
+          && request.resource.data.currentNumber >= 1
+          && request.resource.data.prefix is string
+          && request.resource.data.sequencePadding is number
+          && sameCompany(request.resource.data);
+      }
+
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped()
+        && validCounterPayload()
+        && request.resource.data.currentNumber == 1;
+      allow update: if canCreateCompanyScoped()
+        && validCounterPayload()
+        && resource.data.companyId == request.resource.data.companyId
+        && resource.data.docType == request.resource.data.docType
+        && resource.data.id == request.resource.data.id
+        && request.resource.data.currentNumber == resource.data.currentNumber + 1;
+      allow delete: if false;
+    }
+
+    match /projects/{projectId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped() && request.resource.data.projectId == projectId;
+      allow update: if canUpdateCompanyScoped()
+        && request.resource.data.projectId == resource.data.projectId;
+      allow delete: if false;
+    }
+
+    match /surveys/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped()
+        && request.resource.data.surveyId == documentId
+        && request.resource.data.projectId is string
+        && request.resource.data.assignedSurveyor == request.resource.data.surveyorId;
+      allow update: if canUpdateCompanyScoped()
+        && request.resource.data.surveyId == resource.data.surveyId
+        && request.resource.data.projectId == resource.data.projectId;
+      allow delete: if false;
+    }
+
+    match /engineering_designs/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped()
+        && request.resource.data.designId == documentId
+        && request.resource.data.projectId is string
+        && request.resource.data.surveyId is string
+        && request.resource.data.designerId is string;
+      allow update: if canUpdateCompanyScoped()
+        && request.resource.data.designId == resource.data.designId
+        && request.resource.data.projectId == resource.data.projectId
+        && request.resource.data.surveyId == resource.data.surveyId;
+      allow delete: if false;
+    }
+
+    match /purchase_orders/{documentId} {
+      function validPurchaseOrderTransition(from, to) {
+        return (from == 'Draft' && to in ['Sent', 'Cancelled'])
+          || (from == 'Sent' && to in ['PartiallyReceived', 'Received', 'Cancelled'])
+          || (from == 'PartiallyReceived' && to in ['Received', 'Cancelled']);
+      }
+
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped()
+        && request.resource.data.purchaseOrderId == documentId
+        && request.resource.data.vendorId is string
+        && request.resource.data.status == 'Draft'
+        && request.resource.data.items is list;
+      allow update: if canUpdateCompanyScoped()
+        && request.resource.data.purchaseOrderId == resource.data.purchaseOrderId
+        && request.resource.data.vendorId is string
+        && request.resource.data.items is list
+        && (
+          (resource.data.status == 'Draft' && request.resource.data.status == 'Draft')
+          || validPurchaseOrderTransition(resource.data.status, request.resource.data.status)
+        );
+      allow delete: if false;
+    }
+
+    match /goods_receipts/{documentId} {
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped()
+        && request.resource.data.goodsReceiptId == documentId
+        && request.resource.data.purchaseOrderId is string
+        && request.resource.data.warehouseId is string
+        && request.resource.data.receivedBy == currentUserId()
+        && request.resource.data.receivedItems is list
+        && request.resource.data.receivedItems.size() > 0
+        && request.resource.data.stockEntries is list;
+      allow update, delete: if false;
+    }
+
+    match /installations/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    // Phase 13 (Blueprint §13): permanent delete is Super-Admin-only,
+    // everywhere else `allow delete: if false` (soft delete via `isDeleted`
+    // is the only normal-user path). product_categories is the one
+    // collection with a real client-side hard-delete affordance (category
+    // "Delete"/"Merge" — src/pages/CategoriesWorkspace.tsx), so it is the
+    // one collection that needs a real, narrowly-scoped delete allowance
+    // rather than the universal `if false` — reusing isSuperAdmin(), not a
+    // new authorization mechanism.
+    match /product_categories/{documentId} {
+      allow read: if canReadCompanyScoped();
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if isSuperAdmin() && sameCompany(resource.data);
+    }
+
+    match /service_tickets/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    // The 7 collections below are all real, actively-written members of
+    // src/lib/projectVisibility.ts's PROJECT_SCOPED_COLLECTIONS — the
+    // client already queries them exclusively by PROJECT_ASSIGNMENT_FIELDS
+    // (assignedSurveyor/assignedInstaller/salesOwner/designerId, the same
+    // fields canReadProjectScoped checks). Previously none of the 7 had an
+    // explicit match block, so they fell through to the generic wildcard
+    // rule at the bottom of this file, which only enforces sameCompany() —
+    // no ownership/assignment check. That meant a same-company user with a
+    // narrow, field-execution role (Surveyor/Engineer/InstallationLead/
+    // ServiceTechnician/ComplianceOfficer) could read every company
+    // record in these collections via a direct SDK call, bypassing the
+    // client's own query-level narrowing entirely. Matches the existing
+    // installations/service_tickets pattern exactly.
+    match /qc_checks/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    match /commissioning_records/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    match /net_metering_applications/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    match /subsidy_applications/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    match /project_handovers/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    match /amc_contracts/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    match /generation_readings/{documentId} {
+      allow read: if signedIn() && canReadProjectScoped(resource.data);
+      allow create: if canCreateCompanyScoped();
+      allow update: if canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+
+    // ── Settings collection ────────────────────────────────
+    // Public config only (no secrets) is stored here.
+    // Read: any authenticated company member can read settings.
+    // Write: requires Admin role (isAdmin()) + same company.
+    // Admin enforcement is critical: without it, any user can write settings
+    // including the adminOnly flag check bypass documented in P00 finding H02.
+    match /settings/{documentId} {
+      // Read: any authenticated company member can read settings. get() of a
+      // NOT-YET-CREATED deterministically-keyed settings doc (e.g.
+      // {companyId}_settings_general before first save) must return "not
+      // found" instead of 403: the read rule validates resource.data.companyId,
+      // which is null for a missing doc, so a bare canReadCompanyScoped()
+      // denies it and the app logs a permission-denied storm. A missing doc
+      // holds zero data, so `resource == null` grants nothing (list queries
+      // still evaluate per-document against canReadCompanyScoped).
+      allow get: if signedIn() && (resource == null || canReadCompanyScoped());
+      allow list: if canReadCompanyScoped();
+      function isOwnPersonalSettings(data, sectionId) {
+        return hasUserProfile()
+          && documentId == currentUserId() + '_settings_' + sectionId
+          && data.section == sectionId
+          && data.updatedBy == currentUserId()
+          && sameCompany(data);
+      }
+      allow create: if (isAdmin() && sameCompany(request.resource.data))
+        || isOwnPersonalSettings(request.resource.data, 'appearance')
+        || isOwnPersonalSettings(request.resource.data, 'notifications');
+      allow update: if (isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged())
+        || (isOwnPersonalSettings(resource.data, 'appearance') && isOwnPersonalSettings(request.resource.data, 'appearance') && companyIdUnchanged())
+        || (isOwnPersonalSettings(resource.data, 'notifications') && isOwnPersonalSettings(request.resource.data, 'notifications') && companyIdUnchanged());
+      allow delete: if false;
+    }
+
+    // ── Audit logs ─────────────────────────────────────────
+    // Append-only: only Admin users may create entries (via trusted mutation
+    // wrappers in settingsService, workflow, etc.). Non-admin users must never
+    // be able to forge audit entries from the browser console.
+    // No client may update or delete audit entries.
+    match /demo_operations/{documentId} {
+      allow read, write: if false;
+    }
+
+    match /audit_logs/{documentId} {
+      allow read: if isAdmin() && canReadCompanyScoped();
+      allow create: if isAdmin() && sameCompany(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    match /{collectionId}/{documentId} {
+      allow read: if !isSpecialCollection(collectionId) && canReadCompanyScoped();
+      allow create: if !isSpecialCollection(collectionId) && canCreateCompanyScoped();
+      allow update: if !isSpecialCollection(collectionId) && canUpdateCompanyScoped();
+      allow delete: if false;
+    }
+  }
+}

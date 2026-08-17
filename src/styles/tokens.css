@@ -1,0 +1,220 @@
+/* ═══════════════════════════════════════════════════════════
+   DESIGN TOKEN SYSTEM — Neozy ERP v2
+   ═══════════════════════════════════════════════════════════
+   
+   Architecture:
+     tokens.css provides FALLBACK defaults only.
+     The Theme Engine (applyThemeOverrides) sets the actual
+     color values from the active theme preset via inline styles.
+   
+   Order of precedence:
+     1. Inline styles (set by applyThemeOverrides) — highest
+     2. tokens.css :root/[data-theme] — fallback
+     3. Nothing — should never be reached
+   
+   tokens.css owns:
+     - Status colors (invariant across themes)
+     - Shadow definitions (partially overridable by theme)
+     - Shell dimensions (invariant)
+     - Radius scale (invariant)
+     - Animation keyframes
+   
+   tokens.css does NOT own (themes own these):
+     - --color-primary, --color-accent
+     - --color-surface, --color-bg
+     - --color-sidebar-*, --color-topbar-*
+     - --color-text-*, --color-border-*
+     - --color-table-*, --color-pagination-*
+     - --color-focus-ring
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Status colors (INVARIANT — same across all themes) ── */
+:root {
+  --color-success:             #10b981;
+  --color-success-light:       #d1fae5;
+  --color-success-text:        #065f46;
+  --color-warning:             #f59e0b;
+  --color-warning-light:       #fef3c7;
+  --color-warning-text:        #92400e;
+  --color-danger:              #ef4444;
+  --color-danger-light:        #fee2e2;
+  --color-danger-text:         #991b1b;
+  --color-info:                #3b82f6;
+  --color-info-light:          #dbeafe;
+  --color-info-text:           #1e40af;
+}
+
+[data-theme="dark"], html.dark {
+  --color-success:             #34d399;
+  --color-success-light:       rgba(52,211,153,0.15);
+  --color-success-text:        #6ee7b7;
+  --color-warning:             #fbbf24;
+  --color-warning-light:       rgba(251,191,36,0.15);
+  --color-warning-text:        #fcd34d;
+  --color-danger:              #f87171;
+  --color-danger-light:        rgba(248,113,113,0.15);
+  --color-danger-text:         #fca5a5;
+  --color-info:                #60a5fa;
+  --color-info-light:          rgba(96,165,250,0.15);
+  --color-info-text:           #93c5fd;
+}
+
+/* ── Light mode fallback defaults ────────────────────────── */
+:root, [data-theme="light"] {
+  /* Brand — fallback (overridden by theme presets) */
+  --color-primary:             #4f46e5;
+  --color-primary-hover:       #4338ca;
+  --color-primary-light:       #eef2ff;
+  --color-primary-muted:       #c7d2fe;
+  --color-primary-text:        #4f46e5;
+  --color-accent:              #10b981;
+  --color-accent-hover:        #059669;
+  --color-accent-light:        #d1fae5;
+  --color-focus-ring:          #4f46e5;
+
+  /* Surfaces — fallback */
+  --color-bg:                  #f8fafc;
+  --color-bg-elevated:         #ffffff;
+  --color-bg-sunken:           #f1f5f9;
+  --color-surface:             #ffffff;
+  --color-surface-hover:       #f8fafc;
+  --color-overlay:             rgba(0,0,0,0.50);
+
+  /* Shell — fallback */
+  --color-sidebar-bg:          #ffffff;
+  --color-sidebar-border:      rgba(226,232,240,0.80);
+  --color-sidebar-active:      #4f46e5;
+  --color-sidebar-active-text: #ffffff;
+  --color-sidebar-item-hover:  #f1f5f9;
+  --color-topbar-bg:           rgba(255,255,255,0.80);
+  --color-topbar-border:       rgba(226,232,240,0.80);
+
+  /* Borders — fallback */
+  --color-border:              #e2e8f0;
+  --color-border-strong:       #cbd5e1;
+  --color-border-subtle:       #f1f5f9;
+
+  /* Text — fallback */
+  --color-text:                #0f172a;
+  --color-text-secondary:      #475569;
+  --color-text-muted:          #94a3b8;
+  --color-text-disabled:       #cbd5e1;
+  --color-text-inverse:        #ffffff;
+}
+
+/* ── Dark mode fallback defaults ──────────────────────────── */
+[data-theme="dark"], html.dark {
+  --color-primary:             #6366f1;
+  --color-primary-hover:       #4f46e5;
+  --color-primary-light:       rgba(99,102,241,0.15);
+  --color-primary-muted:       #3730a3;
+  --color-primary-text:        #818cf8;
+  --color-accent:              #34d399;
+  --color-accent-hover:        #10b981;
+  --color-accent-light:        rgba(52,211,153,0.15);
+
+  --color-bg:                  #0f172a;
+  --color-bg-elevated:         #0f172a;
+  --color-bg-sunken:           #020617;
+  --color-surface:             #1e293b;
+  --color-surface-hover:       #334155;
+  --color-overlay:             rgba(0,0,0,0.70);
+
+  --color-sidebar-bg:          #0f172a;
+  --color-sidebar-border:      rgba(51,65,85,0.60);
+  --color-sidebar-active:      #4f46e5;
+  --color-sidebar-active-text: #ffffff;
+  --color-sidebar-item-hover:  rgba(255,255,255,0.05);
+  --color-topbar-bg:           rgba(15,23,42,0.80);
+  --color-topbar-border:       rgba(51,65,85,0.60);
+
+  --color-border:              #334155;
+  --color-border-strong:       #475569;
+  --color-border-subtle:       #1e293b;
+  --color-text:                #f1f5f9;
+  --color-text-secondary:      #94a3b8;
+  --color-text-muted:          #64748b;
+  --color-text-disabled:       #475569;
+  --color-text-inverse:        #0f172a;
+}
+
+/* ── Table tokens — fallback defaults (overridden by presets) ── */
+:root, [data-theme="light"] {
+  --color-table-header-bg:         #f1f5f9;
+  --color-table-header-text:       #475569;
+  --color-table-header-sort:       #94a3b8;
+  --color-table-row-hover:         #f8fafc;
+  --color-table-row-selected:      #eef2ff;
+  --color-table-row-stripe:        #fafbfc;
+  --color-table-checkbox:          #4f46e5;
+  --color-table-checkbox-bg:       #eef2ff;
+  --color-table-focus-ring:        #4f46e5;
+  --color-pagination-bg:           #f8fafc;
+  --color-pagination-active:       #4f46e5;
+  --color-pagination-active-text:  #ffffff;
+  --color-pagination-hover:        #eef2ff;
+  --color-table-footer-bg:         #f8fafc;
+  --color-table-scrollbar:         #cbd5e1;
+  --color-table-selection-bar:     #eef2ff;
+}
+
+[data-theme="dark"], html.dark {
+  --color-table-header-bg:         #1e293b;
+  --color-table-header-text:       #94a3b8;
+  --color-table-header-sort:       #64748b;
+  --color-table-row-hover:         #1e293b;
+  --color-table-row-selected:      rgba(99,102,241,0.15);
+  --color-table-row-stripe:        #1a2332;
+  --color-table-checkbox:          #6366f1;
+  --color-table-checkbox-bg:       rgba(99,102,241,0.15);
+  --color-table-focus-ring:        #6366f1;
+  --color-pagination-bg:           #0f172a;
+  --color-pagination-active:       #6366f1;
+  --color-pagination-active-text:  #ffffff;
+  --color-pagination-hover:        rgba(99,102,241,0.15);
+  --color-table-footer-bg:         #0f172a;
+  --color-table-scrollbar:         #475569;
+  --color-table-selection-bar:     rgba(99,102,241,0.12);
+}
+
+/* ── Shadows (invariant across themes) ───────────────────── */
+:root, [data-theme="light"] {
+  --shadow-sm:      0 1px 2px rgba(0,0,0,0.05);
+  --shadow-md:      0 4px 6px -1px rgba(0,0,0,0.07);
+  --shadow-lg:      0 10px 15px -3px rgba(0,0,0,0.08);
+  --shadow-enterprise-kpi:       0 8px 24px rgba(15,23,42,.05);
+  --shadow-enterprise-kpi-hover: 0 14px 34px rgba(15,23,42,.08);
+  --shadow-enterprise-surface:   0 8px 24px rgba(15,23,42,.04);
+  --shadow-enterprise-control:   0 2px 10px rgba(15,23,42,.03);
+  --shadow-enterprise-row:       0 3px 12px rgba(15,23,42,.04);
+  --shadow-dropdown: 0 10px 40px -8px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.05);
+}
+
+[data-theme="dark"], html.dark {
+  --shadow-enterprise-kpi:       0 8px 24px rgba(0,0,0,.28);
+  --shadow-enterprise-kpi-hover: 0 14px 34px rgba(0,0,0,.38);
+  --shadow-enterprise-surface:   0 8px 24px rgba(0,0,0,.24);
+  --shadow-enterprise-control:   0 2px 10px rgba(0,0,0,.18);
+  --shadow-enterprise-row:       0 3px 12px rgba(0,0,0,.22);
+  --shadow-dropdown:           0 10px 40px -8px rgba(0,0,0,.60), 0 0 0 1px rgba(255,255,255,.05);
+}
+
+/* ── Shell dimensions (invariant) ──────────────────────────── */
+:root {
+  --shell-sidebar-collapsed: 64px;
+  --shell-sidebar-expanded:  220px;
+  --shell-topbar-height:     56px;
+  --mobile-topbar-height:    56px;
+  --mobile-bottomnav-height: 64px;
+  --mobile-breakpoint:      1024px;
+}
+
+/* ── Radius scale (invariant) ──────────────────────────────── */
+:root {
+  --radius-sm:   6px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   16px;
+  --radius-2xl:  20px;
+  --radius-full: 9999px;
+}

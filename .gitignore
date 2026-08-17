@@ -1,0 +1,75 @@
+# Dependencies
+node_modules/
+
+# Throwaway local dev tools (e.g. portable JDK for the Firebase emulator)
+.tools/
+
+# Build output
+dist/
+build/
+.vite/
+
+# Documentation
+# The prior whitelist below named docs that no longer exist in this repo (the
+# 4 old, explicitly-superseded docs and other stale phase reports) — meaning
+# EVERY update to the real, actively-maintained governance docs (Blueprint,
+# Gap Audit, Demo Mode remediation log, production-readiness report) was
+# silently excluded from every commit, across every phase, until this fix.
+docs/*
+!docs/NEOZY_MASTER_IMPLEMENTATION_BLUEPRINT.md
+!docs/NEOZY_MASTER_BUSINESS_WORKFLOW_GAP_AUDIT.md
+!docs/DEMO_MODE_BUSINESS_FLOW_REMEDIATION.md
+!docs/NEOZY_PRODUCTION_READINESS_REPORT.md
+!docs/CSGPL_BRANDING_FIREBASE_MIGRATION_REPORT.md
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+.env.*.local
+.env.*
+
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+vite-*.log
+vite-*.err.log
+vite-runtime.log
+
+# TypeScript / cache
+*.tsbuildinfo
+.cache/
+.eslintcache
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Hosting / services
+.vercel/
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+
+# Firebase local state
+.firebase/
+
+# Playwright / E2E test results
+test-results/
+
+# Vercel (duplicate safe ignore)
+.vercel

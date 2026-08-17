@@ -1,0 +1,132 @@
+{
+  "results": [
+    {
+      "name": "A: Admin login navigates away from /login",
+      "pass": true,
+      "detail": "result=navigated url=http://localhost:5173/"
+    },
+    {
+      "name": "A: no null.getSnapshot crash after clean login",
+      "pass": true,
+      "detail": "none observed"
+    },
+    {
+      "name": "B: no persistent \"cache-not-ready\" text visible in UI",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "B: app UI rendered (non-empty body) after login",
+      "pass": true,
+      "detail": "bodyLength=1606"
+    },
+    {
+      "name": "C: \"Failed to load users\" NOT shown",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "C: \"Users & Access\" page rendered",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "C: users table has at least one row",
+      "pass": true,
+      "detail": "rows=1"
+    },
+    {
+      "name": "D: create-user form submitted successfully",
+      "pass": true,
+      "detail": "outcome=modal-closed"
+    },
+    {
+      "name": "D: newly-created user appears in Users list",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "F: Admin logout completed",
+      "pass": true,
+      "detail": "method=storage-clear-fallback"
+    },
+    {
+      "name": "F: new user login navigates away from /login",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "F: new user reaches an authenticated UI (non-empty body)",
+      "pass": true,
+      "detail": "bodyLength=1408"
+    },
+    {
+      "name": "G: new user UI does not present as Admin role in header (heuristic)",
+      "pass": true,
+      "detail": "see screenshot for manual confirmation"
+    },
+    {
+      "name": "H: Admin can log back in",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "H: Users page still loads (no \"Failed to load users\")",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "H: created user still visible after admin regression",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "I: NO null.getSnapshot crash after a clean full reload while authenticated",
+      "pass": true,
+      "detail": "clean"
+    },
+    {
+      "name": "I: app reconstructs authenticated state after reload (not bounced to /login)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "I: Users page still functional reference (no persistent failure text)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "J: mobile Admin login navigates away from /login",
+      "pass": true,
+      "detail": "result=navigated"
+    },
+    {
+      "name": "J: no null.getSnapshot crash on mobile clean login",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "J: mobile Users page — no \"Failed to load users\"",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "J: mobile Users & Access heading present",
+      "pass": true,
+      "detail": ""
+    }
+  ],
+  "consoleLog": [
+    {
+      "phase": "mobile",
+      "type": "warning",
+      "text": "[permissions] cache-not-ready: role=Admin"
+    },
+    {
+      "phase": "mobile",
+      "type": "warning",
+      "text": "[permissions] cache-not-ready: role=Admin"
+    }
+  ],
+  "testEmail": "verify-ui-1786364479420@neozy-verify.test"
+}

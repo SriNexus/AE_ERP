@@ -1,0 +1,141 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function authMapPath() {
+      return /databases/(default)/documents/user_auth_maps/$(request.auth.uid);
+    }
+
+    function currentUserId() {
+      return signedIn() && firestore.exists(authMapPath())
+        ? firestore.get(authMapPath()).data.userId
+        : '';
+    }
+
+    function currentUserCompanyId() {
+      return signedIn() && firestore.exists(authMapPath())
+        ? firestore.get(authMapPath()).data.companyId
+        : '';
+    }
+
+    function isOwnProfilePath(userId) {
+      return signedIn() && currentUserId() == userId;
+    }
+
+    // ── Role + partner identity resolution (Firestore-backed, cached) ─────
+    // Mirrors the Phase 1 identity model: the auth map resolves the ERP user
+    // doc; users.channelPartnerId is the canonical partner link; a
+    // channel_partners doc's managerId is the TL/Manager user id. Used by
+    // the case/project document scope rules below — never a bare-company
+    // path guess.
+    function currentUserRole() {
+      return signedIn() && firestore.exists(authMapPath())
+        && firestore.exists(/databases/(default)/documents/users/$(currentUserId()))
+        ? firestore.get(/databases/(default)/documents/users/$(currentUserId())).data.role
+        : '';
+    }
+
+    function partnerDocPath(partnerId) {
+      return /databases/(default)/documents/channel_partners/$(partnerId);
+    }
+
+    function selfPartnerId() {
+      return signedIn()
+        && firestore.exists(/databases/(default)/documents/users/$(currentUserId()))
+        && firestore.get(/databases/(default)/documents/users/$(currentUserId())).data.keys().hasAny(['channelPartnerId'])
+        && firestore.get(/databases/(default)/documents/users/$(currentUserId())).data.channelPartnerId is string
+        ? firestore.get(/databases/(default)/documents/users/$(currentUserId())).data.channelPartnerId
+        : '';
+    }
+
+    function isOwnerPartner(partnerId) {
+      return partnerId is string && partnerId.size() > 0 && selfPartnerId() == partnerId;
+    }
+
+    function isManagerOfPartner(partnerId) {
+      return partnerId is string && partnerId.size() > 0
+        && firestore.exists(partnerDocPath(partnerId))
+        && firestore.get(partnerDocPath(partnerId)).data.keys().hasAny(['managerId'])
+        && firestore.get(partnerDocPath(partnerId)).data.managerId == currentUserId();
+    }
+
+    // GAP-01 remediation (independent Vendor Lock audit, 2026-08-14): the
+    // Channel Partner spec (§7/§45, LOCKED) treats `TL` as behaviorally
+    // equivalent to `Manager`; the JS canDo() layer already aliases
+    // `tl -> Manager`, but this rules file compared the raw role string, so a
+    // literal `role: 'TL'` never matched the Manager branch below and instead
+    // fell through to the unrestricted "any other same-company staff" default
+    // — broader than the intended team-scoped access. Scoped to the two
+    // case/project document functions immediately below only.
+    function isCaseDocManagerRole() {
+      return currentUserRole() == 'Manager' || currentUserRole() == 'TL';
+    }
+
+    // The owning case/project document's partnerId ('' when the case/project
+    // is not partner-owned — staff-managed records stay company-visible).
+    function docPartnerId(docPath) {
+      return firestore.exists(docPath) && firestore.get(docPath).data.keys().hasAny(['partnerId'])
+        ? firestore.get(docPath).data.partnerId
+        : '';
+    }
+
+    // Case/project document access (spec §15/§19). Cross-company denied.
+    // Accounts denied. Partner: own case only. TL/Manager: their own
+    // partner's case only. Director: view-only (read, no write). Any other
+    // same-company staff: existing behavior preserved (company access).
+    function canReadScopedDocuments(companyId, docPath) {
+      if (!signedIn() || currentUserCompanyId() != companyId) return false;
+      if (currentUserRole() == 'Accounts') return false;
+      if (currentUserRole() == 'Admin') return true;
+      if (isCaseDocManagerRole()) return isManagerOfPartner(docPartnerId(docPath));
+      if (currentUserRole() == 'Partner') return isOwnerPartner(docPartnerId(docPath));
+      return true;
+    }
+
+    function canWriteScopedDocuments(companyId, docPath) {
+      if (!signedIn() || currentUserCompanyId() != companyId) return false;
+      if (currentUserRole() == 'Accounts' || currentUserRole() == 'Director') return false;
+      if (currentUserRole() == 'Admin') return true;
+      if (isCaseDocManagerRole()) return isManagerOfPartner(docPartnerId(docPath));
+      if (currentUserRole() == 'Partner') return isOwnerPartner(docPartnerId(docPath));
+      return true;
+    }
+
+    // Company paths that are NOT covered by the scoped document rules below
+    // keep the existing same-company access (commissioning signatures,
+    // products, surveys, engineering designs, lead/customer documents, …).
+    function isScopedDocumentPath(allPaths) {
+      return allPaths.matches('cases/.*/documents/.*')
+        || allPaths.matches('projects/.*/documents/.*');
+    }
+
+    match /users/{userId}/profile/{allPaths=**} {
+      allow read, write: if isOwnProfilePath(userId);
+    }
+
+    // ── Case-scoped Registration documents (spec §15 — the required
+    // conceptual path) ── ownership resolves through the owning case.
+    match /companies/{companyId}/cases/{caseId}/documents/{fileName} {
+      allow read: if canReadScopedDocuments(companyId, /databases/(default)/documents/cases/$(caseId));
+      allow write: if canWriteScopedDocuments(companyId, /databases/(default)/documents/cases/$(caseId));
+    }
+
+    // ── Project-scoped documents (fallback when a project has no caseId) ──
+    match /companies/{companyId}/projects/{projectId}/documents/{fileName} {
+      allow read: if canReadScopedDocuments(companyId, /databases/(default)/documents/projects/$(projectId));
+      allow write: if canWriteScopedDocuments(companyId, /databases/(default)/documents/projects/$(projectId));
+    }
+
+    match /companies/{companyId}/{allPaths=**} {
+      allow read, write: if signedIn() && currentUserCompanyId() == companyId && !isScopedDocumentPath(allPaths);
+    }
+
+    match /integration-secrets/{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
