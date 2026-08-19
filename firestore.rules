@@ -929,22 +929,67 @@ service cloud.firestore {
       function isContactIdentityRole(data) {
         return data.role in ['Lead', 'Customer', 'Employee', 'Driver', 'Vendor', 'InstallationPartner', 'FieldAgent'];
       }
+      // Root cause (live-verified, 2026-08-19): a Group Admin creating a
+      // staff user was denied with a raw PERMISSION_DENIED that turned out
+      // to be the Firestore rules engine's 1000-expression-per-request
+      // budget being exceeded, not an actual authorization mismatch —
+      // confirmed by reproducing the identical failure against the emulator
+      // with the REAL, unmodified rules and production-shaped data ("Unable
+      // to evaluate the expression as the maximum of 1000 expressions...").
+      // Root-caused further: `||` between the two branches below did NOT
+      // reliably short-circuit the (isAdmin()||contact-identity) branch once
+      // it resolved false — Firestore still walked its sameCompany() /
+      // groupAdminCanCreate() / groupIdMatchesCompany() sub-terms, each of
+      // which get()s the companies/{companyId} document (which carries
+      // several embedded base64 logo/QR/signature images — a large document,
+      // and this rules engine's per-request expression budget appears to
+      // scale with fetched-document size, not just call count). A GroupAdmin
+      // actor paid for BOTH branches' full cost on every attempt.
+      //
+      // Fix: a ternary (`cond ? A : B`), unlike `||`, is a GUARANTEED lazy
+      // construct in this rules language (already relied on elsewhere in
+      // this file, e.g. actorGroupId()'s own ternary) — exactly one arm is
+      // ever evaluated. isGroupAdmin() is a cheap, already-necessary
+      // discriminator: a user's role is never simultaneously 'Admin' and
+      // 'GroupAdmin', so routing GroupAdmin actors to the dedicated arm below
+      // and every other actor to the original (unchanged) branch changes
+      // nothing about who is authorized — it only stops a GroupAdmin actor
+      // from ever touching the Admin/contact-identity branch's cost.
+      //
+      // The GroupAdmin arm below is a strict superset of what that actor
+      // could previously reach via EITHER path: the original GroupAdmin
+      // branch (§4.4, staff creation — unchanged conditions), AND the
+      // original branch 1's GroupAdmin-reachable fallback
+      // (isContactIdentityRole() && groupAdminCanCreate(), for Lead/Customer/
+      // Employee/... contact records) — groupAdminCanCreate() required
+      // EXACTLY the same group/company coherence this arm already requires
+      // (hasGroupId + groupId==actorGroupId() + groupIsActive +
+      // groupIdMatchesCompany), so nothing a GroupAdmin could legitimately
+      // create before (staff OR contact identities, in any Company of their
+      // own Group) is newly denied — role is only restricted from
+      // 'GroupAdmin'/isSuperAdmin:true, exactly as before. The Admin/
+      // contact-identity branch (§ below) is untouched for every non-
+      // GroupAdmin actor (Admin staff creation, or any signed-in user's own-
+      // company contact-identity creation).
       allow create: if actorIsActive() && request.resource.data.email != 'shreeniwas.tripathi0@gmail.com'
-        && (
-          // Existing company path (unchanged): Admin staff creation or any
-          // signed-in user creating a phone-keyed contact identity
-          // (Lead/Customer/Employee/...). The contact-identity path additionally
-          // accepts a Group Admin creating a contact in any Company of their
-          // Group (the write helper stamps the authoritative groupId, so
-          // groupAdminCanCreate's groupId match is satisfiable).
-          (
+        && (isGroupAdmin()
+          ? (
+            hasCompanyId(request.resource.data)
+            && hasGroupId(request.resource.data) && request.resource.data.groupId == actorGroupId()
+            && groupIsActive(request.resource.data.groupId)
+            && exists(/databases/$(database)/documents/companies/$(request.resource.data.companyId))
+            && get(/databases/$(database)/documents/companies/$(request.resource.data.companyId)).data.groupId == request.resource.data.groupId
+            && (!request.resource.data.keys().hasAny(['role']) || request.resource.data.role != 'GroupAdmin')
+            && (!request.resource.data.keys().hasAny(['isSuperAdmin']) || request.resource.data.isSuperAdmin != true)
+          )
+          : (
+            // Existing company path (unchanged): Admin staff creation or any
+            // signed-in user creating a phone-keyed contact identity
+            // (Lead/Customer/Employee/...).
             (isAdmin() || (signedIn() && isContactIdentityRole(request.resource.data)))
             && hasCompanyId(request.resource.data)
-            && (sameCompany(request.resource.data)
-              || (isContactIdentityRole(request.resource.data) && groupAdminCanCreate(request.resource.data)))
-            // §5.1: only Super Admin creates Group Admins (folded into this
-            // branch so GroupAdmin actors short-circuit before it — the
-            // GroupAdmin branch below already forbids the role).
+            && sameCompany(request.resource.data)
+            // §5.1: only Super Admin creates Group Admins.
             && (isSuperAdmin() || !request.resource.data.keys().hasAny(['role']) || request.resource.data.role != 'GroupAdmin')
             // Existence-guarded: dereferencing a field absent from the
             // document is a rules evaluation ERROR in Firestore (denied,
@@ -959,24 +1004,9 @@ service cloud.firestore {
             && (!request.resource.data.keys().hasAny(['isSuperAdmin']) || request.resource.data.isSuperAdmin != true || isSuperAdmin())
             // §3.2: a same-company-created user's groupId (when present) must
             // match their Company's Group — a forged groupId can never plant
-            // a user into another Group's reach. (The GroupAdmin branch below
-            // is already coherent via actorGroupId + company-in-Group.)
+            // a user into another Group's reach.
             && groupIdMatchesCompany(request.resource.data)
-          )        || (
-          // §4.4 (Phase 2): a Group Admin creates a staff user in any
-          // Company of their own Group. users.groupId must equal the
-          // actor's authoritative group; the target company must belong to
-          // that group (groupAdminUserCompanyMatches); the new user can
-          // never be granted GroupAdmin (only Super Admin creates Group
-          // Admins — §5.1) or SuperAdmin.
-          isGroupAdmin()
-          && hasCompanyId(request.resource.data)
-          && hasGroupId(request.resource.data) && request.resource.data.groupId == actorGroupId()
-          && groupIsActive(request.resource.data.groupId)
-          && groupAdminUserCompanyMatches(request.resource.data)
-          && (!request.resource.data.keys().hasAny(['role']) || request.resource.data.role != 'GroupAdmin')
-          && (!request.resource.data.keys().hasAny(['isSuperAdmin']) || request.resource.data.isSuperAdmin != true)
-        )
+          )
         )
         && managerScopeMatches();
       // FLATTENED update rule. Live-bisect evidence: the previous deep helper
@@ -1336,7 +1366,12 @@ service cloud.firestore {
       // (§5.2/§9.3): Group Admin inherits Admin grants Group-scoped, so
       // create/update gain the sameGroup() additive-OR.
       allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
-      allow create: if actorIsActive() && ((isAdmin() && sameCompany(request.resource.data)) || (isGroupAdmin() && sameGroup(request.resource.data)))
+      // Ternary discriminator (same 2026-08-19 expression-budget root cause
+      // as the users/{userId} and audit_logs/security_logs create rules) —
+      // `||` did not reliably short-circuit sameCompany() once isAdmin()
+      // resolved false.
+      allow create: if actorIsActive()
+        && (isGroupAdmin() ? sameGroup(request.resource.data) : (isAdmin() && sameCompany(request.resource.data)))
         && groupIdMatchesCompany(request.resource.data);
       allow update: if actorIsActive() && ((isAdmin() && sameCompany(resource.data) && companyIdUnchanged()) || groupAdminCanUpdate(resource.data))
         && groupIdMatchesCompany(request.resource.data);
@@ -1614,7 +1649,16 @@ service cloud.firestore {
 
     match /audit_logs/{documentId} {
       allow read: if actorIsActive() && ((isAdmin() && canReadCompanyScoped()) || groupAdminCanRead(resource.data));
-      allow create: if actorIsActive() && ((isAdmin() && sameCompany(request.resource.data)) || (isGroupAdmin() && sameGroup(request.resource.data)))
+      // Ternary discriminator (see the users/{userId} create rule's root-
+      // cause comment, 2026-08-19): `||` did not reliably short-circuit
+      // sameCompany() once isAdmin() resolved false, and sameCompany()'s
+      // companyGroupIsActive() touches the (large, logo-embedding)
+      // companies/{companyId} document — a real GroupAdmin actor (e.g. the
+      // audit-log write auditLogger.ts fires right after every successful
+      // user creation) hit the same 1000-expression budget denial here. A
+      // ternary is guaranteed lazy: exactly one arm evaluates.
+      allow create: if actorIsActive()
+        && (isGroupAdmin() ? sameGroup(request.resource.data) : (isAdmin() && sameCompany(request.resource.data)))
         && groupIdMatchesCompany(request.resource.data);
       allow update, delete: if false;
     }
@@ -1626,7 +1670,12 @@ service cloud.firestore {
     // Group Admin inherits the Admin grants Group-scoped (§5.2).
     match /security_logs/{documentId} {
       allow read: if actorIsActive() && ((isAdmin() && canReadCompanyScoped()) || groupAdminCanRead(resource.data));
-      allow create: if actorIsActive() && ((isAdmin() && sameCompany(request.resource.data)) || (isGroupAdmin() && sameGroup(request.resource.data)))
+      // Same ternary fix as audit_logs above (2026-08-19 root cause) —
+      // auditLogger.ts's writeLog() dual-writes a security_logs entry for
+      // 'critical' events (e.g. Group Admin granting a role), which hit the
+      // identical expression-budget denial.
+      allow create: if actorIsActive()
+        && (isGroupAdmin() ? sameGroup(request.resource.data) : (isAdmin() && sameCompany(request.resource.data)))
         && groupIdMatchesCompany(request.resource.data);
       allow update, delete: if false;
     }

@@ -13,12 +13,11 @@
  */
 
 import { useMemo, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { Plus, UsersRound, RefreshCw, Search } from 'lucide-react';
 import GroupShell from './GroupShell';
-import { getAll } from '../../lib/firestore';
 import { COLLECTIONS } from '../../lib/firebase';
-import { useAppStore } from '../../store/useAppStore';
+import { useSelectedGroupId, useGroupScopedCollection } from './useSelectedGroup';
 import { useTeams, useSaveTeam } from '../../features/teams/hooks/useTeams';
 import { TEAM_FORM_DEFAULT, TEAM_STATUS_OPTIONS, type Team } from '../../features/teams/types';
 import { Button } from '../../components/ui/Button';
@@ -32,28 +31,20 @@ import toast from 'react-hot-toast';
 
 export default function GroupTeams() {
   const qc = useQueryClient();
-  const user = useAppStore((s) => s.user);
-  const groupId = user?.groupId || '';
+  const { selectedGroupId: groupId } = useSelectedGroupId();
   const [search, setSearch] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
-  const [form, setForm] = useState<any>({ ...TEAM_FORM_DEFAULT, companyId: user?.companyId || '' });
+  const [form, setForm] = useState<any>({ ...TEAM_FORM_DEFAULT, companyId: '' });
 
-  const groupEnabled = useMemo(() => ({ enabled: !!groupId }), [groupId]);
+  // Teams themselves aren't groupId-filtered here (this console shows every
+  // Team, scoped by the Company/Warehouse/User dropdowns below, all of which
+  // ARE scoped to the selected Group) — matches the pre-existing behavior of
+  // this screen for a real GroupAdmin actor.
   const { data: teams = [] } = useTeams();
   const { data: companies = [] } = useGroupCompanies(groupId);
-  const { data: users = [] } = useQuery({
-    queryKey: ['group-team-users', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.USERS),
-    ...groupEnabled,
-    staleTime: 30_000,
-  });
-  const { data: warehouses = [] } = useQuery({
-    queryKey: ['group-team-warehouses', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.WAREHOUSES),
-    ...groupEnabled,
-    staleTime: 30_000,
-  });
+  const { data: users = [] } = useGroupScopedCollection<any>(COLLECTIONS.USERS, groupId, 'group-team-users');
+  const { data: warehouses = [] } = useGroupScopedCollection<any>(COLLECTIONS.WAREHOUSES, groupId, 'group-team-warehouses');
 
   const companyName = (id: string) => companies.find((c: any) => c.id === id)?.name || id;
   const warehouseName = (id: string) => warehouses.find((w: any) => w.id === id)?.name || id;
@@ -74,20 +65,20 @@ export default function GroupTeams() {
   const saveTeam = useSaveTeam(editId, () => {
     setShowForm(false);
     setEditId(null);
-    setForm({ ...TEAM_FORM_DEFAULT, companyId: user?.companyId || '' });
+    setForm({ ...TEAM_FORM_DEFAULT, companyId: '' });
     qc.invalidateQueries({ queryKey: ['teams'] });
   });
 
   const openCreate = () => {
     setEditId(null);
-    setForm({ ...TEAM_FORM_DEFAULT, companyId: user?.companyId || '' });
+    setForm({ ...TEAM_FORM_DEFAULT, companyId: '' });
     setShowForm(true);
   };
   const openEdit = (t: Team) => {
     setEditId(t.id);
     setForm({
       name: t.name || '',
-      companyId: t.companyId || user?.companyId || '',
+      companyId: t.companyId || '',
       warehouseId: t.warehouseId || '',
       leadUserId: t.leadUserId || '',
       memberUserIds: t.memberUserIds || [],

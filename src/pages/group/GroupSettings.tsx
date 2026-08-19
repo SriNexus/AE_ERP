@@ -19,9 +19,10 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { UserCog, UsersRound, Globe } from 'lucide-react';
 import GroupShell from './GroupShell';
-import { getAll, getOne } from '../../lib/firestore';
+import { getOne } from '../../lib/firestore';
 import { COLLECTIONS } from '../../lib/firebase';
 import { useAppStore } from '../../store/useAppStore';
+import { useSelectedGroupId, useGroupScopedCollection } from './useSelectedGroup';
 import { grantGroupAdminForGroup } from '../../lib/groupAdmin';
 import { Button } from '../../components/ui/Button';
 import { Card, CardHeader, CardTitle, EmptyState } from '../../components/ui/Card';
@@ -34,33 +35,31 @@ import toast from 'react-hot-toast';
 export default function GroupSettings() {
   const qc = useQueryClient();
   const user = useAppStore((s) => s.user);
-  const groupId = user?.groupId || '';
+  const { selectedGroupId: groupId } = useSelectedGroupId();
   const [grantTarget, setGrantTarget] = useState<any | null>(null);
 
-  const enabled = useMemo(() => ({ enabled: !!groupId }), [groupId]);
+  const groupInfoEnabled = useMemo(() => ({ enabled: !!groupId }), [groupId]);
 
   const { data: group = null } = useQuery({
     queryKey: ['group-info', groupId],
     queryFn: () => getOne<any>(COLLECTIONS.GROUPS, groupId),
-    ...enabled,
+    ...groupInfoEnabled,
     staleTime: 60_000,
   });
 
-  // Group Admins table — group_members where groupId == actorGroupId
-  // (rules-provable via groupAdminCanRead; docs carry groupId per §3.1).
-  const { data: members = [] } = useQuery({
-    queryKey: ['group-members', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.GROUP_MEMBERS),
-    ...enabled,
-    staleTime: 30_000,
-  });
+  // Group Admins table — direct where('groupId','==', groupId) reads for the
+  // Super-Admin-selected Group (see useSelectedGroup.ts).
+  const { data: members = [] } = useGroupScopedCollection<any>(COLLECTIONS.GROUP_MEMBERS, groupId, 'group-members');
+  const { data: users = [] } = useGroupScopedCollection<any>(COLLECTIONS.USERS, groupId, 'group-settings-users');
 
-  const { data: users = [] } = useQuery({
-    queryKey: ['group-settings-users', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.USERS),
-    ...enabled,
-    staleTime: 30_000,
-  });
+  // grantGroupAdminForGroup() requires the literal, active GroupAdmin identity
+  // (groupAdmin.ts's requireGroupAdminIdentity()) — it always resolves the
+  // Group from the ACTOR's own role/groupId, never a caller-supplied one, so
+  // it can never be used from the Super-Admin-only console to grant on an
+  // arbitrary browsed Group. "Add Group Admin" is therefore disabled here;
+  // granting stays a real GroupAdmin's own §7.9 self-service action from
+  // their normal session.
+  const canGrant = user?.role === 'GroupAdmin';
 
   const grantMut = useMutation({
     mutationFn: (input: { userId: string; email: string; role: string }) =>
@@ -148,11 +147,16 @@ export default function GroupSettings() {
         <Card>
           <CardHeader className="flex items-center justify-between gap-3">
             <CardTitle className="flex items-center gap-2"><UsersRound className="h-4 w-4" /> Group Admins</CardTitle>
-            <Button size="sm" icon={<UserCog className="h-3.5 w-3.5" />} disabled={grantCandidates.length === 0} onClick={() => setGrantTarget(grantCandidates[0])}>
+            <Button size="sm" icon={<UserCog className="h-3.5 w-3.5" />} disabled={!canGrant || grantCandidates.length === 0} onClick={() => setGrantTarget(grantCandidates[0])}>
               Add Group Admin
             </Button>
           </CardHeader>
           <div className="p-4">
+            {!canGrant && (
+              <p className="text-xs text-[var(--color-text-muted)] mb-3">
+                Granting a Group Admin is a self-service action for an existing Group Admin's own session — sign in as a Group Admin of this Group to add another one.
+              </p>
+            )}
             {memberRows.length === 0 ? (
               <EmptyState title="No Group Admins" description="Add a second Group Admin for this Group." />
             ) : (

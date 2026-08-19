@@ -10,7 +10,6 @@ import { ProtectedRoute } from '../../components/auth/ProtectedRoute';
 import { RoleRoute }      from '../../components/auth/RoleRoute';
 import { OwnerRoute } from '../../components/auth/OwnerRoute';
 import { SuperAdminRoute } from '../../components/auth/SuperAdminRoute';
-import { GroupAdminRoute } from '../../components/auth/GroupAdminRoute';
 import { useGlobalBoot }  from '../../lib/useGlobalBoot';
 import { ErrorBoundary }  from '../../components/shared/ErrorBoundary';
 import { useAppStore }    from '../../store/useAppStore';
@@ -314,20 +313,22 @@ export function AppRoutes() {
         <Route path="/platform/security"   element={<SuperAdminRoute><SafePage><PlatformSecurity /></SafePage></SuperAdminRoute>} />
         <Route path="/platform/settings"   element={<SuperAdminRoute><SafePage><PlatformSettings /></SafePage></SuperAdminRoute>} />
 
-        {/* Phase 5 (Master Plan §7): Group Admin Control Plane — every screen
-            gated by GroupAdminRoute (GroupAdmin role + groupId). Screens reuse
-            the existing business pages (Companies/Users/Warehouses/Roles/
-            AuditLogs) — the 'group' sentinel (activeCompanyId) + query layer
-            scope them Group-wide; new screens are GroupOverview/GroupTeams/
-            GroupSettings. */}
-        <Route path="/group"              element={<GroupAdminRoute><SafePage><GroupOverview /></SafePage></GroupAdminRoute>} />
-        <Route path="/group/companies"   element={<GroupAdminRoute><SafePage><Companies /></SafePage></GroupAdminRoute>} />
-        <Route path="/group/warehouses"  element={<GroupAdminRoute><SafePage><Warehouses /></SafePage></GroupAdminRoute>} />
-        <Route path="/group/users"       element={<GroupAdminRoute><SafePage><UsersPage /></SafePage></GroupAdminRoute>} />
-        <Route path="/group/teams"       element={<GroupAdminRoute><SafePage><GroupTeams /></SafePage></GroupAdminRoute>} />
-        <Route path="/group/roles"       element={<GroupAdminRoute><SafePage><RolesPage /></SafePage></GroupAdminRoute>} />
-        <Route path="/group/audit-log"   element={<GroupAdminRoute><SafePage><AuditLogs /></SafePage></GroupAdminRoute>} />
-        <Route path="/group/settings"    element={<GroupAdminRoute><SafePage><GroupSettingsPage /></SafePage></GroupAdminRoute>} />
+        {/* Group Administration console — Super Admin (owner identity) only,
+            gated by SuperAdminRoute. GroupAdmin actors manage their own group's
+            users/companies/warehouses through the main business pages
+            (/users, /companies, /warehouses — RoleRoute-gated), not this
+            console. Screens reuse the existing business pages (Companies/
+            Users/Warehouses/Roles/AuditLogs) — the 'group' sentinel
+            (activeCompanyId) + query layer scope them Group-wide; new screens
+            are GroupOverview/GroupTeams/GroupSettings. */}
+        <Route path="/group"              element={<SuperAdminRoute><SafePage><GroupOverview /></SafePage></SuperAdminRoute>} />
+        <Route path="/group/companies"   element={<SuperAdminRoute><SafePage><Companies /></SafePage></SuperAdminRoute>} />
+        <Route path="/group/warehouses"  element={<SuperAdminRoute><SafePage><Warehouses /></SafePage></SuperAdminRoute>} />
+        <Route path="/group/users"       element={<SuperAdminRoute><SafePage><UsersPage /></SafePage></SuperAdminRoute>} />
+        <Route path="/group/teams"       element={<SuperAdminRoute><SafePage><GroupTeams /></SafePage></SuperAdminRoute>} />
+        <Route path="/group/roles"       element={<SuperAdminRoute><SafePage><RolesPage /></SafePage></SuperAdminRoute>} />
+        <Route path="/group/audit-log"   element={<SuperAdminRoute><SafePage><AuditLogs /></SafePage></SuperAdminRoute>} />
+        <Route path="/group/settings"    element={<SuperAdminRoute><SafePage><GroupSettingsPage /></SafePage></SuperAdminRoute>} />
 
         {/* Channel Partners */}
         {/* VL-9/VL-10: standalone Registration list (team/management/admin view).

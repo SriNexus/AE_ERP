@@ -16,14 +16,12 @@
  * groupAdminCanRead()/sameGroup() branches make every one provable.
  */
 
-import { useEffect, useMemo } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMemo } from 'react';
 import { Building2, Users, Warehouse as WarehouseIcon, Target, ShoppingCart, ScrollText, ArrowRight } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import GroupShell from './GroupShell';
-import { getAll } from '../../lib/firestore';
 import { COLLECTIONS } from '../../lib/firebase';
-import { useAppStore } from '../../store/useAppStore';
+import { useSelectedGroupId, useGroupScopedCollection } from './useSelectedGroup';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge, statusBadge } from '../../components/ui/Badge';
 
@@ -52,56 +50,18 @@ function toDate(value: unknown): Date | null {
 
 export default function GroupOverview() {
   const navigate = useNavigate();
-  const user = useAppStore((s) => s.user);
-  const setActiveCompanyId = useAppStore((s) => s.setActiveCompanyId);
-  const groupId = user?.groupId || '';
+  const { selectedGroupId: groupId } = useSelectedGroupId();
 
-  // §7.1: the Group Overview is the Group-view screen — force the 'group'
-  // sentinel so every getAll() below is groupId-scoped, whatever the switcher
-  // was set to on arrival.
-  useEffect(() => {
-    setActiveCompanyId('group');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const groupScoped = useMemo(() => ({ enabled: !!groupId }), [groupId]);
-
-  const { data: companies = [] } = useQuery({
-    queryKey: ['group-companies-overview', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.COMPANIES),
-    ...groupScoped,
-    staleTime: 30_000,
-  });
-  const { data: users = [] } = useQuery({
-    queryKey: ['group-users-overview', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.USERS),
-    ...groupScoped,
-    staleTime: 30_000,
-  });
-  const { data: warehouses = [] } = useQuery({
-    queryKey: ['group-warehouses-overview', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.WAREHOUSES),
-    ...groupScoped,
-    staleTime: 30_000,
-  });
-  const { data: leads = [] } = useQuery({
-    queryKey: ['group-leads-overview', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.LEADS),
-    ...groupScoped,
-    staleTime: 60_000,
-  });
-  const { data: orders = [] } = useQuery({
-    queryKey: ['group-orders-overview', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.ORDERS),
-    ...groupScoped,
-    staleTime: 60_000,
-  });
-  const { data: auditLogs = [] } = useQuery({
-    queryKey: ['group-audit-overview', groupId],
-    queryFn: () => getAll<any>(COLLECTIONS.AUDIT_LOGS),
-    ...groupScoped,
-    staleTime: 30_000,
-  });
+  // §7.1: reads are direct where('groupId','==', groupId) queries against
+  // the Super Admin's currently-selected Group (see useSelectedGroup.ts) —
+  // NOT the shared getAll() 'group' sentinel, which only ever resolves the
+  // signed-in actor's own groupId (empty for the Owner identity).
+  const { data: companies = [] } = useGroupScopedCollection<any>(COLLECTIONS.COMPANIES, groupId, 'group-companies-overview');
+  const { data: users = [] } = useGroupScopedCollection<any>(COLLECTIONS.USERS, groupId, 'group-users-overview');
+  const { data: warehouses = [] } = useGroupScopedCollection<any>(COLLECTIONS.WAREHOUSES, groupId, 'group-warehouses-overview');
+  const { data: leads = [] } = useGroupScopedCollection<any>(COLLECTIONS.LEADS, groupId, 'group-leads-overview');
+  const { data: orders = [] } = useGroupScopedCollection<any>(COLLECTIONS.ORDERS, groupId, 'group-orders-overview');
+  const { data: auditLogs = [] } = useGroupScopedCollection<any>(COLLECTIONS.AUDIT_LOGS, groupId, 'group-audit-overview');
 
   const activeCompanies = companies.filter((c: any) => c.isDeleted !== true);
   const activeUsers = users.filter((u: any) => !u.isDeleted && u.status !== 'Inactive' && u.status !== 'inactive');

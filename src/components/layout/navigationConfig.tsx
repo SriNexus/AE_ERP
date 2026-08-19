@@ -46,8 +46,6 @@ export type NavItem = {
   children?: NavItem[];
   module?: Module;
   ownerOnly?: boolean;
-  /** Phase 5: Group Admin surfaces (GroupAdminRoute-guarded in the router). */
-  groupAdminOnly?: boolean;
 };
 
 export const ERP_NAV_ITEMS: NavItem[] = [
@@ -116,18 +114,18 @@ export const ERP_NAV_ITEMS: NavItem[] = [
   ] },
   { label: 'AI Intelligence', path: '/ai-intelligence', icon: <Brain className="h-4 w-4" />, module: 'dashboard', ownerOnly: true },
   { label: 'Audit Logs', path: '/audit-logs', icon: <Shield className="h-4 w-4" />, module: 'dashboard', ownerOnly: true },
-  // Phase 5 (Master Plan §7): Group Administration — GroupAdmin role only.
-  // Naming per §7: the section is "Group Administration", the summary screen
-  // is "Group Overview". "Super Admin" never appears here (§16 hard rule).
-  { label: 'Group Administration', icon: <UsersRound className="h-4 w-4" />, groupAdminOnly: true, children: [
-    { label: 'Group Overview', path: '/group', icon: <LayoutDashboard className="h-4 w-4" />, groupAdminOnly: true },
-    { label: 'Companies', path: '/group/companies', icon: <Building2 className="h-4 w-4" />, groupAdminOnly: true },
-    { label: 'Warehouses', path: '/group/warehouses', icon: <Warehouse className="h-4 w-4" />, groupAdminOnly: true },
-    { label: 'Users', path: '/group/users', icon: <Users className="h-4 w-4" />, groupAdminOnly: true },
-    { label: 'Teams', path: '/group/teams', icon: <UsersRound className="h-4 w-4" />, groupAdminOnly: true },
-    { label: 'Roles', path: '/group/roles', icon: <Shield className="h-4 w-4" />, groupAdminOnly: true },
-    { label: 'Audit Log', path: '/group/audit-log', icon: <ScrollText className="h-4 w-4" />, groupAdminOnly: true },
-    { label: 'Group Settings', path: '/group/settings', icon: <Settings className="h-4 w-4" />, groupAdminOnly: true },
+  // Group Administration console — Super Admin (owner identity) only. Not
+  // shown to GroupAdmin: GroupAdmin actors manage their own group's users/
+  // companies/warehouses through the main business pages instead.
+  { label: 'Group Administration', icon: <UsersRound className="h-4 w-4" />, ownerOnly: true, children: [
+    { label: 'Group Overview', path: '/group', icon: <LayoutDashboard className="h-4 w-4" />, ownerOnly: true },
+    { label: 'Companies', path: '/group/companies', icon: <Building2 className="h-4 w-4" />, ownerOnly: true },
+    { label: 'Warehouses', path: '/group/warehouses', icon: <Warehouse className="h-4 w-4" />, ownerOnly: true },
+    { label: 'Users', path: '/group/users', icon: <Users className="h-4 w-4" />, ownerOnly: true },
+    { label: 'Teams', path: '/group/teams', icon: <UsersRound className="h-4 w-4" />, ownerOnly: true },
+    { label: 'Roles', path: '/group/roles', icon: <Shield className="h-4 w-4" />, ownerOnly: true },
+    { label: 'Audit Log', path: '/group/audit-log', icon: <ScrollText className="h-4 w-4" />, ownerOnly: true },
+    { label: 'Group Settings', path: '/group/settings', icon: <Settings className="h-4 w-4" />, ownerOnly: true },
   ] },
   // Phase 4 (Master Plan §6): Super Admin Control Plane — owner identity only.
   { label: 'Platform', icon: <Globe className="h-4 w-4" />, ownerOnly: true, children: [

@@ -1,22 +1,21 @@
 /**
- * GroupShell — shared layout for the Group Admin surfaces (Phase 5, Master
- * Plan §7).
+ * GroupShell — shared layout for the Group Administration console.
  *
  * Provides the "Group Administration" sub-navigation header shared by every
  * /group/* screen (Overview, Companies, Warehouses, Users, Teams, Roles,
  * Audit Log, Settings) plus a consistent page container. Route gating lives
- * in the router (GroupAdminRoute wraps every /group/* route — this shell
- * never re-checks identity, the route guard is the boundary).
- *
- * Naming follows §7 exactly: the summary screen is "Group Overview" and the
- * section is "Group Administration". The string "Super Admin" never appears
- * here (§16 hard rule).
+ * in the router (SuperAdminRoute wraps every /group/* route — this shell
+ * never re-checks identity, the route guard is the boundary). This console
+ * is Super Admin (owner identity) only; GroupAdmin actors manage their own
+ * group's data through the main business pages (/users, /companies,
+ * /warehouses) instead.
  */
 
 import type { ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Building2, Warehouse, Users, UsersRound, Shield, ScrollText, Settings } from 'lucide-react';
+import { LayoutDashboard, Building2, Warehouse, Users, UsersRound, Shield, ScrollText, Settings, Globe } from 'lucide-react';
 import { cn } from '../../utils/cn';
+import { useSelectedGroupId } from './useSelectedGroup';
 
 const NAV: Array<{ to: string; label: string; icon: ReactNode }> = [
   { to: '/group', label: 'Group Overview', icon: <LayoutDashboard className="h-4 w-4" /> },
@@ -30,15 +29,33 @@ const NAV: Array<{ to: string; label: string; icon: ReactNode }> = [
 ];
 
 export function GroupShell({ children, title }: { children: ReactNode; title?: string }) {
+  const { groups, selectedGroupId, setSelectedGroupId } = useSelectedGroupId();
+
   return (
     <div className="flex flex-col h-full bg-[var(--color-surface)]">
       <div className="border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-6 pt-5">
-        <div className="flex items-center gap-2 mb-1">
-          <UsersRound className="h-4 w-4 text-[var(--color-primary)]" />
-          <h1 className="text-lg font-bold text-[var(--color-text)]">{title || 'Group Administration'}</h1>
+        <div className="flex items-center justify-between gap-3 mb-1">
+          <div className="flex items-center gap-2">
+            <UsersRound className="h-4 w-4 text-[var(--color-primary)]" />
+            <h1 className="text-lg font-bold text-[var(--color-text)]">{title || 'Group Administration'}</h1>
+          </div>
+          {groups.length > 0 && (
+            <label className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+              <Globe className="h-3.5 w-3.5" />
+              <select
+                value={selectedGroupId}
+                onChange={(e) => setSelectedGroupId(e.target.value)}
+                className="bg-[var(--color-bg-sunken)] border border-[var(--color-border)] rounded-lg px-2 py-1.5 text-xs font-semibold text-[var(--color-text)] outline-none"
+              >
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>{g.name || g.shortName || g.id}</option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
         <p className="text-xs text-[var(--color-text-muted)] mb-3">
-          Group Administration — manage your Group&apos;s Companies, Warehouses, Users, Teams and activity.
+          Group Administration — view a Group&apos;s Companies, Warehouses, Users, Teams and activity.
         </p>
         <nav className="flex gap-1 overflow-x-auto">
           {NAV.map((item) => (
