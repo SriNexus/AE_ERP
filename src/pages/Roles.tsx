@@ -11,6 +11,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import { getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';
+import { useAppStore } from '../store/useAppStore';
 import { ALL_MODULES, type Permission, usePermissions } from '../lib/permissions';
 import { getSystemRoleSeedDocuments } from '../lib/roleBootstrap';
 import { Shield, Plus, RefreshCw, Eye, Edit2, Trash2, Copy, X, Users as UsersIcon, CheckCircle2, Clock, FileText } from 'lucide-react';
@@ -50,8 +51,14 @@ function toDate(value: any): Date | null {
 export default function Roles() {
   const qc = useQueryClient();
   const perms = usePermissions();
+  const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const [searchParams, setSearchParams] = useSearchParams();
   const systemRoleNames = useMemo(() => new Set(getSystemRoleSeedDocuments().map((role) => role.name)), []);
+  // Phase 5 (§7.7): roles are managed per Company (F-03 per-company role
+  // keying — roles docs carry companyId, never groupId). In "All Companies
+  // (Group view)" mode the group-scoped query would be unprovable at the
+  // rules layer, so the screen shows a banner instead of querying.
+  const isGroupViewMode = activeCompanyId === 'group';
 
   // Filters
   const [search, setSearch] = useState(() => searchParams.get('q') || '');
@@ -83,6 +90,7 @@ export default function Roles() {
     queryKey: ['roles'],
     queryFn: () => getAll(COLLECTIONS.ROLES),
     staleTime: 30000,
+    enabled: !isGroupViewMode,
   });
 
   const save = useMutation({
@@ -311,6 +319,16 @@ export default function Roles() {
           </div>
         }
       />
+
+      {/* Phase 5 (§7.7): group-view banner — roles are per-Company */}
+      {isGroupViewMode && (
+        <div className="flex items-start gap-3 rounded-xl border border-[var(--color-primary-muted)] bg-[var(--color-primary-light)] px-4 py-3">
+          <Shield className="h-4 w-4 mt-0.5 text-[var(--color-primary-text)] shrink-0" />
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            Roles are managed per Company. Select a Company above to view or edit its roles.
+          </p>
+        </div>
+      )}
 
       {/* KPI Grid */}
       <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-6">

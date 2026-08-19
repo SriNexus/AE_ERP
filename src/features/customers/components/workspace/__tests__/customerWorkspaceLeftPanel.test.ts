@@ -62,5 +62,8 @@ describe('CustomerWorkspaceLeftPanel — permanent Info (no per-tab mode-switchi
     const mod = await import('../CustomerWorkspaceLeftPanel');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
-  });
+    // Cold import of the CustomerWorkspace graph; under full-suite parallel
+    // load this can exceed the default 15s testTimeout (import weight, not a
+    // hang). 240s keeps the module-existence assertion meaningful on slow CI.
+  }, 240000);
 });

@@ -28,6 +28,11 @@ vi.mock('../firestore', () => ({
     const s = mocks.getState() as any;
     return s.activeCompanyId || s.company?.id || s.user?.companyId || '';
   },
+  resolveWriteCompanyCode: (companyId?: string) => {
+    const s = mocks.getState() as any;
+    const targetId = companyId || s.activeCompanyId || s.company?.id || s.user?.companyId || '';
+    return s.company?.id === targetId ? (s.company?.companyCode || '') : '';
+  },
 }));
 
 vi.mock('../workflow', () => ({
@@ -65,7 +70,7 @@ describe('generatePIsFromOrder', () => {
     vi.clearAllMocks();
     mocks.getState.mockReturnValue({
       activeCompanyId: 'comp-1',
-      company: { invoicePrefix: 'PI-' },
+      company: { id: 'comp-1', invoicePrefix: 'PI-', companyCode: 'CGPL' },
       user: { id: 'user-1', companyId: 'comp-1' },
     });
     mocks.usersByRole.mockResolvedValue([{ id: 'accounts-1' }]);
@@ -89,7 +94,7 @@ describe('generatePIsFromOrder', () => {
     });
   });
 
-  it('splits an order into template-specific proforma invoices', async () => {
+  it('splits an order into template-specific proforma invoices for a dual-entity company (companyCode CGPL)', async () => {
     const order = {
       id: 'ORD-1',
       customerId: 'C-1',
@@ -118,7 +123,7 @@ describe('generatePIsFromOrder', () => {
         customer: 'Customer A',
         status: 'Draft',
         paymentStatus: 'Pending',
-        templateUsed: 'CSGPL',
+        templateUsed: 'CGPL',
         sourceOrderId: 'ORD-1',
         projectId: 'PRJ-1',
         quotationId: 'QT-1',
@@ -139,7 +144,7 @@ describe('generatePIsFromOrder', () => {
       'PI-002',
       expect.objectContaining({
         id: 'PI-002',
-        templateUsed: 'SANTOSH_VARANASI',
+        templateUsed: 'STS',
         invoiceNumber: 'PI-BIZ-002',
         piNumber: 'PI-BIZ-002',
         refNo: 'PI-BIZ-002',
@@ -179,6 +184,44 @@ describe('generatePIsFromOrder', () => {
       'invoice',
       'PI-001',
       'comp-1'
+    );
+  });
+
+  it('generates a single PI labelled with the company\'s own companyCode for a non-dual-entity company', async () => {
+    mocks.getState.mockReturnValue({
+      activeCompanyId: 'comp-2',
+      company: { id: 'comp-2', invoicePrefix: 'PI-', companyCode: 'AE-01' },
+      user: { id: 'user-1', companyId: 'comp-2' },
+    });
+    mocks.genId.invoice.mockReset().mockReturnValueOnce('PI-101');
+    mocks.getNextDocumentNumber.mockReset().mockResolvedValueOnce({ documentNumber: 'PI-BIZ-101' });
+
+    const order = {
+      id: 'ORD-2',
+      customerId: 'C-2',
+      customer: 'Ashish Enterprises Customer',
+      companyId: 'comp-2',
+      total: 400,
+      items: [
+        { category: 'BOS', qty: 1, price: 100, tax: 18 },
+        { category: 'Module', qty: 2, price: 150, tax: 18 },
+      ],
+    };
+
+    await expect(generatePIsFromOrder(order)).resolves.toEqual(['PI-101']);
+
+    expect(mocks.createDocWithId).toHaveBeenCalledTimes(1);
+    expect(mocks.createDocWithId).toHaveBeenCalledWith(
+      'proforma_invoices',
+      'PI-101',
+      expect.objectContaining({
+        id: 'PI-101',
+        // Every item (BOS included) goes into one PI — the dual-entity
+        // CGPL/STS split must not apply to a company whose own companyCode
+        // isn't 'CGPL'.
+        items: order.items,
+        templateUsed: 'AE-01',
+      })
     );
   });
 });

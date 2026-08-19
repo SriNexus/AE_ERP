@@ -2,6 +2,7 @@ import type { DemoDocument, DemoSeedPlan } from '../types.ts';
 import {
   DEMO_COMPANY_ID,
   DEMO_ERP_USER_ID,
+  DEMO_GROUP_ID,
   DEMO_ROLE_ID,
   DEMO_SEED_ID,
   OFFICIAL_DEMO_EMAIL,
@@ -9,7 +10,15 @@ import {
 } from '../config.ts';
 import { demoAt, demoDate } from './timeline.ts';
 
-const base = { companyId: DEMO_COMPANY_ID, isDemo: true, demoSeedId: DEMO_SEED_ID, isDeleted: false };
+// Phase 1 (Multi-Tenant): every demo business document carries the demo
+// tenant's Group, exactly like companyId — the demo dataset is a fully
+// self-contained tenant under its own demo Group (Master Plan §3.2
+// denormalization; §10.3 step 1 isDemo: true).
+const base = { companyId: DEMO_COMPANY_ID, groupId: DEMO_GROUP_ID, isDemo: true, demoSeedId: DEMO_SEED_ID, isDeleted: false };
+// `roles` is EXCLUDED from the groupId denormalization (Master Plan §3.2 —
+// roles are Company-scoped per §5.6, not Group-scoped), so the demo role doc
+// must not carry groupId even though base does.
+const roleBase = { companyId: DEMO_COMPANY_ID, isDemo: true, demoSeedId: DEMO_SEED_ID, isDeleted: false };
 const audit = { createdBy: DEMO_ERP_USER_ID, updatedBy: DEMO_ERP_USER_ID };
 
 const moduleNames = [
@@ -43,6 +52,13 @@ const permissions = Object.fromEntries(moduleNames.map((module) => [module, {
 export function buildIdentityDocuments(authUid: string): DemoDocument[] {
   if (!authUid.trim()) throw new Error('Firebase Auth UID is required.');
   return [
+    // Phase 1 (Multi-Tenant): the demo tenant's own Group (Master Plan §10.3
+    // step 1 — the demo dataset gets a dedicated demo Group, isDemo: true,
+    // never folded into a production default Group).
+    { collection: 'groups', id: DEMO_GROUP_ID, preserveOnReset: true, data: {
+      ...audit, id: DEMO_GROUP_ID, name: 'Neozy Demo Group', shortName: 'Demo',
+      status: 'Active', isDefault: false, isDemo: true, settings: {},
+    }},
     { collection: 'companies', id: DEMO_COMPANY_ID, preserveOnReset: true, data: {
       ...base, ...audit, id: DEMO_COMPANY_ID, name: 'Neozy Solar EPC Demo', shortName: 'Neozy Demo',
       companyCode: 'DEMO', tagline: 'Fictional Solar EPC demonstration workspace',
@@ -66,8 +82,12 @@ export function buildIdentityDocuments(authUid: string): DemoDocument[] {
       // for why dedicated single-mode demo companies were not built.
       businessMode: 'Both',
     }},
-    { collection: 'roles', id: DEMO_ROLE_ID, preserveOnReset: true, data: {
-      ...base, ...audit, id: DEMO_ROLE_ID, name: DEMO_ROLE_ID, schemaVersion: 1,
+    // Phase 1 (F-03 closure, Master Plan §5.6): role documents are
+    // Company-scoped — the demo role doc is keyed `${companyId}_${roleName}`
+    // (roleDocumentId(DEMO_COMPANY_ID, DEMO_ROLE_ID)), matching the
+    // per-company system-role keying the app's role resolution expects.
+    { collection: 'roles', id: `${DEMO_COMPANY_ID}_${DEMO_ROLE_ID}`, preserveOnReset: true, data: {
+      ...roleBase, ...audit, id: `${DEMO_COMPANY_ID}_${DEMO_ROLE_ID}`, name: DEMO_ROLE_ID, schemaVersion: 1,
       description: 'Public demo business access without administration, secrets, counters, or owner AI.',
       permissions,
     }},
@@ -82,7 +102,9 @@ export function buildIdentityDocuments(authUid: string): DemoDocument[] {
       linkedModules: moduleNames.filter((module) => !denied.has(module)), isSuperAdmin: false,
     }},
     { collection: 'user_auth_maps', id: authUid, preserveOnReset: true, data: {
-      authUid, userId: DEMO_ERP_USER_ID, companyId: DEMO_COMPANY_ID, email: OFFICIAL_DEMO_EMAIL,
+      authUid, userId: DEMO_ERP_USER_ID, companyId: DEMO_COMPANY_ID,
+      // Phase 1: user_auth_maps mirrors users.groupId (Master Plan §3.2).
+      groupId: DEMO_GROUP_ID, email: OFFICIAL_DEMO_EMAIL,
     }},
   ];
 }

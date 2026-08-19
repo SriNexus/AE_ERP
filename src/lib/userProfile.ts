@@ -36,6 +36,8 @@ export type CanonicalUserProfile = {
   isManager?: boolean;
   status?: string;
   isSuperAdmin?: boolean;
+  // Phase 1 (Multi-Tenant §3.2): users.groupId — denormalized Group FK.
+  groupId?: string;
   updatedAt?: string;
   updatedBy?: string;
 };
@@ -127,6 +129,7 @@ export function normalizeUserProfile(raw: Record<string, unknown> & { id: string
     isManager: raw.isManager === true,
     status: text(raw.status) || undefined,
     isSuperAdmin: raw.isSuperAdmin === true,
+    groupId: text(raw.groupId) || undefined,
     updatedAt: toISO(raw.updatedAt),
     updatedBy: text(raw.updatedBy) || undefined,
   };
@@ -149,6 +152,7 @@ export function profileToAppUser(profile: CanonicalUserProfile): AppUser {
     warehouseId: profile.warehouseId,
     status: profile.status,
     isSuperAdmin: profile.isSuperAdmin === true,
+    groupId: profile.groupId,
   };
 }
 

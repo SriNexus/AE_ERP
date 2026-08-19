@@ -26,7 +26,10 @@ describe('Demo tenant security rules contract',()=>{
    expect(rules).toContain('(request.resource.data.isSuperAdmin == true) == (resource.data.isSuperAdmin == true)');
    // Owner statement must be independent of the auth-map anchor (owner keeps
    // user-management even if the lazy mapping is missing/purged).
-   expect(rules).toMatch(/allow update: if isOwnerIdentity\(\)[\s\S]*?companyId == resource\.data\.companyId/);
+   // F-13 (Phase 0): every clause is gated on actorIsActive() — deactivated
+   // users keep zero authority. The regex therefore allows the optional
+   // actorIsActive() prefix before isOwnerIdentity().
+   expect(rules).toMatch(/allow update: if (?:actorIsActive\(\) && )?isOwnerIdentity\(\)[\s\S]*?companyId == resource\.data\.companyId/);
  })
  it('has explicit isolated phone-lock rules',()=>{expect(rules).toContain('match /customer_phone_locks/{lockId}');expect(rules).toContain('request.resource.data.customerId == resource.data.customerId')});
  it('keeps immutable system records protected',()=>{expect(rules).toMatch(/match \/stock_ledger[\s\S]*allow update, delete: if false/);expect(rules).toMatch(/match \/audit_logs[\s\S]*allow update, delete: if false/)});
@@ -58,7 +61,10 @@ describe('Demo tenant security rules contract',()=>{
    expect(rules).toContain('function partnerUserIdUnchanged()');
    expect(rules).toContain("!resource.data.keys().hasAny(['userId'])");
    expect(rules).toContain("resource.data.userId == ''");
-   expect(rules).toMatch(/allow update: if canUpdateCompanyScoped\(\) && partnerUserIdUnchanged\(\);/);
+   // Phase 2 (Master Plan §9.3): the update path is the additive-OR form
+   // (existing Company authorization || Group Admin §5.2) — the userId
+   // immutability guard still gates EVERY update branch.
+   expect(rules).toMatch(/allow update: if \(canUpdateCompanyScoped\(\) \|\| groupAdminCanUpdate\(resource\.data\)\) && partnerUserIdUnchanged\(\);/);
  })
  it('Phase 6: scheme_registrations has an explicit rules block overriding the catch-all',()=>{
    // Spec §19 — the collection must NOT fall through to the generic
@@ -86,7 +92,9 @@ describe('Demo tenant security rules contract',()=>{
    // Identity immutability: partnerId/projectId/companyId cannot change.
    expect(rules).toContain('function schemeRegIdentityUnchanged()');
    // Protected records: hard delete is Admin-only.
-   expect(rules).toMatch(/match \/scheme_registrations\/\{id\}[\s\S]*?allow delete: if isAdmin\(\) && sameCompany\(resource\.data\);/);
+   // Phase 2 (§5.2/§9.3): hard delete is Admin-only (Group-scoped for Group
+   // Admin) — the additive-OR form keeps the Admin sameCompany branch intact.
+   expect(rules).toMatch(/match \/scheme_registrations\/\{id\}[\s\S]*?allow delete: if actorIsActive\(\) && \(\(isAdmin\(\) && sameCompany\(resource\.data\)\) \|\| \(isGroupAdmin\(\) && sameGroup\(resource\.data\)\)\);/);
    // Director is VIEW-ONLY (spec §18) — the scheme_registrations update rule
    // must not grant Director write access.
    const updateSection = rules.match(/match \/scheme_registrations\/\{id\}[\s\S]*?allow delete/)?.[0] ?? '';
@@ -95,17 +103,28 @@ describe('Demo tenant security rules contract',()=>{
  it('Phase 6: storage rules enforce case-scoped Registration documents',()=>{
    // Spec §15/§19 — documents resolve through the owning case/project; the
    // companies catch-all must not grant the scoped document paths.
+   //
+   // Phase 8 update: the companies catch-all's scoped-document exclusion was
+   // rewritten from a broken `allPaths.matches(...)` regex (the real Storage
+   // Rules emulator rejects `.matches()`/`.split()` at evaluation time — see
+   // storage.rules' Phase 8 NOTE comments and
+   // multiTenantStorageSecurity.emulator.test.ts) to a match-PATTERN-based
+   // first-segment exclusion. The two function-body assertions below
+   // (canReadScopedDocuments/canWriteScopedDocuments) were also updated from
+   // the old imperative `if (cond) return x;` chain — likewise invalid
+   // Storage Rules syntax — to the ternary-chain rewrite. This test still
+   // proves the same functional contract via the new (now actually-valid,
+   // actually-tested) shape.
    const storage = readFileSync('storage.rules', 'utf8');
    expect(storage).toContain('match /companies/{companyId}/cases/{caseId}/documents/{fileName}');
    expect(storage).toContain('match /companies/{companyId}/projects/{projectId}/documents/{fileName}');
-   expect(storage).toContain('function isScopedDocumentPath(allPaths)');
-   expect(storage).toMatch(/companies\/\{companyId\}\/\{allPaths=\*\*\}[\s\S]*?!isScopedDocumentPath\(allPaths\)/);
-   expect(storage).toMatch(/function canReadScopedDocuments\(companyId, docPath\)[\s\S]*?currentUserRole\(\) == 'Accounts'[\s\S]*?return false;/);
+   expect(storage).toMatch(/match \/companies\/\{companyId\}\/\{first\}\/\{rest=\*\*\}[\s\S]*?!\(first == 'cases' \|\| first == 'projects'\)/);
+   expect(storage).toMatch(/function canReadScopedDocuments\(companyId, docPath\)[\s\S]*?currentUserRole\(\) == 'Accounts' \? false/);
    expect(storage).toMatch(/function canWriteScopedDocuments\(companyId, docPath\)[\s\S]*?isOwnerPartner\(docPartnerId\(docPath\)\)/);
    expect(storage).toMatch(/function canReadScopedDocuments\(companyId, docPath\)[\s\S]*?isManagerOfPartner\(docPartnerId\(docPath\)\)/);
    expect(storage).toMatch(/function canReadScopedDocuments\(companyId, docPath\)[\s\S]*?isOwnerPartner\(docPartnerId\(docPath\)\)/);
    expect(storage).toMatch(/function docPartnerId\(docPath\)[\s\S]*?keys\(\)\.hasAny\(\['partnerId'\]\)/);
    // Cross-company denial on every scoped path.
-   expect(storage).toMatch(/if \(!signedIn\(\) \|\| currentUserCompanyId\(\) != companyId\) return false;/);
+   expect(storage).toMatch(/currentUserCompanyId\(\) != companyId \? false/);
  })
 });

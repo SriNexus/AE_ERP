@@ -60,10 +60,11 @@ describe('CustomerWorkspace — Phase 1 header/KPI wiring', () => {
     const mod = await import('../CustomerWorkspace');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
-    // 90s: cold import of the full CustomerWorkspace graph under full-suite
+    // 240s: cold import of the full CustomerWorkspace graph under full-suite
     // parallel load (verified: passes isolated/grouped within 15-30s; the
-    // full-suite parallel scheduler can push a cold compile past 30s).
-  }, 90000);
+    // full-suite parallel scheduler can push a cold compile past 170s on slow
+    // machines). 240s keeps the module-existence assertion meaningful.
+  }, 240000);
 });
 
 describe('CustomerWorkspace — Phase 0 regressions must remain intact', () => {

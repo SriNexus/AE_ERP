@@ -85,6 +85,30 @@ service cloud.firestore {
       return isOwnerIdentity() || (hasUserProfile() && currentUser().isSuperAdmin == true);
     }
 
+    // F-13 (Phase 0, Master Plan §9.2): an "active" actor. A deactivated user
+    // (status in the inactive set — BOTH the lowercase canonical forms from
+    // authIdentity.validateProfile AND the capitalized forms the Users UI
+    // actually writes, 'Inactive'/'Suspended') or a soft-deleted user loses all
+    // rules-level access. isOwnerIdentity() remains an unconditional bypass
+    // (the owner's identity comes from the signed token, never the users doc).
+    // Every optional-field read gates on keys().hasAny() first (fail-closed idiom).
+    function actorIsActive() {
+      return isOwnerIdentity()
+        || (hasUserProfile()
+          && !(currentUser().keys().hasAny(['status']) && currentUser().status in ['inactive', 'suspended', 'disabled', 'Inactive', 'Suspended', 'Disabled'])
+          && !(currentUser().keys().hasAny(['isDeleted']) && currentUser().isDeleted == true));
+    }
+
+    // NOTE (F-13 budget engineering): actorIsActive() is intentionally NOT
+    // embedded in isAdmin()/isSuperAdmin()/roleMatches() — those helpers are
+    // invoked NESTED inside canReadProjectScoped()/schemeRegCanRead() etc., and
+    // every nested invocation re-counts the function body toward the
+    // 1000-expression-per-request budget (the same live-bisected multiplier
+    // class documented above — F4/G2/J2/K3). The active-actor gate lives in
+    // the can*CompanyScoped()/canReadProjectScoped()/canSeeNotification()/
+    // schemeRegCanRead() helpers plus the explicit top-level clauses that call
+    // isAdmin()/isSuperAdmin()/roleMatches() directly. This keeps the gate
+    // evaluated ONCE per allow clause instead of ~3-4x per nested chain.
     function isAdmin() {
       return isOwnerIdentity() || isSuperAdmin() || (hasUserProfile() && currentUser().role == 'Admin');
     }
@@ -116,14 +140,374 @@ service cloud.firestore {
 
     // Cheap-first ordering: the same-company branch short-circuits before
     // the (heavier) super-admin check for the common in-tenant case.
+    // Phase 2 (§9.6): the same-company branch also requires the company's
+    // owning Group to exist and be Active — suspending a Group suspends its
+    // Company Admins too (deliberate, platform-wide behavior change called
+    // out explicitly in the plan). Owner/Super Admin bypass unconditionally
+    // (break-glass). companyGroupIsActive's gets are engine-cached and only
+    // evaluated on this branch, keeping the common path bounded.
     function sameCompany(data) {
       return isOwnerIdentity()
-        || (hasCompanyId(data) && data.companyId == userCompanyId())
+        || (hasCompanyId(data) && data.companyId == userCompanyId() && companyGroupIsActive(data))
         || isSuperAdmin();
     }
 
     function companyIdUnchanged() {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['companyId']);
+    }
+
+    // ── Phase 2 (Multi-Tenant, Master Plan §9.1) — Group tier helpers ────────
+    // GroupAdmin is a SCOPE extension, not a permission extension (§5.2): a
+    // Group Admin's grants are the target Company's own Admin role grants. The
+    // rules below only extend WHICH documents a GroupAdmin can reach (their
+    // whole Group), never what they can do on them (that stays role/permission
+    // driven). Every helper is lean: identity reads come from the cached auth
+    // map + currentUser() chain (the same single-get pattern documented above),
+    // and all optional-field reads gate on keys().hasAny() first (the
+    // fail-closed missing-field idiom used throughout this file).
+
+    // The GroupAdmin's authoritative Group, read from the auth map's
+    // denormalized groupId (Phase 1 §3.2 — mirrors users.groupId, validated at
+    // write time by validOwnMapping). '' when absent (no group authority) — a
+    // GroupAdmin without a groupId in their mapping resolves no cross-company
+    // scope and fails closed everywhere, exactly like a missing companyId.
+    //
+    // LEAN (§13 expression budget): reads come from hasAuthMap() + the cached
+    // auth-map path ONLY — deliberately NOT hasUserProfile()/hasValidAuthMap()/
+    // currentUser(), whose re-entry re-counts the whole identity chain toward
+    // the 1000-expression budget on every GroupAdmin-branch evaluation (the
+    // same multiplier class live-bisected as F4/G2/J2/K3). The map's groupId
+    // was validated at write time by validOwnMapping, so the anchor is the
+    // self-owned mapping, exactly like userCompanyId().
+    function actorGroupId() {
+      return hasAuthMap()
+        && get(authMapPath()).data.keys().hasAny(['groupId'])
+        && get(authMapPath()).data.groupId is string
+        ? get(authMapPath()).data.groupId : '';
+    }
+
+    // LEAN GroupAdmin identity: the mapped users doc's role, reached through
+    // the cached auth-map userId — no hasValidAuthMap()/currentUser() re-entry.
+    function actorIsGroupAdmin() {
+      return hasAuthMap()
+        && get(authMapPath()).data.userId is string
+        && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.role == 'GroupAdmin';
+    }
+
+    // §9.1 naming-compatible alias (isGroupAdmin() is the plan's name; the
+    // implementation stays lean).
+    function isGroupAdmin() {
+      return actorIsGroupAdmin();
+    }
+
+    // Mirrors hasCompanyId()/hasManagerId() exactly: a missing groupId field
+    // must yield false (clause skipped), never a hard rules denial.
+    function hasGroupId(data) {
+      return data.keys().hasAny(['groupId']) && data.groupId is string && data.groupId.size() > 0;
+    }
+
+    // Master Plan §9.1. sameGroup() is the additive-OR condition: owner /
+    // super-admin bypass unconditionally (platform tier), otherwise the actor
+    // must be a GroupAdmin whose authoritative group equals the target
+    // document's groupId. The document's groupId is the denormalized,
+    // write-time-stamped field (§3.2) — never a client-claimed value, because
+    // every write helper strips client-supplied groupId and re-stamps the
+    // authoritative one (§3.4, Phase 1).
+    function sameGroup(data) {
+      return isOwnerIdentity()
+        || isSuperAdmin()
+        || (isGroupAdmin() && hasGroupId(data) && data.groupId == actorGroupId());
+    }
+
+    // Group suspension (§9.6): a suspended Group loses ALL access — its users
+    // (including its Group Admins and its Company Admins) are denied at the
+    // rules layer; Super Admin retains break-glass access (isSuperAdmin() /
+    // isOwnerIdentity() bypass sameGroup/sameCompany before this is consulted).
+    function groupIsActive(groupId) {
+      return groupId is string && groupId.size() > 0
+        && exists(/databases/$(database)/documents/groups/$(groupId))
+        && get(/databases/$(database)/documents/groups/$(groupId)).data.status == 'Active';
+    }
+
+    // §9.6: sameCompany() gains a group-suspension check — the actor's OWN
+    // company access also requires the company's owning Group to exist and be
+    // Active (looks up companies/{companyId}.groupId, then groups/{groupId}).
+    // This is the one place Phase 2 deliberately changes existing Company-tier
+    // behavior: suspending a Group suspends everyone under it. The gets are
+    // engine-cached and only evaluated on the same-company branch (the common
+    // in-tenant case), keeping the expression cost bounded.
+    function companyGroupIsActive(data) {
+      return hasCompanyId(data)
+        && exists(/databases/$(database)/documents/companies/$(data.companyId))
+        && get(/databases/$(database)/documents/companies/$(data.companyId)).data.keys().hasAny(['groupId'])
+        && groupIsActive(get(/databases/$(database)/documents/companies/$(data.companyId)).data.groupId);
+    }
+
+    // Lean additive-OR composites for the §9.3 pattern. The plan's literal
+    // pattern is `isGroupAdmin() && sameGroup(data)` — the owner/super-admin
+    // terms inside sameGroup() are redundant here because the primary
+    // can*CompanyScoped() branch already covers them; these composites keep
+    // the expression budget bounded while preserving the exact same
+    // semantics for the GroupAdmin branch. groupIsActive() is included per
+    // §9.6 (every sameGroup-gated clause additionally requires the Group to
+    // be Active). Cheap doc-field checks are ordered FIRST so non-GroupAdmin
+    // actors and non-matching docs short-circuit before the identity reads.
+    function groupAdminCanRead(data) {
+      return hasGroupId(data)
+        && groupIsActive(data.groupId)
+        && data.groupId == actorGroupId()
+        && actorIsGroupAdmin();
+    }
+
+    // §3.2 data integrity (Phase 2): a tenant-scoped write's groupId (when
+    // present) must equal the owning Company's group — a forged/contradictory
+    // groupId can never plant a cross-Group reference or leak a document into
+    // another Group's GroupAdmin reach. A write WITHOUT groupId is accepted
+    // (pre-backfill window / legacy direct writes — the Phase 1 posture). For
+    // same-company writes the companies get() is already in flight
+    // (companyGroupIsActive) and engine-cached; for GroupAdmin writes it is
+    // one bounded get() on the write path only (never the read path).
+    function groupIdMatchesCompany(data) {
+      return !hasGroupId(data)
+        || (hasCompanyId(data)
+          && exists(/databases/$(database)/documents/companies/$(data.companyId))
+          && get(/databases/$(database)/documents/companies/$(data.companyId)).data.keys().hasAny(['groupId'])
+          && data.groupId == get(/databases/$(database)/documents/companies/$(data.companyId)).data.groupId);
+    }
+
+    function groupAdminCanCreate(data) {
+      return hasGroupId(data)
+        && groupIsActive(data.groupId)
+        && data.groupId == actorGroupId()
+        && actorIsGroupAdmin()
+        && groupIdMatchesCompany(data);
+    }
+
+    // Mirror of companyIdUnchanged(): groupId is denormalized and immutable at
+    // write time (§3.2) — a direct update can never re-point a document's Group.
+    function groupIdUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['groupId']);
+    }
+
+    // §9.3 update pattern: sameGroup(resource) && sameGroup(request) &&
+    // groupIdUnchanged(), PLUS companyIdUnchanged() — §3.2 declares BOTH
+    // tenant-ownership fields (companyId AND groupId) Required+Immutable on
+    // every tenant-scoped collection, so a GroupAdmin update can never
+    // re-point a business document to another Company (even within their own
+    // Group). The one deliberate exception is `users`, whose GroupAdmin
+    // update branch handles same-Group Company transfer explicitly (§4.4).
+    function groupAdminCanUpdate(data) {
+      return hasGroupId(data) && hasGroupId(request.resource.data)
+        && groupIdUnchanged()
+        && companyIdUnchanged()
+        && groupIsActive(data.groupId)
+        && data.groupId == actorGroupId()
+        && request.resource.data.groupId == actorGroupId()
+        && actorIsGroupAdmin()
+        && groupIdMatchesCompany(request.resource.data);
+    }
+
+    // ── Phase 3 (F-07) — Warehouse tier helpers ───────────────────────────
+    // Master Plan §8.1/§8.2: a NEW warehouse-level authorization scope. A
+    // user whose role is warehouse-operational (role matches Warehouse /
+    // Operations — the existing warehouse-adjacent roles the rules already
+    // gate with roleMatches('.*Warehouse.*')/'roleMatches('.*Operations.*')
+    // on stock qty / dispatch confirmation) and who carries a warehouseId
+    // assignment is scoped by sameWarehouse() on the warehouse-scoped
+    // collections (stock, dispatch, goods_receipts). Every other role is
+    // unaffected (§8.2/§8.4): Admin/GroupAdmin/Director/Manager retain full
+    // Company/Group-wide warehouse visibility, and owner/Super Admin bypass
+    // unconditionally (break-glass). A warehouse-operational role with NO
+    // warehouseId assignment FAILS CLOSED (no warehouse scope to resolve).
+    //
+    // LEAN (§13 expression budget): identity reads come from the cached
+    // auth-map → users-doc chain (the same single-get pattern as the Phase 2
+    // Group helpers); role matching mirrors the existing roleMatches() regex
+    // usage on these same collections; optional-field reads gate on
+    // keys().hasAny() first (the fail-closed missing-field idiom).
+
+    // The actor's authoritative warehouse, from their own users doc
+    // (users.warehouseId, §8.2 — a singular field, never an array). '' when
+    // absent → sameWarehouse() can never match → fail closed.
+    function actorWarehouseId() {
+      return hasAuthMap()
+        && get(authMapPath()).data.userId is string
+        && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.keys().hasAny(['warehouseId'])
+        && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.warehouseId is string
+        ? get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.warehouseId : '';
+    }
+
+    // §8.2: warehouse-operational roles (regex, matching the existing
+    // roleMatches('.*Warehouse.*')/'roleMatches('.*Operations.*') gates on
+    // the same collections). Role check only — the warehouseId presence is
+    // enforced by sameWarehouse() (fail closed when missing).
+    function actorIsWarehouseRestricted() {
+      return hasAuthMap()
+        && get(authMapPath()).data.userId is string
+        && (get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.role.matches('.*Warehouse.*')
+          || get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.role.matches('.*Operations.*'));
+    }
+
+    // Mirrors hasCompanyId()/hasGroupId() exactly: a missing/non-string
+    // warehouseId must yield false (clause skipped), never a hard denial.
+    function hasWarehouseId(data) {
+      return data.keys().hasAny(['warehouseId']) && data.warehouseId is string && data.warehouseId.size() > 0;
+    }
+
+    // LEAN Super Admin check for the warehouse gate: reads the mapped users
+    // doc directly through the cached auth-map path (the actorIsGroupAdmin()
+    // pattern) instead of re-entering hasValidAuthMap()/currentUser() — the
+    // F4/G2/J2/K3 multiplier class. Preserves the §8.4 break-glass exactly.
+    function actorIsSuperAdmin() {
+      return isOwnerIdentity()
+        || (hasAuthMap()
+          && get(authMapPath()).data.userId is string
+          && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.keys().hasAny(['isSuperAdmin'])
+          && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.isSuperAdmin == true);
+    }
+
+    // §8.1 sameWarehouse(): the target document's warehouseId equals the
+    // actor's assigned warehouse. Owner/Super Admin bypass unconditionally
+    // (platform tier, §8.4 break-glass); non-warehouse-restricted actors pass
+    // through. ONE LEAN PASS over the cached auth-map → users-doc chain — the
+    // actorIsGroupAdmin() pattern, deliberately NOT the separate
+    // actorIsSuperAdmin()/actorIsWarehouseRestricted()/actorWarehouseId()
+    // helper invocations, whose repeated hasAuthMap()/get(authMapPath())/
+    // get(users/...) calls multiplied toward the 1000-expression budget on the
+    // stacked write rules (the F4/G2/J2/K3 class, same live-bisected fix as
+    // Phase 2's groupAdminCanRead). actorWarehouseScopeIsAny() answers "does
+    // the warehouse gate apply?" with the isSuperAdmin + role reads inlined;
+    // the restricted actor's warehouseId is resolved in a second call ONLY
+    // when the gate applies. A warehouse-operational role with NO warehouseId
+    // assignment fails closed ('' can never equal a real id).
+    function actorWarehouseScopeIsAny() {
+      return isOwnerIdentity()
+        || !hasAuthMap()
+        || !(get(authMapPath()).data.userId is string)
+        || (get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.keys().hasAny(['isSuperAdmin'])
+          && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.isSuperAdmin == true)
+        || !(get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.keys().hasAny(['role'])
+          && (get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.role.matches('.*Warehouse.*')
+            || get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.role.matches('.*Operations.*')));
+    }
+
+    function actorWarehouseScopeId() {
+      return get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.keys().hasAny(['warehouseId'])
+        && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.warehouseId is string
+        ? get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.warehouseId : '';
+    }
+
+    // LEAN role check for the warehouse-scoped write rules' role gates
+    // (e.g. the stock qty-update branch): reads the mapped users doc directly
+    // through the cached auth-map path instead of roleMatches()/isAdmin(),
+    // which re-enter hasUserProfile()/currentUser() (the F4/G2/J2/K3 class).
+    function actorRoleMatches(pattern) {
+      return hasAuthMap()
+        && get(authMapPath()).data.userId is string
+        && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.keys().hasAny(['role'])
+        && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.role.matches(pattern);
+    }
+
+    function sameWarehouse(data) {
+      return actorWarehouseScopeIsAny()
+        || (hasWarehouseId(data) && data.warehouseId == actorWarehouseScopeId());
+    }
+
+    // F-08-class FK validation (Master Plan Phase 3 scope: "warehouseId FK
+    // validation on write"): the referenced warehouse must EXIST and belong
+    // to the same Company as the document — a forged cross-company reference
+    // (companyId: COMPANY_A, warehouseId: WAREHOUSE_B where WAREHOUSE_B
+    // belongs to COMPANY_C) is rejected. Same exists()+get() technique as the
+    // group/company FK checks elsewhere in this file.
+    function warehouseBelongsToCompany(data) {
+      return hasWarehouseId(data)
+        && exists(/databases/$(database)/documents/warehouses/$(data.warehouseId))
+        && get(/databases/$(database)/documents/warehouses/$(data.warehouseId)).data.keys().hasAny(['companyId'])
+        && get(/databases/$(database)/documents/warehouses/$(data.warehouseId)).data.companyId == data.companyId;
+    }
+
+    // warehouseId is immutable once a warehouse-scoped document is created —
+    // a direct update can never re-point a stock/dispatch/goods-receipts
+    // record at another warehouse (mirrors companyIdUnchanged()/groupIdUnchanged()).
+    function warehouseIdUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['warehouseId']);
+    }
+
+    // LEAN actor userId for the write-path anchoring gates (createdBy /
+    // receivedBy == currentUserId()): the full currentUserId() re-enters
+    // hasUserProfile()/hasValidAuthMap() (the F4/G2/J2/K3 multiplier class);
+    // this reads the self-owned mapping directly, preserving the owner
+    // pseudo-id ('owner:{uid}') and the fail-closed '' for absent mappings.
+    function actorUserId() {
+      return isOwnerIdentity() ? 'owner:' + request.auth.uid
+        : (hasAuthMap() && get(authMapPath()).data.userId is string ? get(authMapPath()).data.userId : '');
+    }
+
+    // LEAN Phase 3 write-scope composites for the warehouse-scoped collections
+    // (stock / stock_ledger / dispatch / goods_receipts). The same-company
+    // branch uses the DIRECT companyId comparison + the §9.6 Group-active gate
+    // instead of the full sameCompany() chain — the documented F4/G2/J2/K3
+    // expression multiplier — because the Phase 3 warehouse gates stacked on
+    // top (warehouseBelongsToCompany + sameWarehouse + createdBy/receivedBy
+    // anchoring) push the full chain over the 1000-expression budget on the
+    // write path. CHEAPEST-FIRST ordering (the Phase 2 users-list winning
+    // shape): isOwnerIdentity (token) → the direct same-company comparison →
+    // the super-admin check LAST so it short-circuits for in-tenant actors —
+    // actorIsSuperAdmin/hasUserProfile must NOT be evaluated before the direct
+    // branch, or their re-entered identity reads re-count toward the budget on
+    // every in-tenant write. The GroupAdmin additive-OR is unchanged (§5.2).
+    function warehouseActorCanCreate(data) {
+      return isOwnerIdentity()
+        || (hasAuthMap()
+          && get(authMapPath()).data.keys().hasAny(['companyId'])
+          && get(authMapPath()).data.companyId is string
+          && data.companyId == get(authMapPath()).data.companyId
+          && companyGroupIsActive(data) && groupIdMatchesCompany(data))
+        || actorIsSuperAdmin()
+        || groupAdminCanCreate(data);
+    }
+
+    function warehouseActorCanUpdate(existing) {
+      return isOwnerIdentity()
+        || (hasAuthMap()
+          && get(authMapPath()).data.keys().hasAny(['companyId'])
+          && get(authMapPath()).data.companyId is string
+          && existing.companyId == get(authMapPath()).data.companyId
+          && companyGroupIsActive(existing) && companyIdUnchanged()
+          && groupIdMatchesCompany(request.resource.data))
+        || actorIsSuperAdmin()
+        || groupAdminCanUpdate(existing);
+    }
+
+    // §5.6: roles stay Company-scoped (F-03 keying), and a Group Admin reads a
+    // target Company's role documents through the sameGroup()-extended access
+    // pattern as every other Company-scoped collection. Role docs carry
+    // companyId (never groupId — §3.2 excludes `roles` from the groupId
+    // denormalization), so the Group's identity is resolved through the
+    // Company: companies/{companyId}.groupId == actorGroupId(), with the
+    // Group-active gate (§9.6). Single get() on the companies doc,
+    // engine-cached, evaluated only for GroupAdmin actors. Actor check LAST
+    // (cheapest-first) so non-GroupAdmin reads short-circuit on the doc.
+    function groupAdminCanReadRole(data) {
+      return hasCompanyId(data)
+        && data.companyId.size() > 0
+        && exists(/databases/$(database)/documents/companies/$(data.companyId))
+        && get(/databases/$(database)/documents/companies/$(data.companyId)).data.keys().hasAny(['groupId'])
+        && get(/databases/$(database)/documents/companies/$(data.companyId)).data.groupId == actorGroupId()
+        && groupIsActive(get(/databases/$(database)/documents/companies/$(data.companyId)).data.groupId)
+        && actorIsGroupAdmin();
+    }
+
+    // §4.4 users lifecycle: a Group Admin creates/transfers users into any
+    // Company of their own Group. The requested companyId must belong to the
+    // actor's authoritative Group (companies/{companyId}.groupId ==
+    // actorGroupId()) — a forged companyId pointing into another Group is
+    // rejected. Single get(), engine-cached, GroupAdmin actors only.
+    function groupAdminUserCompanyMatches(data) {
+      return hasCompanyId(data)
+        && exists(/databases/$(database)/documents/companies/$(data.companyId))
+        && get(/databases/$(database)/documents/companies/$(data.companyId)).data.keys().hasAny(['groupId'])
+        && get(/databases/$(database)/documents/companies/$(data.companyId)).data.groupId == actorGroupId();
     }
 
     function selfAccessFieldsUnchanged() {
@@ -230,8 +614,19 @@ service cloud.firestore {
             && request.resource.data.userId == resource.data.userId);
     }
 
+    // F-13 (Phase 0): the active-actor gate is applied at the TOP-LEVEL allow
+    // clauses (not inside these helpers) so each request pays for actorIsActive()
+    // once per matching match block instead of once per nested helper call.
+    // The Firestore emulator counts every subexpression toward the
+    // 1000-expression-per-request budget WITHOUT short-circuiting across the
+    // matching blocks, and canReadProjectScoped()/canSeeNotification() etc.
+    // re-enter these helpers and the identity chain several times per request —
+    // embedding actorIsActive() here re-introduced the live-bisected
+    // expression-multiplier class (F4/G2/J2/K3) and pushed legitimate reads
+    // (e.g. an Admin reading a projects doc) over the budget. Top-level
+    // placement is also exactly what Master Plan §9.2 prescribes.
     function canCreateCompanyScoped() {
-      return signedIn() && sameCompany(request.resource.data);
+      return signedIn() && sameCompany(request.resource.data) && groupIdMatchesCompany(request.resource.data);
     }
 
     function canReadCompanyScoped() {
@@ -239,7 +634,8 @@ service cloud.firestore {
     }
 
     function canUpdateCompanyScoped() {
-      return signedIn() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged();
+      return signedIn() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged()
+        && groupIdMatchesCompany(request.resource.data);
     }
 
     function isPartner() {
@@ -324,8 +720,19 @@ service cloud.firestore {
         && request.resource.data.companyId == resource.data.companyId;
     }
 
+    // F-02 (Phase 0): isSpecialCollection() now also covers the 14 collections
+    // that previously fell through to the generic wildcard below — under
+    // Firestore's OR-across-matching-match-blocks semantics, the wildcard's
+    // weaker company-only grant silently nullified these collections' own
+    // stricter, purpose-built rules (project-assignment read scoping,
+    // purchase-order status machine, projectId identity immutability), which
+    // the audit EMPIRICALLY confirmed bypassable on the write path
+    // (unassigned Surveyor: illegal Draft->Received transition and illegal
+    // projectId mutation, 3/3 reproductions). Excluding them makes the specific
+    // blocks authoritative. Also adds security_logs (F-04), device_tokens
+    // (F-17) and backup_metadata (F-05), which now have their own blocks.
     function isSpecialCollection(collectionId) {
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations'];
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings'];
     }
 
     match /companies/{companyId} {
@@ -349,8 +756,32 @@ service cloud.firestore {
       // for full company management. roleBootstrap.ts's Director role is
       // explicitly documented as read-only executive visibility across core
       // modules including `companies: { view: true }`.
-      allow read: if isAdmin() || roleMatches('Director') || (hasUserProfile() && companyId == userCompanyId());
-      allow create: if isAdmin() && hasCompanyId(request.resource.data) && request.resource.data.id == companyId && sameCompany(request.resource.data);
+      // F-01 (Phase 0): read is now company-scoped — the actor may read only
+      // the companies record(s) of their OWN company (field-anchored on
+      // resource.data.companyId so list queries with where('companyId','==',...)
+      // stay provable), plus owner/Super Admin platform-wide. The previous
+      // unconditional isAdmin()/Director grant let any Admin of any company read
+      // every tenant's record (legal name, GST/PAN/CIN, bank details) — the
+      // cross-tenant disclosure the audit rated CRITICAL. The matching client
+      // query scoping lives in src/lib/firestore.ts (companyScopedQuery).
+      // Phase 2 (§9.3 additive-OR): a Group Admin may read the companies of
+      // their own Group (companies docs carry groupId per §3.2), list them
+      // (where('groupId','==',actorGroupId) is provable against
+      // groupAdminCanRead), and — Admin-equivalent per §5.2 — create a company
+      // in their own Group (the request's groupId must equal the actor's
+      // authoritative group: a forged Group B groupId is rejected).
+      allow read: if actorIsActive() && (isOwnerIdentity()
+        || isSuperAdmin()
+        || (hasUserProfile() && (resource == null || (hasCompanyId(resource.data) && resource.data.companyId == userCompanyId())))
+        || groupAdminCanRead(resource.data));
+      // §5.2: GroupAdmin grants == the target Company's Admin grants — so the
+      // GroupAdmin create branch mirrors the Admin branch's id-anchor and
+      // requires the new company's groupId == actorGroupId() (never a
+      // client-chosen Group) and the Group to be Active.
+      allow create: if actorIsActive() && (isAdmin() && hasCompanyId(request.resource.data) && request.resource.data.id == companyId && sameCompany(request.resource.data))
+        || (isGroupAdmin() && hasCompanyId(request.resource.data) && request.resource.data.id == companyId
+          && hasGroupId(request.resource.data) && request.resource.data.groupId == actorGroupId()
+          && groupIsActive(request.resource.data.groupId));
       // Round-robin assignment exception (RBAC create-permission root cause,
       // part 2, found via live browser verification): creating a Lead with
       // no explicit assignee triggers getNextAssignee()'s round-robin logic,
@@ -364,10 +795,15 @@ service cloud.firestore {
       // updatedBy/updatedAt audit fields every write already carries) —
       // company name, branding, business mode, and everything else remain
       // admin-only, exactly as before.
-      allow update: if (isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged()
+      allow update: if actorIsActive() && (
+        (isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged()
+          && resource.data.id == companyId && request.resource.data.id == companyId)
+        || (isGroupAdmin() && hasGroupId(resource.data) && hasGroupId(request.resource.data)
+          && resource.data.groupId == actorGroupId() && request.resource.data.groupId == actorGroupId()
+          && groupIdUnchanged() && companyIdUnchanged() && groupIsActive(resource.data.groupId)
           && resource.data.id == companyId && request.resource.data.id == companyId)
         || (signedIn() && hasUserProfile() && companyId == userCompanyId()
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['roundRobinPointer', 'updatedBy', 'updatedAt']));
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['roundRobinPointer', 'updatedBy', 'updatedAt'])));
       allow delete: if false;
     }
 
@@ -381,15 +817,53 @@ service cloud.firestore {
       return !data.keys().hasAny(['isSystem']) || data.isSystem != true;
     }
 
+    // ── Phase 3 (F-07/F-08) — warehouses collection ────────────────────────
+    // Previously the ONLY collection with warehouse-scoped meaning that had no
+    // explicit rules block at all (audit §9: "relies entirely on the generic
+    // wildcard"). This explicit block makes the FK target deliberate, matching
+    // the company-scoped read/create/update the generic fallback already
+    // granted, plus (a) companyId immutability on update, (b) delete denied
+    // everywhere (soft-delete via status is the only path), and (c) the
+    // §5.2 GroupAdmin additive-OR. §8.1 deliberately does NOT warehouse-scope
+    // the warehouses collection itself (sameWarehouse applies to stock /
+    // dispatch / goods_receipts — "the three collections where warehouse-
+    // level data actually differs meaningfully"); warehouse metadata stays
+    // company-readable so every role can list warehouses for selection.
+    match /warehouses/{warehouseId} {
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      // A warehouse doc's companyId FK: the warehouse must be created into the
+      // actor's own company (sameCompany anchors it) — no cross-company
+      // warehouses. GroupAdmin additive-OR keeps §5.2 Admin-equivalence.
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data))
+        && request.resource.data.id == warehouseId
+        && hasCompanyId(request.resource.data);
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
+        && companyIdUnchanged();
+      allow delete: if false;
+    }
+
     match /roles/{roleId} {
-      allow read: if signedIn();
+      // F-03 closure (Phase 1, Master Plan §5.6): roles read is now Company-
+      // scoped — role documents are per-company keyed (`${companyId}_${roleName}`
+      // for system templates, ROL-* for custom roles) and carry the owning
+      // companyId, so the permission bootstrap resolves the actor's role against
+      // THEIR company's role documents. sameCompany() keeps the owner/Super
+      // Admin platform-wide read. The `resource == null` guard mirrors the users
+      // block: a get() on a not-yet-created doc (existence probes) must return a
+      // clean "not found" instead of an evaluation error denied as 403. Phase 0
+      // left this read open because the then-current name-keyed SHARED templates
+      // could not be company-scoped without locking out non-stamping companies;
+      // the Phase 1 backfill (scripts/backfill-group-denorm.cjs) creates the
+      // per-company keyed copies BEFORE this rule ships (expand → backfill →
+      // contract ordering, Master Plan §10.3).
+      allow read: if actorIsActive() && signedIn() && (resource == null || canReadCompanyScoped() || groupAdminCanReadRole(resource.data));
       // System roles (isSystem=true) are protected: company Admins may manage
       // custom roles, only Super Admins may create/modify system roles. Both
       // the existing doc (update) and the requested doc (create/update) are
       // checked so an Admin cannot promote a custom role to a system role via
       // an update that adds isSystem=true.
-      allow create: if isAdmin() && (roleNotSystemProtected(request.resource.data) || isSuperAdmin());
-      allow update: if isAdmin() && (roleNotSystemProtected(resource.data) || isSuperAdmin())
+      allow create: if actorIsActive() && isAdmin() && (roleNotSystemProtected(request.resource.data) || isSuperAdmin());
+      allow update: if actorIsActive() && isAdmin() && (roleNotSystemProtected(resource.data) || isSuperAdmin())
         && (roleNotSystemProtected(request.resource.data) || isSuperAdmin());
       allow delete: if false;
     }
@@ -406,12 +880,38 @@ service cloud.firestore {
       // the create-user flow (Admin create-user runtime-failure root cause,
       // found via live browser verification). Mirrors the same guard already
       // used by the settings collection's get rule for the identical reason.
-      allow read: if signedIn()
+      // F-13 (Phase 0): a deactivated user must still be able to read their OWN
+      // document (email-self branch — the deliberate exception per Master Plan
+      // §9.2, so the app can render a clear "your account is inactive" message
+      // instead of a raw permission-denied). Every OTHER access path requires
+      // an active actor (actorIsActive()).
+      // §9.3 (Phase 2): a Group Admin may read the users of every Company in
+      // their own Group (users docs carry the §3.2 denormalized groupId);
+      // anything outside the Group fails closed. All pre-existing paths
+      // (email self-read, same-company, owner/Super Admin) are unchanged.
+      // get/list split (mirrors the settings block): the GET rule keeps the
+      // F-13 deliberate exception (a deactivated user can still read their OWN
+      // document) and the email-self branch, guarded by keys().hasAny() so the
+      // LIST provability engine (which evaluates against shadow docs without
+      // every field) never hits a missing-field evaluation error.
+      allow get: if signedIn()
         && (resource == null
-          || request.auth.token.email == resource.data.email
-          || isOwnerIdentity()
-          || (hasUserProfile() && sameCompany(resource.data))
-          || isSuperAdmin());
+          || (resource.data.keys().hasAny(['email']) && request.auth.token.email == resource.data.email)
+          || actorIsActive() && (isOwnerIdentity() || (hasUserProfile() && sameCompany(resource.data)) || isSuperAdmin() || groupAdminCanRead(resource.data)));
+      // The LIST rule is deliberately leaner (no email-self / null-resource
+      // branches — those are get-only semantics): every list path requires an
+      // active actor, and the provable branches are the same-company /
+      // same-Group / platform ones. The same-company branch uses the direct
+      // companyId comparison + the §9.6 Group-active gate instead of the full
+      // sameCompany() chain (whose re-entered identity reads are what pushes
+      // list provability over the 1000-expression budget — the same
+      // multiplier class live-bisected as F4/G2/J2/K3).
+      allow list: if signedIn() && actorIsActive()
+        && (isOwnerIdentity() || isSuperAdmin()
+          || (hasUserProfile() && hasCompanyId(resource.data)
+            && resource.data.companyId == userCompanyId()
+            && companyGroupIsActive(resource.data))
+          || groupAdminCanRead(resource.data));
       // Contact-identity exception (RBAC create-permission root cause, found
       // via live browser verification): creating a Lead/Customer/Employee
       // (any role with the corresponding module's `create` permission, not
@@ -429,20 +929,56 @@ service cloud.firestore {
       function isContactIdentityRole(data) {
         return data.role in ['Lead', 'Customer', 'Employee', 'Driver', 'Vendor', 'InstallationPartner', 'FieldAgent'];
       }
-      allow create: if (isAdmin() || (signedIn() && isContactIdentityRole(request.resource.data)))
-        && hasCompanyId(request.resource.data) && sameCompany(request.resource.data)
-        // Existence-guarded: dereferencing a field absent from the document
-        // is a rules evaluation ERROR in Firestore (denied, indistinguishable
-        // from a real 403), not a graceful `undefined`/false. Lead/Customer/
-        // Employee creation payloads never carry an isSuperAdmin field at all
-        // (only the Admin "Add User" form does) — this second, independent
-        // gap meant even an Admin's own lead creation would have been denied
-        // by this exact line once the isAdmin()-only restriction above was
-        // relaxed. Mirrors the existing hasManagerId()/hasOrgField() idiom
-        // already used elsewhere in this file for the same reason.
-        && (!request.resource.data.keys().hasAny(['isSuperAdmin']) || request.resource.data.isSuperAdmin != true || isSuperAdmin())
-        && managerScopeMatches()
-        && request.resource.data.email != 'shreeniwas.tripathi0@gmail.com';
+      allow create: if actorIsActive() && request.resource.data.email != 'shreeniwas.tripathi0@gmail.com'
+        && (
+          // Existing company path (unchanged): Admin staff creation or any
+          // signed-in user creating a phone-keyed contact identity
+          // (Lead/Customer/Employee/...). The contact-identity path additionally
+          // accepts a Group Admin creating a contact in any Company of their
+          // Group (the write helper stamps the authoritative groupId, so
+          // groupAdminCanCreate's groupId match is satisfiable).
+          (
+            (isAdmin() || (signedIn() && isContactIdentityRole(request.resource.data)))
+            && hasCompanyId(request.resource.data)
+            && (sameCompany(request.resource.data)
+              || (isContactIdentityRole(request.resource.data) && groupAdminCanCreate(request.resource.data)))
+            // §5.1: only Super Admin creates Group Admins (folded into this
+            // branch so GroupAdmin actors short-circuit before it — the
+            // GroupAdmin branch below already forbids the role).
+            && (isSuperAdmin() || !request.resource.data.keys().hasAny(['role']) || request.resource.data.role != 'GroupAdmin')
+            // Existence-guarded: dereferencing a field absent from the
+            // document is a rules evaluation ERROR in Firestore (denied,
+            // indistinguishable from a real 403), not a graceful
+            // `undefined`/false. Lead/Customer/Employee creation payloads
+            // never carry an isSuperAdmin field at all (only the Admin "Add
+            // User" form does) — this second, independent gap meant even an
+            // Admin's own lead creation would have been denied by this exact
+            // line once the isAdmin()-only restriction above was relaxed.
+            // Mirrors the existing hasManagerId()/hasOrgField() idiom already
+            // used elsewhere in this file for the same reason.
+            && (!request.resource.data.keys().hasAny(['isSuperAdmin']) || request.resource.data.isSuperAdmin != true || isSuperAdmin())
+            // §3.2: a same-company-created user's groupId (when present) must
+            // match their Company's Group — a forged groupId can never plant
+            // a user into another Group's reach. (The GroupAdmin branch below
+            // is already coherent via actorGroupId + company-in-Group.)
+            && groupIdMatchesCompany(request.resource.data)
+          )        || (
+          // §4.4 (Phase 2): a Group Admin creates a staff user in any
+          // Company of their own Group. users.groupId must equal the
+          // actor's authoritative group; the target company must belong to
+          // that group (groupAdminUserCompanyMatches); the new user can
+          // never be granted GroupAdmin (only Super Admin creates Group
+          // Admins — §5.1) or SuperAdmin.
+          isGroupAdmin()
+          && hasCompanyId(request.resource.data)
+          && hasGroupId(request.resource.data) && request.resource.data.groupId == actorGroupId()
+          && groupIsActive(request.resource.data.groupId)
+          && groupAdminUserCompanyMatches(request.resource.data)
+          && (!request.resource.data.keys().hasAny(['role']) || request.resource.data.role != 'GroupAdmin')
+          && (!request.resource.data.keys().hasAny(['isSuperAdmin']) || request.resource.data.isSuperAdmin != true)
+        )
+        )
+        && managerScopeMatches();
       // FLATTENED update rule. Live-bisect evidence: the previous deep helper
       // nesting (isSelf -> hasValidAuthMap -> currentUserId -> currentUser x3,
       // plus userCompanyId x2) exceeded the 1000-expression evaluation budget
@@ -457,7 +993,7 @@ service cloud.firestore {
       // at first login and could be missing/purged), so the owner bypasses
       // the anchor entirely. companyId stays immutable and the owner's own
       // record stays protected (same global clauses as the non-owner rule).
-      allow update: if isOwnerIdentity()
+      allow update: if actorIsActive() && isOwnerIdentity()
         // companyId immutable on update
         && request.resource.data.companyId == resource.data.companyId
         // Phase 1: channelPartnerId immutable once established.
@@ -472,12 +1008,18 @@ service cloud.firestore {
       // B) admin/super-admin: actor doc role must be Admin; super-admin may
       //    grant/revoke isSuperAdmin cross-company, company admin may manage
       //    same-company users without changing isSuperAdmin or companyId.
-      allow update: if signedIn()
+      allow update: if actorIsActive() && signedIn()
         && exists(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid))
         && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId is string
         && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.email == request.auth.token.email
         && (
-          (get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId == userId && selfAccessFieldsUnchanged())
+          // A) self-update: own profile fields only (companyId immutable).
+          (get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId == userId && selfAccessFieldsUnchanged()
+            && request.resource.data.companyId == resource.data.companyId)
+          // B) admin/super-admin: actor doc role must be Admin; super-admin may
+          //    grant/revoke isSuperAdmin cross-company, company admin may
+          //    manage same-company users without changing isSuperAdmin or
+          //    companyId (companyId immutable on this path).
           || (
             get(/databases/$(database)/documents/users/$(get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId)).data.role == 'Admin'
             && (
@@ -488,10 +1030,66 @@ service cloud.firestore {
                 && (request.resource.data.isSuperAdmin == true) == (resource.data.isSuperAdmin == true)
               )
             )
+            && request.resource.data.companyId == resource.data.companyId
+            // §5.1: only Super Admin creates Group Admins — folded into the
+            // Admin branch (the GroupAdmin branch and the self branch already
+            // forbid the role), so GroupAdmin actors short-circuit before it.
+            && (get(/databases/$(database)/documents/users/$(get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId)).data.isSuperAdmin == true
+              || !request.resource.data.keys().hasAny(['role'])
+              || request.resource.data.role != 'GroupAdmin')
+          )
+          // C) §4.4 (Phase 2): Group Admin manages any user inside their own
+          //    Group — including same-Group Company transfer (users.companyId
+          //    may change; this is the ONE deliberate companyId-immutability
+          //    relaxation in the whole plan). Never a Group escape: the target
+          //    user's groupId must equal the actor's authoritative Group and
+          //    stay unchanged. Never a promotion: the isSuperAdmin flag cannot
+          //    change and the role can only be changed to a non-GroupAdmin
+          //    value (only Super Admin creates Group Admins — §5.1). The NEW
+          //    companyId must belong to the actor's Group.
+          //    Phase 5 (§7.9): ONE deliberate promotion exception — an active
+          //    Group Admin may add a SECOND Group Admin for their own Group.
+          //    The target must (a) not be the actor (self-promotion remains
+          //    forbidden), and (b) already have its authoritative
+          //    group_members/{groupId}_{userId} record (the self-service grant
+          //    flow creates the membership FIRST, so the role-only promotion
+          //    path — updating users.role without the auditable membership —
+          //    stays closed). exists() is a path-only lookup (no data deref),
+          //    deliberately cheaper than a get() for the expression budget.
+          || (
+            get(/databases/$(database)/documents/users/$(get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId)).data.role == 'GroupAdmin'
+            && hasGroupId(resource.data) && resource.data.groupId == actorGroupId()
+            && groupIsActive(resource.data.groupId)
+            // request.resource.data is the MERGED post-update doc, so the
+            // request groupId is the resource groupId already validated above;
+            // the shared tail's groupIdUnchanged() then blocks any actual
+            // groupId re-point. (hasGroupId(request) would be redundant for
+            // the same reason — dropped to stay under the expression budget.)
+            && (request.resource.data.isSuperAdmin == true) == (resource.data.isSuperAdmin == true)
+            && (
+              !request.resource.data.keys().hasAny(['role'])
+              || request.resource.data.role != 'GroupAdmin'
+              // §7.9 promotion exception — reached only when role IS
+              // 'GroupAdmin' (the clause above failed). LEAN (expression
+              // budget): compares against the SAME auth-map userId the rule
+              // top already read (engine-cached) instead of currentUserId()
+              // (whose isOwnerIdentity()/hasUserProfile() re-entry re-counts
+              // toward the 1000-expression budget). The self-grant case
+              // (target == actor) is the one promotion shape that must ALWAYS
+              // be denied.
+              || (userId != get(authMapPath()).data.userId
+                && exists(/databases/$(database)/documents/group_members/$(resource.data.groupId + '_' + userId)))
+            )
+            && groupAdminUserCompanyMatches(request.resource.data)
           )
         )
-        // companyId immutable on update
-        && request.resource.data.companyId == resource.data.companyId
+        // §3.2: users.groupId is immutable on update for every actor class
+        // (GroupAdmin's group is set at creation; every other user's groupId
+        // is derived from their companyId's Group, and same-Group Company
+        // transfers keep the groupId unchanged — the GroupAdmin branch
+        // enforces the transfer's company-in-Group coherence). Cheap
+        // diff-based check: no get()s.
+        && groupIdUnchanged()
         // Phase 1: channelPartnerId immutable once established.
         && channelPartnerLinkUnchanged()
         // Manager-department coherence (data-driven section model).
@@ -507,7 +1105,7 @@ service cloud.firestore {
       function validOwnMapping(data) {
         return signedIn()
           && authUid == request.auth.uid
-          && data.keys().hasOnly(['authUid', 'userId', 'companyId', 'email', 'createdAt', 'updatedAt'])
+          && data.keys().hasOnly(['authUid', 'userId', 'companyId', 'email', 'groupId', 'createdAt', 'updatedAt'])
           && data.authUid == request.auth.uid
           && data.userId is string
           && data.companyId is string
@@ -516,7 +1114,15 @@ service cloud.firestore {
           && data.email == request.auth.token.email
           && exists(/databases/$(database)/documents/users/$(data.userId))
           && getAfter(/databases/$(database)/documents/users/$(data.userId)).data.email == request.auth.token.email
-          && getAfter(/databases/$(database)/documents/users/$(data.userId)).data.companyId == data.companyId;
+          && getAfter(/databases/$(database)/documents/users/$(data.userId)).data.companyId == data.companyId
+          // Phase 1 (Master Plan §3.2/§9.2): user_auth_maps mirrors
+          // users.groupId, validated the same way companyId is today. groupId
+          // is Optional (pre-backfill window) — but when the mapping carries
+          // one it must match the linked users doc's groupId, gated on field
+          // presence (the fail-closed missing-field idiom used throughout).
+          && (!data.keys().hasAny(['groupId'])
+            || (getAfter(/databases/$(database)/documents/users/$(data.userId)).data.keys().hasAny(['groupId'])
+              && getAfter(/databases/$(database)/documents/users/$(data.userId)).data.groupId == data.groupId));
       }
       allow get: if signedIn() && authUid == request.auth.uid;
       allow list: if false;
@@ -524,14 +1130,30 @@ service cloud.firestore {
       allow update: if validOwnMapping(request.resource.data)
         && request.resource.data.authUid == resource.data.authUid
         && request.resource.data.userId == resource.data.userId
-        && request.resource.data.companyId == resource.data.companyId;
+        && request.resource.data.companyId == resource.data.companyId
+        // Phase 1: groupId immutable once set (Optional, Immutable per §3.2).
+        && (!resource.data.keys().hasAny(['groupId']) || request.resource.data.groupId == resource.data.groupId);
       allow delete: if false;
     }
 
     match /dispatch/{dispatchId} {
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped() && request.resource.data.createdBy == currentUserId();
-      allow update: if canUpdateCompanyScoped()
+      // Phase 3 (F-07, §8.1/§8.3): dispatch is warehouse-scoped — a
+      // warehouse-operational actor only sees/creates/updates dispatches of
+      // their OWN warehouse. Non-restricted roles keep their existing
+      // company/group-wide scope (§8.2/§8.4); owner/Super Admin bypass.
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data))
+        && sameWarehouse(resource.data);
+      allow create: if actorIsActive() && warehouseActorCanCreate(request.resource.data)
+        && request.resource.data.createdBy == actorUserId()
+        // F-08-class FK: the dispatch's source warehouse must exist AND belong
+        // to the same Company (forged cross-company warehouseId rejected).
+        && warehouseBelongsToCompany(request.resource.data)
+        && sameWarehouse(request.resource.data);
+      allow update: if actorIsActive() && warehouseActorCanUpdate(resource.data)
+        // warehouseId immutable — a dispatch can never be re-pointed at
+        // another warehouse (escalation via update rejected).
+        && warehouseIdUnchanged()
+        && sameWarehouse(resource.data)
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['deliveryOTPHash'])
         && (
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['deliveryConfirmed', 'closedAt', 'closedBy'])
@@ -545,23 +1167,48 @@ service cloud.firestore {
     }
 
     match /stock/{stockId} {
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped()
+      // Phase 3 (F-07, Master Plan §8.1/§8.3): the warehouse tier lands on
+      // stock. A warehouse-operational actor (role Warehouse/Operations with a
+      // warehouseId assignment) is scoped to their own warehouse by
+      // sameWarehouse() — another warehouse's stock in the SAME company is
+      // DENIED (previously allowed: the F-07 hole). Every other role passes
+      // through unchanged (§8.2/§8.4: Admin/GroupAdmin/Director/Manager keep
+      // company/group-wide visibility; owner/Super Admin bypass). The
+      // warehouseId constraint must appear in the client query for list
+      // provability (src/lib/firestore.ts companyScopedQuery §8.3).
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data))
+        && sameWarehouse(resource.data);
+      allow create: if actorIsActive() && warehouseActorCanCreate(request.resource.data)
+        // F-08-class FK: the referenced warehouse must exist AND belong to the
+        // same Company (a forged cross-company warehouseId is rejected).
+        && warehouseBelongsToCompany(request.resource.data)
+        && sameWarehouse(request.resource.data);
+      allow update: if actorIsActive() && warehouseActorCanUpdate(resource.data)
+        // warehouseId is immutable once created — re-pointing a stock summary
+        // at another warehouse (escalation via update) is rejected.
+        && warehouseIdUnchanged()
+        && sameWarehouse(resource.data)
         && (
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['availableQty', 'reservedQty'])
+          || actorRoleMatches('.*Warehouse.*')
+          || actorRoleMatches('.*Operations.*')
           || isAdmin()
-          || roleMatches('.*Warehouse.*')
-          || roleMatches('.*Operations.*')
         );
       allow delete: if false;
     }
 
     match /stock_ledger/{ledgerId} {
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped()
+      // Phase 3 (F-07): stock_ledger is the movement ledger of stock — it
+      // carries warehouseId and is directly warehouse-scoped, so the same
+      // sameWarehouse() read restriction applies (a Warehouse-role actor must
+      // not infer another warehouse's movements through the ledger path).
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data))
+        && sameWarehouse(resource.data);
+      allow create: if actorIsActive() && warehouseActorCanCreate(request.resource.data)
         && request.resource.data.transactionId is string
-        && request.resource.data.movementAt != null;
+        && request.resource.data.movementAt != null
+        && warehouseBelongsToCompany(request.resource.data)
+        && sameWarehouse(request.resource.data);
       allow update, delete: if false;
     }
 
@@ -575,31 +1222,31 @@ service cloud.firestore {
             || isAdmin()
           );
       }
-      allow read: if signedIn()
-        && canSeeNotification(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if signedIn()
-        && canSeeNotification(resource.data)
-        && sameCompany(request.resource.data)
+      allow read: if actorIsActive() && signedIn()
+        && (canSeeNotification(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && signedIn()
+        && (canSeeNotification(resource.data) || groupAdminCanRead(resource.data))
+        && (sameCompany(request.resource.data) || (isGroupAdmin() && sameGroup(request.resource.data) && groupIdUnchanged()))
         && companyIdUnchanged()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt', 'updatedAt', 'isDeleted', 'deletedAt', 'deletedBy']);
       allow delete: if false;
     }
 
     match /tasks/{taskId} {
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
     match /customer_phone_locks/{lockId} {
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped()
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data))
         && request.resource.data.id == lockId
         && request.resource.data.phone is string
         && request.resource.data.customerId is string;
-      allow update: if canUpdateCompanyScoped()
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
         && resource.data.id == lockId
         && request.resource.data.id == lockId
         && request.resource.data.phone == resource.data.phone
@@ -608,8 +1255,8 @@ service cloud.firestore {
     }
 
     match /error_logs/{logId} {
-      allow read: if isAdmin() && canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped();
+      allow read: if actorIsActive() && ((isAdmin() && canReadCompanyScoped()) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
       allow update, delete: if false;
     }
 
@@ -618,13 +1265,13 @@ service cloud.firestore {
       // relationship (users.channelPartnerId → channel_partners/{id}) in
       // addition to the legacy partner-side userId field. Company-scoped
       // admin/management access (existing architecture) is unchanged.
-      allow read: if canReadCompanyScoped()
-        || (isPartner() && (resource.data.userId == currentUserId() || partnerLinkedToSelf(partnerId)));
-      allow create: if canCreateCompanyScoped();
+      allow read: if actorIsActive() && ((canReadCompanyScoped() || groupAdminCanRead(resource.data))
+        || (isPartner() && (resource.data.userId == currentUserId() || partnerLinkedToSelf(partnerId))));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
       // Phase 1: the partner-side userId link is immutable once established
       // (only linkPartnerUser may set it — absent/'' -> value is the first
       // controlled link; a real value can never change via a direct write).
-      allow update: if canUpdateCompanyScoped() && partnerUserIdUnchanged();
+      allow update: if (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data)) && partnerUserIdUnchanged();
       allow delete: if false;
     }
 
@@ -637,27 +1284,38 @@ service cloud.firestore {
     // denied by sameCompany() everywhere. Vendor Lock irreversibility is a
     // service-machine contract (statuses), not enumerable in rules.
     match /scheme_registrations/{id} {
-      allow read: if signedIn() && schemeRegCanRead(resource.data);
-      allow create: if signedIn() && sameCompany(request.resource.data)
-        && (isAdmin() || schemeRegPartnerOwnsProject(request.resource.data) || schemeRegManagerOwnsProject(request.resource.data));
+      allow read: if actorIsActive() && signedIn() && (schemeRegCanRead(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && signedIn()
+        && (
+          (sameCompany(request.resource.data)
+            && (isAdmin() || schemeRegPartnerOwnsProject(request.resource.data) || schemeRegManagerOwnsProject(request.resource.data)))
+          || (isGroupAdmin() && sameGroup(request.resource.data))
+        )
+        && groupIdMatchesCompany(request.resource.data);
       // Partner self-edit: own record only, pre-completion states only
       // (Draft/Submitted/Rejected/Failed sources) with partner-side targets
       // (Draft/Submitted/Cancelled), identity fields immutable. Staff
       // (Manager team / Admin) may manage team records — the service
-      // enforces the exact status machine + approval permission.
-      allow update: if signedIn() && sameCompany(request.resource.data) && companyIdUnchanged()
-        && schemeRegIdentityUnchanged()
+      // enforces the exact status machine + approval permission. Group Admin
+      // is Admin-equivalent (§5.2): same Group-scope, identity still immutable.
+      allow update: if actorIsActive() && signedIn() && schemeRegIdentityUnchanged()
         && (
-          (isAdmin() || (isSchemeRegManagerRole() && schemeRegManagerOfPartner(resource.data.partnerId)))
-          || (
-            isPartner() && partnerLinkedToSelf(resource.data.partnerId)
-            && resource.data.status in ['Draft', 'Submitted', 'Rejected', 'Failed']
-            && request.resource.data.status in ['Draft', 'Submitted', 'Cancelled']
-          )
-        );
+          (sameCompany(request.resource.data) && companyIdUnchanged()
+            && (
+              (isAdmin() || (isSchemeRegManagerRole() && schemeRegManagerOfPartner(resource.data.partnerId)))
+              || (
+                isPartner() && partnerLinkedToSelf(resource.data.partnerId)
+                && resource.data.status in ['Draft', 'Submitted', 'Rejected', 'Failed']
+                && request.resource.data.status in ['Draft', 'Submitted', 'Cancelled']
+              )
+            ))
+          || (isGroupAdmin() && sameGroup(resource.data) && sameGroup(request.resource.data) && groupIdUnchanged())
+        )
+        && groupIdMatchesCompany(request.resource.data);
       // Protected records: hard delete is Admin-only (the audited override
       // path); everyone else must use the workflow's terminal transitions.
-      allow delete: if isAdmin() && sameCompany(resource.data);
+      // Group Admin inherits the Admin hard-delete per §5.2 (Group-scoped).
+      allow delete: if actorIsActive() && ((isAdmin() && sameCompany(resource.data)) || (isGroupAdmin() && sameGroup(resource.data)));
     }
 
     match /partner_wallet_transactions/{txnId} {
@@ -665,24 +1323,30 @@ service cloud.firestore {
       // Partner-specific read filtering happens at the application layer (hooks).
       // In Phase 5 (wallet implementation), introduce a get() resolver to
       // cross-reference partnerId -> channel_partners/{partnerId}.userId == currentUserId()
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped();
-      allow update: if isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged();
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && ((isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged()) || groupAdminCanUpdate(resource.data))
+        && groupIdMatchesCompany(request.resource.data);
 
       allow delete: if false;
     }
 
     match /commission_rules/{ruleId} {
-      allow read: if signedIn();
-      allow create: if isAdmin() && sameCompany(request.resource.data);
-      allow update: if isAdmin() && sameCompany(resource.data) && companyIdUnchanged();
+      // F-03 (Phase 0): commission_rules read is company-scoped. Phase 2
+      // (§5.2/§9.3): Group Admin inherits Admin grants Group-scoped, so
+      // create/update gain the sameGroup() additive-OR.
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && ((isAdmin() && sameCompany(request.resource.data)) || (isGroupAdmin() && sameGroup(request.resource.data)))
+        && groupIdMatchesCompany(request.resource.data);
+      allow update: if actorIsActive() && ((isAdmin() && sameCompany(resource.data) && companyIdUnchanged()) || groupAdminCanUpdate(resource.data))
+        && groupIdMatchesCompany(request.resource.data);
       allow delete: if false;
     }
 
     match /tax_invoices/{invoiceId} {
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped() && request.resource.data.status == 'Draft';
-      allow update: if canUpdateCompanyScoped()
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data)) && request.resource.data.status == 'Draft';
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
         && (
           (resource.data.status == 'Draft' && request.resource.data.status in ['Draft', 'Issued', 'Cancelled'])
           || (resource.data.status == 'Issued' && request.resource.data.status == 'Cancelled')
@@ -691,25 +1355,37 @@ service cloud.firestore {
     }
 
     match /document_counters/{counterId} {
-      function validCounterPayload() {
+      // Phase 1: document_counters is a §3.2 denormalized collection, so new
+      // counter docs carry groupId (write-helper stamped). The shape
+      // allow-list therefore includes 'groupId'; the tenant anchor is split
+      // (sameCompany for Company Admins, groupAdminCanCreate for Group
+      // Admins) so a Group Admin can drive numbering in any Company of their
+      // Group. The legacy direct-transaction path (documentNumbering.ts,
+      // merge:true) writes no groupId on a brand-new counter — accepted by
+      // the same shape (field optional); such docs simply have no Group-admin
+      // reach until the next denormalization pass touches them.
+      function validCounterShape() {
         return signedIn()
-          && request.resource.data.keys().hasOnly(['id', 'companyId', 'docType', 'currentNumber', 'prefix', 'sequencePadding', 'createdAt', 'updatedAt', 'isDeleted'])
+          && request.resource.data.keys().hasOnly(['id', 'companyId', 'groupId', 'docType', 'currentNumber', 'prefix', 'sequencePadding', 'createdAt', 'updatedAt', 'isDeleted'])
           && request.resource.data.id == counterId
           && request.resource.data.companyId is string
           && request.resource.data.docType in ['invoice', 'quotation', 'order']
           && request.resource.data.currentNumber is number
           && request.resource.data.currentNumber >= 1
           && request.resource.data.prefix is string
-          && request.resource.data.sequencePadding is number
-          && sameCompany(request.resource.data);
+          && request.resource.data.sequencePadding is number;
       }
 
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped()
-        && validCounterPayload()
+      function validCounterPayload() {
+        return validCounterShape() && sameCompany(request.resource.data);
+      }
+
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive()
+        && ((canCreateCompanyScoped() && validCounterPayload()) || (groupAdminCanCreate(request.resource.data) && validCounterShape()))
         && request.resource.data.currentNumber == 1;
-      allow update: if canCreateCompanyScoped()
-        && validCounterPayload()
+      allow update: if actorIsActive()
+        && ((canCreateCompanyScoped() && validCounterPayload()) || (groupAdminCanCreate(request.resource.data) && validCounterShape()))
         && resource.data.companyId == request.resource.data.companyId
         && resource.data.docType == request.resource.data.docType
         && resource.data.id == request.resource.data.id
@@ -718,33 +1394,33 @@ service cloud.firestore {
     }
 
     match /projects/{projectId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped() && request.resource.data.projectId == projectId;
-      allow update: if canUpdateCompanyScoped()
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data)) && request.resource.data.projectId == projectId;
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
         && request.resource.data.projectId == resource.data.projectId;
       allow delete: if false;
     }
 
     match /surveys/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped()
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data))
         && request.resource.data.surveyId == documentId
         && request.resource.data.projectId is string
         && request.resource.data.assignedSurveyor == request.resource.data.surveyorId;
-      allow update: if canUpdateCompanyScoped()
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
         && request.resource.data.surveyId == resource.data.surveyId
         && request.resource.data.projectId == resource.data.projectId;
       allow delete: if false;
     }
 
     match /engineering_designs/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped()
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data))
         && request.resource.data.designId == documentId
         && request.resource.data.projectId is string
         && request.resource.data.surveyId is string
         && request.resource.data.designerId is string;
-      allow update: if canUpdateCompanyScoped()
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
         && request.resource.data.designId == resource.data.designId
         && request.resource.data.projectId == resource.data.projectId
         && request.resource.data.surveyId == resource.data.surveyId;
@@ -758,13 +1434,13 @@ service cloud.firestore {
           || (from == 'PartiallyReceived' && to in ['Received', 'Cancelled']);
       }
 
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped()
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data))
         && request.resource.data.purchaseOrderId == documentId
         && request.resource.data.vendorId is string
         && request.resource.data.status == 'Draft'
         && request.resource.data.items is list;
-      allow update: if canUpdateCompanyScoped()
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
         && request.resource.data.purchaseOrderId == resource.data.purchaseOrderId
         && request.resource.data.vendorId is string
         && request.resource.data.items is list
@@ -776,12 +1452,21 @@ service cloud.firestore {
     }
 
     match /goods_receipts/{documentId} {
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped()
+      // Phase 3 (F-07, §8.1/§8.3): goods_receipts carries the receiving
+      // warehouseId and is warehouse-scoped — a warehouse-operational actor
+      // only sees/receives goods into their OWN warehouse. Non-restricted
+      // roles keep their existing company-wide scope (§8.2/§8.4).
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data))
+        && sameWarehouse(resource.data);
+      allow create: if actorIsActive() && warehouseActorCanCreate(request.resource.data)
         && request.resource.data.goodsReceiptId == documentId
         && request.resource.data.purchaseOrderId is string
         && request.resource.data.warehouseId is string
-        && request.resource.data.receivedBy == currentUserId()
+        // F-08-class FK: the receiving warehouse must exist AND belong to the
+        // same Company (forged cross-company warehouseId rejected).
+        && warehouseBelongsToCompany(request.resource.data)
+        && sameWarehouse(request.resource.data)
+        && request.resource.data.receivedBy == actorUserId()
         && request.resource.data.receivedItems is list
         && request.resource.data.receivedItems.size() > 0
         && request.resource.data.stockEntries is list;
@@ -789,9 +1474,9 @@ service cloud.firestore {
     }
 
     match /installations/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
@@ -804,16 +1489,18 @@ service cloud.firestore {
     // rather than the universal `if false` — reusing isSuperAdmin(), not a
     // new authorization mechanism.
     match /product_categories/{documentId} {
-      allow read: if canReadCompanyScoped();
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
-      allow delete: if isSuperAdmin() && sameCompany(resource.data);
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
+      // Permanent delete stays Super-Admin-only (Blueprint §13) — Group Admin
+      // does not inherit it (delete is not an Admin grant here either).
+      allow delete: if actorIsActive() && isSuperAdmin() && sameCompany(resource.data);
     }
 
     match /service_tickets/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
@@ -831,51 +1518,51 @@ service cloud.firestore {
     // client's own query-level narrowing entirely. Matches the existing
     // installations/service_tickets pattern exactly.
     match /qc_checks/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
     match /commissioning_records/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
     match /net_metering_applications/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
     match /subsidy_applications/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
     match /project_handovers/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
     match /amc_contracts/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
     match /generation_readings/{documentId} {
-      allow read: if signedIn() && canReadProjectScoped(resource.data);
-      allow create: if canCreateCompanyScoped();
-      allow update: if canUpdateCompanyScoped();
+      allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
@@ -894,8 +1581,8 @@ service cloud.firestore {
       // denies it and the app logs a permission-denied storm. A missing doc
       // holds zero data, so `resource == null` grants nothing (list queries
       // still evaluate per-document against canReadCompanyScoped).
-      allow get: if signedIn() && (resource == null || canReadCompanyScoped());
-      allow list: if canReadCompanyScoped();
+      allow get: if actorIsActive() && signedIn() && (resource == null || canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow list: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
       function isOwnPersonalSettings(data, sectionId) {
         return hasUserProfile()
           && documentId == currentUserId() + '_settings_' + sectionId
@@ -903,12 +1590,16 @@ service cloud.firestore {
           && data.updatedBy == currentUserId()
           && sameCompany(data);
       }
-      allow create: if (isAdmin() && sameCompany(request.resource.data))
+      allow create: if actorIsActive() && ((isAdmin() && sameCompany(request.resource.data))
+        || (isGroupAdmin() && sameGroup(request.resource.data))
         || isOwnPersonalSettings(request.resource.data, 'appearance')
-        || isOwnPersonalSettings(request.resource.data, 'notifications');
-      allow update: if (isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged())
+        || isOwnPersonalSettings(request.resource.data, 'notifications'))
+        && groupIdMatchesCompany(request.resource.data);
+      allow update: if actorIsActive() && ((isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged())
+        || (isGroupAdmin() && sameGroup(resource.data) && sameGroup(request.resource.data) && groupIdUnchanged() && companyIdUnchanged())
         || (isOwnPersonalSettings(resource.data, 'appearance') && isOwnPersonalSettings(request.resource.data, 'appearance') && companyIdUnchanged())
-        || (isOwnPersonalSettings(resource.data, 'notifications') && isOwnPersonalSettings(request.resource.data, 'notifications') && companyIdUnchanged());
+        || (isOwnPersonalSettings(resource.data, 'notifications') && isOwnPersonalSettings(request.resource.data, 'notifications') && companyIdUnchanged()))
+        && groupIdMatchesCompany(request.resource.data);
       allow delete: if false;
     }
 
@@ -922,15 +1613,138 @@ service cloud.firestore {
     }
 
     match /audit_logs/{documentId} {
-      allow read: if isAdmin() && canReadCompanyScoped();
-      allow create: if isAdmin() && sameCompany(request.resource.data);
+      allow read: if actorIsActive() && ((isAdmin() && canReadCompanyScoped()) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && ((isAdmin() && sameCompany(request.resource.data)) || (isGroupAdmin() && sameGroup(request.resource.data)))
+        && groupIdMatchesCompany(request.resource.data);
       allow update, delete: if false;
     }
 
+    // F-04 (Phase 0): security_logs mirrors audit_logs exactly — Admin-only
+    // create, fully immutable. Previously it inherited the generic fallback
+    // (any same-company signed-in user could forge or tamper with security
+    // events), defeating its purpose as a tamper-evident record. Phase 2:
+    // Group Admin inherits the Admin grants Group-scoped (§5.2).
+    match /security_logs/{documentId} {
+      allow read: if actorIsActive() && ((isAdmin() && canReadCompanyScoped()) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && ((isAdmin() && sameCompany(request.resource.data)) || (isGroupAdmin() && sameGroup(request.resource.data)))
+        && groupIdMatchesCompany(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // F-17 (Phase 0): device_tokens are personal — a user may only read,
+    // create or update their OWN token records (userId-anchored), in addition
+    // to the standard company scoping. Previously it inherited the generic
+    // fallback with no per-user check, so any same-company user could read or
+    // tamper with another user's FCM push-notification registrations.
+    match /device_tokens/{tokenId} {
+      allow read: if actorIsActive() && canReadCompanyScoped() && resource.data.userId == currentUserId();
+      allow create: if actorIsActive() && canCreateCompanyScoped() && request.resource.data.userId == currentUserId();
+      allow update: if actorIsActive() && canUpdateCompanyScoped() && resource.data.userId == currentUserId() && request.resource.data.userId == currentUserId();
+      allow delete: if false;
+    }
+
+    // F-05 (Phase 0): backup_metadata is written only by the backup
+    // automation's service-account identity (Admin SDK — bypasses rules by
+    // design) and read only by Super Admin (Platform Dashboard). No client SDK
+    // may create or mutate it.
+    match /backup_metadata/{documentId} {
+      allow read: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin());
+      allow create, update, delete: if false;
+    }
+
+    // Phase 4 (Master Plan §6.8/§6.9): platform_settings/global — the
+    // Super Admin platform settings document (V1: maintenanceMode toggle +
+    // maintenanceMessage). Super Admin/owner read+write only (the §6.9
+    // emergency-control tier), never tenant-scoped, delete always forbidden.
+    // Explicit authoritative block — platform_settings is in
+    // isSpecialCollection() so the generic fallback can never OR-in a weaker
+    // company-scoped grant (F-02 pattern). The doc id must match the path
+    // segment (deterministic 'global' id), mirroring the groups id-anchor.
+    match /platform_settings/{documentId} {
+      allow read: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin());
+      allow create: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin())
+        && request.resource.data.id == documentId;
+      allow update: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin())
+        && resource.data.id == documentId && request.resource.data.id == documentId;
+      allow delete: if false;
+    }
+
+    // ── Phase 1 (Multi-Tenant) — groups / group_members ────────────────
+    // Deliberate Phase 1 rules (data-model foundation only — NOT the Phase 2
+    // Group Admin authorization). In Phase 1 nothing client-side reads these
+    // collections (resolveWriteGroupId() resolves the company→group map from
+    // the companies list, never a groups read; the backfill and the Phase 1
+    // verification script use the Admin SDK, which bypasses rules by design).
+    // Super Admin/owner only, delete always forbidden. Phase 2 (§9.3) extends
+    // these blocks with the additive-OR sameGroup() pattern for Group Admins;
+    // until then nothing is granted beyond the platform tier.
+    match /groups/{groupId} {
+      // Phase 2 (§9.3): a Group Admin may read their OWN Group's document
+      // (path segment == authoritative actorGroupId), Active-gated per §9.6.
+      // They cannot enumerate other Groups, and create/update/delete remain
+      // platform-tier (Group Admin "cannot create another Group" — §4).
+      allow read: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin()
+        || (isGroupAdmin() && groupId == actorGroupId() && groupIsActive(groupId)));
+      allow create: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin())
+        && request.resource.data.id == groupId;
+      allow update: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin())
+        && resource.data.id == groupId && request.resource.data.id == groupId;
+      allow delete: if false;
+    }
+
+    match /group_members/{memberId} {
+      // Phase 2 (§9.3): a Group Admin may read the membership records of their
+      // own Group (member docs carry groupId; sameGroup() + Active gate).
+      // Writes stay platform-tier — a Group Admin can never fabricate or
+      // modify membership (incl. their own): "cannot add themselves to another
+      // Group", "cannot modify another Group's membership" (test matrix).
+      allow read: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin() || groupAdminCanRead(resource.data));
+      // Phase 5 (§7.9, §3.1): an existing ACTIVE Group Admin may grant a
+      // SECOND Group Admin for their own Group (self-service Group Admins
+      // table). The member doc's groupId must be the actor's own Group
+      // (never another Group), the Group must be Active, the grant must be
+      // anchored to the actor (grantedBy == currentUserId()), and the target
+      // can never be the actor themself (no self-grant). Owner/Super Admin
+      // platform grant is unchanged. Revoke (update) stays platform-tier.
+      allow create: if actorIsActive()
+        && request.resource.data.id == memberId
+        && request.resource.data.groupId is string && request.resource.data.groupId.size() > 0
+        && request.resource.data.userId is string && request.resource.data.userId.size() > 0
+        && (
+          isOwnerIdentity() || isSuperAdmin()
+          || (
+            actorIsGroupAdmin()
+            && groupIsActive(request.resource.data.groupId)
+            && request.resource.data.groupId == actorGroupId()
+            && request.resource.data.role == 'GroupAdmin'
+            && request.resource.data.status == 'Active'
+            && request.resource.data.grantedBy == currentUserId()
+            && request.resource.data.userId != currentUserId()
+          )
+        );
+      allow update: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin())
+        && resource.data.id == memberId && request.resource.data.id == memberId
+        && request.resource.data.groupId == resource.data.groupId
+        && request.resource.data.userId == resource.data.userId;
+      allow delete: if false;
+    }
+
     match /{collectionId}/{documentId} {
-      allow read: if !isSpecialCollection(collectionId) && canReadCompanyScoped();
-      allow create: if !isSpecialCollection(collectionId) && canCreateCompanyScoped();
-      allow update: if !isSpecialCollection(collectionId) && canUpdateCompanyScoped();
+      // F-13: the generic fallback also requires an active actor. (Note: the
+      // emulator counts expressions without short-circuiting across the
+      // matching blocks, so this predicate is evaluated even for collections
+      // excluded by isSpecialCollection() — kept deliberately lean.)
+      // Phase 2 (§9.3): the additive-OR GroupAdmin pattern lands on the
+      // fallback so every current AND future non-special collection gains
+      // Group Admin scope without a per-collection edit. F-02's
+      // isSpecialCollection() guard sits BEFORE the OR (sequencing per §9.3),
+      // so the 14 protected collections can never inherit fallback coverage.
+      allow read: if actorIsActive() && !isSpecialCollection(collectionId)
+        && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && !isSpecialCollection(collectionId)
+        && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && !isSpecialCollection(collectionId)
+        && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
   }

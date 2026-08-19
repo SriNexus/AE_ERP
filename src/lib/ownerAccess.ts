@@ -23,12 +23,20 @@ export function filterManageableUsers<T>(records: T[]): T[] {
   return records.filter((record) => !isHiddenOwnerRecord(record));
 }
 
-export function createOwnerAppIdentity(authUid: string, companyId = 'default') {
+export function createOwnerAppIdentity(authUid: string, email: string, companyId = 'default') {
   return {
     id: `owner:${authUid}`,
     name: 'ERP Owner',
     displayName: 'ERP Owner',
-    email: '',
+    // The canonical profile contract (normalizeUserProfile) requires a
+    // non-empty email — an empty string here previously made the Owner's own
+    // ProfileSection throw UserProfileError('profile-missing', ...) on every
+    // visit. This is the Owner's OWN self-service profile view, not a
+    // records list — filterManageableUsers()/isHiddenOwnerRecord() (which
+    // operate on real Firestore users/{id} documents, not this client-only
+    // synthetic identity) remain the actual mechanism hiding the Owner's
+    // email from OTHER users' admin screens; they are unaffected by this.
+    email: normalizeIdentityEmail(email),
     role: 'Owner',
     companyId,
     status: 'Active',

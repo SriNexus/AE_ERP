@@ -32,9 +32,14 @@ describe('Demo Mode Phase 1 readiness', () => {
     expect(companyScopedQuery(COLLECTIONS.SETTINGS)).toHaveLength(1);
   });
 
-  it('keeps roles and companies global — no tenant constraint on global collections', () => {
-    expect(companyScopedQuery(COLLECTIONS.COMPANIES)).toHaveLength(0);
-    expect(companyScopedQuery(COLLECTIONS.ROLES)).toHaveLength(0);
+  // F-03 closure (Phase 1): `roles` is now company-scoped for ordinary users
+  // (per-company keyed role documents, Master Plan §5.6 — the Phase 0
+  // BLOCKED status is resolved by the Phase 1 role-document keying migration).
+  // F-01 (Phase 0): `companies` is company-scoped for ordinary users — the
+  // pre-fix open read was the audit's CRITICAL cross-tenant disclosure.
+  it('company-scopes roles and companies for ordinary users (F-01 + F-03 closure)', () => {
+    expect(companyScopedQuery(COLLECTIONS.COMPANIES)).toHaveLength(1);
+    expect(companyScopedQuery(COLLECTIONS.ROLES)).toHaveLength(1);
   });
 
   it('documents the official demo and its single canonical reset path in the current demo-mode documentation', () => {

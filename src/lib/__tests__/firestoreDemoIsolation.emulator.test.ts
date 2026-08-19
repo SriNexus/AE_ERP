@@ -11,12 +11,16 @@ let env:RulesTestEnvironment;
 async function seed(){
  await env.withSecurityRulesDisabled(async ctx=>{
   const db=ctx.firestore();
-  await setDoc(doc(db,'companies',DEMO_COMPANY),{id:DEMO_COMPANY,companyId:DEMO_COMPANY,name:'Demo',isDemo:true});
-  await setDoc(doc(db,'companies','company-production'),{id:'company-production',companyId:'company-production',name:'Production'});
+  await setDoc(doc(db,'companies',DEMO_COMPANY),{id:DEMO_COMPANY,companyId:DEMO_COMPANY,name:'Demo',isDemo:true,groupId:'group-demo-neozy'});
+  await setDoc(doc(db,'companies','company-production'),{id:'company-production',companyId:'company-production',name:'Production',groupId:'group-prod-neozy'});
+  // Phase 2 (§9.6): sameCompany() requires the owning Group to exist and be
+  // Active — seed both Groups (the demo Group mirrors the demo dataset seed).
+  await setDoc(doc(db,'groups','group-demo-neozy'),{id:'group-demo-neozy',name:'Demo Group',shortName:'DEMO',status:'Active',isDemo:true});
+  await setDoc(doc(db,'groups','group-prod-neozy'),{id:'group-prod-neozy',name:'Prod Group',shortName:'PROD',status:'Active'});
   await setDoc(doc(db,'users','MUSR-DEMO-0001'),{id:'MUSR-DEMO-0001',companyId:DEMO_COMPANY,email:'demo@neozy.in',role:'Demo Operator',status:'Active',isSuperAdmin:false,isDeleted:false});
   await setDoc(doc(db,'user_auth_maps',DEMO_UID),{authUid:DEMO_UID,userId:'MUSR-DEMO-0001',companyId:DEMO_COMPANY,email:'demo@neozy.in'});
-  await setDoc(doc(db,'leads','DEMO-LEAD'),{id:'DEMO-LEAD',companyId:DEMO_COMPANY,name:'Demo Lead',createdBy:'MUSR-DEMO-0001',isDeleted:false});
-  await setDoc(doc(db,'leads','PROD-LEAD'),{id:'PROD-LEAD',companyId:'company-production',name:'Secret Production Lead',createdBy:'prod-user',isDeleted:false});
+  await setDoc(doc(db,'leads','DEMO-LEAD'),{id:'DEMO-LEAD',companyId:DEMO_COMPANY,groupId:'group-demo-neozy',name:'Demo Lead',createdBy:'MUSR-DEMO-0001',isDeleted:false});
+  await setDoc(doc(db,'leads','PROD-LEAD'),{id:'PROD-LEAD',companyId:'company-production',groupId:'group-prod-neozy',name:'Secret Production Lead',createdBy:'prod-user',isDeleted:false});
   await setDoc(doc(db,'settings','company-demo-neozy_settings_general'),{companyId:DEMO_COMPANY,section:'general',data:{}});
   await setDoc(doc(db,'settings','company-production_settings_general'),{companyId:'company-production',section:'general',data:{}});
   await setDoc(doc(db,'customer_phone_locks','company-demo-neozy_0000000001'),{id:'company-demo-neozy_0000000001',companyId:DEMO_COMPANY,phone:'0000000001',customerId:'DEMO-CUSTOMER',isDeleted:false});

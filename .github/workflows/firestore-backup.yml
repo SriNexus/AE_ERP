@@ -1,0 +1,70 @@
+name: Firestore Managed Export (Nightly Backup)
+
+# F-05 (Phase 0): scheduled Firestore managed export to GCS — closes the
+# audit's CRITICAL "no backup/DR of any kind" finding. Follows the exact
+# authentication pattern of the existing demo-reset.yml (Google Workload
+# Identity Federation via encrypted GitHub secrets) — zero new credential
+# provisioning. See docs/RUNBOOK_DISASTER_RECOVERY.md for the restore runbook
+# and the mandatory quarterly restore drill.
+on:
+  schedule:
+    # Nightly 01:15 UTC — satisfies the RPO of 24 hours (Master Plan §12.6).
+    - cron: '15 1 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: neozy-firestore-backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  # The project whose Firestore data is exported. Reuses the demo project var
+  # as a fallback so the workflow works before a dedicated BACKUP_* var exists.
+  BACKUP_FIREBASE_PROJECT_ID: ${{ vars.BACKUP_FIREBASE_PROJECT_ID || vars.DEMO_FIREBASE_PROJECT_ID }}
+  BACKUP_GCS_BUCKET: ${{ vars.BACKUP_GCS_BUCKET || vars.DEMO_GCS_BUCKET }}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # Same Workload Identity Federation secrets as demo-reset.yml.
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.DEMO_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEMO_GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: npm ci
+
+      - name: Record backup started
+        continue-on-error: true
+        run: node scripts/record-backup-status.cjs --id "$(date -u +%Y%m%d-%H%M)" --status Running --collections all --apply
+
+      - name: Export Firestore to GCS
+        run: |
+          export_uri="gs://${BACKUP_GCS_BUCKET}/firestore/$(date -u +%Y%m%d-%H%M%S)"
+          echo "export_uri=${export_uri}" >> "$GITHUB_ENV"
+          gcloud firestore export "${export_uri}" \
+            --project "${BACKUP_FIREBASE_PROJECT_ID}"
+
+      - name: Record backup success
+        if: success()
+        continue-on-error: true
+        run: node scripts/record-backup-status.cjs --id "$(date -u +%Y%m%d-%H%M)" --status Success --uri "${{ env.export_uri }}" --collections all --apply
+
+      - name: Record backup failure
+        if: failure()
+        continue-on-error: true
+        run: node scripts/record-backup-status.cjs --id "$(date -u +%Y%m%d-%H%M)" --status Failed --error "gcloud firestore export failed — see workflow run" --collections all --apply

@@ -82,8 +82,12 @@ describe('Tenant context fail-closed — Admin companyId="default" 403-storm roo
       });
       expect(companyScopedQuery(COLLECTIONS.LEADS)).toHaveLength(1);
       expect(companyScopedQuery(COLLECTIONS.CUSTOMERS)).toHaveLength(1);
-      expect(companyScopedQuery(COLLECTIONS.ROLES)).toHaveLength(0);
-      expect(companyScopedQuery(COLLECTIONS.COMPANIES)).toHaveLength(0);
+      // F-03 closure (Phase 1): roles is now company-scoped for ordinary users
+      // (per-company keyed role documents — Master Plan §5.6).
+      expect(companyScopedQuery(COLLECTIONS.ROLES)).toHaveLength(1);
+      // F-01 (Phase 0): companies is now company-scoped for ordinary users
+      // (previously global/unscoped — the audit's CRITICAL F-01 disclosure).
+      expect(companyScopedQuery(COLLECTIONS.COMPANIES)).toHaveLength(1);
     });
   });
 

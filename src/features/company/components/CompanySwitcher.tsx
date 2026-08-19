@@ -12,11 +12,17 @@ import { useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { useAppStore } from '../../../store/useAppStore';
 import { useCurrentUser } from '../../../store/useAppStore';
-import { useCompanies, type CompanyDoc } from '../hooks/useCompanies';
+import { useCompanies, useGroupCompanies, type CompanyDoc } from '../hooks/useCompanies';
 import { cn } from '../../../utils/cn';
 import { b64ToSrc } from '../../../templates/documents/shared/utils';
+import { DEMO_LOGO_URLS } from '../../../config/demoCompany';
 
 const ALL_COMPANIES_ID = 'all';
+// Phase 5 (Master Plan §7.2): the Group-view sentinel — "All Companies (Group
+// view)" sets activeCompanyId to 'group' (parallel to the Super Admin 'all'
+// sentinel). The query layer (companyScopedQuery/getAll) already translates it
+// to where('groupId','==',actorGroupId) (Phase 2 §9.4).
+const GROUP_VIEW_ID = 'group';
 
 export interface CompanySwitcherProps {
   /** External open state (controlled mode) — when provided, parent controls open/close */
@@ -39,7 +45,16 @@ export function CompanySwitcher({ isOpen: controlledOpen, onOpenChange, variant 
   const user = useCurrentUser();
   const queryClient = useQueryClient();
 
-  const { data: companies = [], isFetching } = useCompanies();
+  // Phase 5 (§7.2): a Group Admin's switcher lists EVERY Company in their own
+  // Group (query-level where('groupId','==',...), rules-provable) regardless of
+  // the currently selected Company. Other roles keep the existing list. Both
+  // hooks run unconditionally (rules of hooks); the unused one is inert
+  // (useGroupCompanies is disabled without a groupId; useCompanies is only
+  // consumed for non-GroupAdmin actors).
+  const isGroupAdmin = user?.role === 'GroupAdmin';
+  const groupCompanies = useGroupCompanies(isGroupAdmin ? user?.groupId : undefined);
+  const allCompanies = useCompanies();
+  const { data: companies = [], isFetching } = isGroupAdmin ? groupCompanies : allCompanies;
   const [internalOpen, setInternalOpen] = useState(false);
   const isControlled = controlledOpen !== undefined;
   const open = isControlled ? controlledOpen : internalOpen;
@@ -105,18 +120,27 @@ export function CompanySwitcher({ isOpen: controlledOpen, onOpenChange, variant 
     setActiveCompanyId(id);
     queryClient.invalidateQueries();
     setOpen(false);
-    toast.success(id === ALL_COMPANIES_ID ? 'Viewing all companies' : 'Company switched');
+    if (id === ALL_COMPANIES_ID) toast.success('Viewing all companies');
+    else if (id === GROUP_VIEW_ID) toast.success('Viewing all companies (Group view)');
+    else toast.success('Company switched');
   }, [activeCompanyId, setActiveCompanyId, queryClient]);
 
   const activeCompany = companies.find(c => c.id === activeCompanyId);
   const primaryCompany = companies.find(c => c.isDefault) ?? companies[0];
-  const logoCompany = activeCompanyId === ALL_COMPANIES_ID
+  // Platform identity (Owner/Super-Admin, no explicit Company selected): the
+  // sidebar trigger must show the platform's own brand (the same source
+  // Login.tsx's BrandLogo uses), never "whichever company happens to be
+  // primary" — a Super Admin viewing "All Companies" is not that company.
+  const isPlatformIdentity = !!(user?.isOwner || user?.isSuperAdmin) && activeCompanyId === ALL_COMPANIES_ID;
+  const logoCompany = (activeCompanyId === ALL_COMPANIES_ID || activeCompanyId === GROUP_VIEW_ID)
     ? primaryCompany
     : activeCompany ?? primaryCompany;
   const fallbackBrand = globalCompany || company;
   const activeLabel = activeCompanyId === ALL_COMPANIES_ID
     ? 'All Companies'
-    : (activeCompany?.shortName ?? activeCompany?.name ?? 'Company');
+    : activeCompanyId === GROUP_VIEW_ID
+      ? 'All Companies (Group view)'
+      : (activeCompany?.shortName ?? activeCompany?.name ?? 'Company');
 
   const q = search.trim().toLowerCase();
   const filtered: CompanyDoc[] = q
@@ -152,17 +176,23 @@ export function CompanySwitcher({ isOpen: controlledOpen, onOpenChange, variant 
   }, [open, variant, filtered.length, companies.length]);
 
   if (variant === 'logoOnly') {
+    // Platform identity uses the same static brand asset as the Login page's
+    // BrandLogo — never a base64 company logo (b64ToSrc). The collapsed icon
+    // has no light/dark split (matching how the demo branch above resolves
+    // its icon); the expanded logo is rendered as a light/dark pair below.
     const iconLogo = logoCompany?.iconLogo || fallbackBrand?.iconLogo;
     const fullLogo = logoCompany?.logo || fallbackBrand?.logo;
-    const collapsedLogoSrc = iconLogo
-      ? b64ToSrc(iconLogo)
-      : null;
-    const logoSrc = fullLogo
-      ? b64ToSrc(fullLogo)
-      : iconLogo
-        ? b64ToSrc(iconLogo)
-        : null;
-    const logoName = logoCompany?.name || fallbackBrand?.name || 'Company';
+    const collapsedLogoSrc = isPlatformIdentity
+      ? DEMO_LOGO_URLS.iconLogo
+      : iconLogo ? b64ToSrc(iconLogo) : null;
+    const logoSrc = isPlatformIdentity
+      ? null // expanded platform logo is rendered as a light/dark pair below
+      : fullLogo
+        ? b64ToSrc(fullLogo)
+        : iconLogo
+          ? b64ToSrc(iconLogo)
+          : null;
+    const logoName = isPlatformIdentity ? 'Neozy Platform' : logoCompany?.name || fallbackBrand?.name || 'Company';
     const initials = (logoCompany?.shortName || logoCompany?.name || fallbackBrand?.shortName || 'C')
       .substring(0, 2)
       .toUpperCase();
@@ -204,7 +234,12 @@ export function CompanySwitcher({ isOpen: controlledOpen, onOpenChange, variant 
             )
           ) : expandedSidebar ? (
             <>
-              {logoSrc ? (
+              {isPlatformIdentity ? (
+                <>
+                  <img src={DEMO_LOGO_URLS.logoLight} alt={logoName} className="h-9 w-auto max-w-[140px] shrink object-contain select-none dark:hidden" draggable={false} />
+                  <img src={DEMO_LOGO_URLS.logoDark} alt={logoName} className="hidden h-9 w-auto max-w-[140px] shrink object-contain select-none dark:block" draggable={false} />
+                </>
+              ) : logoSrc ? (
                 <img
                   src={logoSrc}
                   alt={logoName}
@@ -220,6 +255,11 @@ export function CompanySwitcher({ isOpen: controlledOpen, onOpenChange, variant 
                 'h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)] transition-transform duration-200',
                 open && 'rotate-180',
               )} />
+            </>
+          ) : isPlatformIdentity ? (
+            <>
+              <img src={DEMO_LOGO_URLS.logoLight} alt={logoName} className="h-15 w-auto max-w-[180px] object-contain select-none dark:hidden" draggable={false} />
+              <img src={DEMO_LOGO_URLS.logoDark} alt={logoName} className="hidden h-15 w-auto max-w-[180px] object-contain select-none dark:block" draggable={false} />
             </>
           ) : logoSrc ? (
             <img
@@ -243,22 +283,44 @@ export function CompanySwitcher({ isOpen: controlledOpen, onOpenChange, variant 
             role="menu"
           >
             <div className="py-1 max-h-72 overflow-y-auto">
-              <button
-                type="button"
-                onClick={() => handleSelect(ALL_COMPANIES_ID)}
-                className={cn(
-                  'w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors',
-                  'hover:bg-[var(--color-surface-hover)]',
-                  activeCompanyId === ALL_COMPANIES_ID && 'bg-[var(--color-primary-light)]',
-                )}
-              >
-                <span className="flex-1 truncate text-xs font-semibold text-[var(--color-text-secondary)]">
-                  All Companies
-                </span>
-                {activeCompanyId === ALL_COMPANIES_ID && (
-                  <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                )}
-              </button>
+              {/* Phase 5 (§7.2): Group Admin gets "All Companies (Group view)" —
+                  the 'group' sentinel the query layer translates to a groupId
+                  constraint. Super Admin 'all' stays as-is. */}
+              {isGroupAdmin ? (
+                <button
+                  type="button"
+                  onClick={() => handleSelect(GROUP_VIEW_ID)}
+                  className={cn(
+                    'w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors',
+                    'hover:bg-[var(--color-surface-hover)]',
+                    activeCompanyId === GROUP_VIEW_ID && 'bg-[var(--color-primary-light)]',
+                  )}
+                >
+                  <span className="flex-1 truncate text-xs font-semibold text-[var(--color-text-secondary)]">
+                    All Companies (Group view)
+                  </span>
+                  {activeCompanyId === GROUP_VIEW_ID && (
+                    <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  )}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleSelect(ALL_COMPANIES_ID)}
+                  className={cn(
+                    'w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors',
+                    'hover:bg-[var(--color-surface-hover)]',
+                    activeCompanyId === ALL_COMPANIES_ID && 'bg-[var(--color-primary-light)]',
+                  )}
+                >
+                  <span className="flex-1 truncate text-xs font-semibold text-[var(--color-text-secondary)]">
+                    All Companies
+                  </span>
+                  {activeCompanyId === ALL_COMPANIES_ID && (
+                    <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  )}
+                </button>
+              )}
 
               <div className="mx-3 my-1 border-t border-[var(--color-border-subtle)]" />
 
@@ -344,8 +406,8 @@ export function CompanySwitcher({ isOpen: controlledOpen, onOpenChange, variant 
                 ))
             }
 
-            {/* All Companies — Admin only */}
-            {user.role === 'Admin' && (
+            {/* All Companies — Admin only; Group view — Group Admin only (§7.2) */}
+            {user.role === 'Admin' && !isGroupAdmin && (
               <>
                 <div className="mx-3 my-1 border-t border-[var(--color-border-subtle)]" />
                 <button
@@ -360,6 +422,26 @@ export function CompanySwitcher({ isOpen: controlledOpen, onOpenChange, variant 
                   <span className="flex-1 truncate text-xs font-semibold text-[var(--color-text-secondary)]">All Companies</span>
                   {/* VALID: indigo checkmark is primary brand active indicator */}
                   {activeCompanyId === ALL_COMPANIES_ID && (
+                    <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  )}
+                </button>
+              </>
+            )}
+            {isGroupAdmin && (
+              <>
+                <div className="mx-3 my-1 border-t border-[var(--color-border-subtle)]" />
+                <button
+                  onClick={() => handleSelect(GROUP_VIEW_ID)}
+                  className={cn(
+                    'w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors',
+                    'hover:bg-[var(--color-surface-hover)]',
+                    // Normalized to token (equivalent to bg-indigo-50 / bg-indigo-900/20)
+                    activeCompanyId === GROUP_VIEW_ID && 'bg-[var(--color-primary-light)]'
+                  )}
+                >
+                  <span className="flex-1 truncate text-xs font-semibold text-[var(--color-text-secondary)]">All Companies (Group view)</span>
+                  {/* VALID: indigo checkmark is primary brand active indicator */}
+                  {activeCompanyId === GROUP_VIEW_ID && (
                     <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
                   )}
                 </button>

@@ -12,7 +12,9 @@ import { useState, useMemo, useCallback, useEffect, useDeferredValue, useRef } f
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import { getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate } from '../lib/firestore';
+import { logCreate, logUpdate, logDelete } from '../lib/auditLogger';
 import { COLLECTIONS } from '../lib/firebase';
+import { createCompanyInGroup, updateCompanyInGroup } from '../lib/groupAdmin';
 import { INDIAN_STATES, type CompanyConfig } from '../config/company';
 import { COMPANY_BUSINESS_MODES, DEFAULT_BUSINESS_MODE, resolveBusinessMode, type CompanyBusinessMode } from '../lib/companyBusinessMode';
 import { statusBadge } from '../components/ui/Badge';
@@ -108,12 +110,32 @@ export default function Companies() {
 
   const save = useMutation({
     mutationFn: async (d:any) => {
+      // Phase 5 (§7.3): a Group Admin creates/edits companies through the
+      // group-scoped write path — the generic helpers strip groupId for
+      // companies, but the companies create/update rules REQUIRE the request
+      // to carry groupId == the actor's authoritative Group (never a form
+      // field; rules reject any other value). Other actors keep the existing
+      // path exactly.
+      if (user?.role === 'GroupAdmin') {
+        if (editId) {
+          await updateCompanyInGroup(editId, d);
+          if (editId === activeCompanyId) setCompany(d);
+        } else {
+          await createCompanyInGroup(d);
+        }
+        return;
+      }
       if (editId) {
+        // F-16 (Phase 0): audit company edits (previously unlogged).
+        const existing = companies.find((c:any) => c.id === editId);
         await updateDocById(COLLECTIONS.COMPANIES, editId, d);
         if (editId === activeCompanyId) setCompany(d);
+        await logUpdate('company', editId, existing ? { ...existing } : {}, { ...d }, 'companies');
       } else {
         const id=genId.generic('CO');
         await createDocWithId(COLLECTIONS.COMPANIES, id, {...d, id, createdBy:user.id});
+        // F-16 (Phase 0): audit company creation.
+        await logCreate('company', id, {...d, id}, 'companies');
       }
     },
     onSuccess: () => { qc.invalidateQueries({queryKey:['companies']}); qc.invalidateQueries({queryKey:['companies_default']}); toast.success(editId?'Updated':'Company added'); closeForm(); },
@@ -136,7 +158,7 @@ export default function Companies() {
     onError: (e:any) => toast.error(e.message),
   });
 
-  const del = useMutation({ mutationFn:(id:string)=>deleteDocById(COLLECTIONS.COMPANIES,id), onSuccess:()=>{qc.invalidateQueries({queryKey:['companies']});toast.success('Deleted');setDelId(null);} });
+  const del = useMutation({ mutationFn:async (id:string)=>{ await deleteDocById(COLLECTIONS.COMPANIES,id); await logDelete('company', id, undefined, 'companies'); }, onSuccess:()=>{qc.invalidateQueries({queryKey:['companies']});toast.success('Deleted');setDelId(null);} });
 
   // ── URL sync ──────────────────────────────────────────────────────
   function syncQueueParams(overrides: Record<string, string | number>) {

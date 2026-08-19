@@ -1,7 +1,7 @@
 // features/sales/hooks/useSales.ts
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  getAll, deleteDocById, genId, fmtDate, createDocWithId, resolveWriteCompanyId,
+  getAll, deleteDocById, genId, fmtDate, createDocWithId, resolveWriteCompanyId, resolveWriteCompanyCode,
 } from '../../../lib/firestore';
 import { getNextDocumentNumber, resolveDocumentDefaults } from '../../../lib/documentNumbering';
 import { COLLECTIONS, db } from '../../../lib/firebase';
@@ -114,7 +114,10 @@ export async function createPI(payload: Record<string, unknown>) {
     invoiceNumber: documentNumber,
     piNumber: documentNumber,
     refNo: documentNumber,
-    templateUsed: 'CSGPL',
+    // Data-driven: the company's own companyCode (same source PI/index.ts and
+    // theme.ts already key their template/theme selection off), never a
+    // hardcoded company-name literal — see resolveWriteCompanyCode().
+    templateUsed: resolveWriteCompanyCode(companyId),
     dueDate: String(payload.dueDate || addDaysIso(baseDate, defaults.settings.piValidityDays)),
     terms: String(payload.terms || defaults.settings.defaultTerms),
     notes: String(payload.notes || defaults.settings.defaultNotes),

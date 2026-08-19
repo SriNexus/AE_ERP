@@ -179,10 +179,11 @@ describe('Regression — Phase 0/1/2/3 remain intact', () => {
     const mod = await import('../CustomerWorkspace');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
-    // 90s: cold import of the full CustomerWorkspace graph under full-suite
+    // 240s: cold import of the full CustomerWorkspace graph under full-suite
     // parallel load (verified: passes isolated/grouped within 15-30s; the
-    // full-suite parallel scheduler can push a cold compile past 30s).
-  }, 90000);
+    // full-suite parallel scheduler can push a cold compile past 170s on slow
+    // machines). 240s keeps the module-existence assertion meaningful.
+  }, 240000);
 });
 
 describe('Strict scope boundary — no Phase 5, no mobile, no unrelated redesigns', () => {

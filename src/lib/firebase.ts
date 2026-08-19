@@ -204,6 +204,7 @@ export const COLLECTIONS = {
   PRODUCTS:           'products',
   PRODUCT_CATEGORIES: 'product_categories',
   WAREHOUSES:         'warehouses',
+  TEAMS:              'teams',
   STOCK:              'stock',
   STOCK_LEDGER:       'stock_ledger',
   ORDERS:             'orders',
@@ -257,6 +258,12 @@ export const COLLECTIONS = {
   NOTIFICATION_TEMPLATES: 'notification_templates',
   NOTIFICATION_LOGS:  'notification_logs',
   SECURITY_LOGS:      'security_logs',
+  // Phase 1 (Multi-Tenant): Group tier — the tenant boundary above Company.
+  GROUPS:             'groups',
+  GROUP_MEMBERS:      'group_members',
+  // Phase 1: platform-level collections with no tenant scoping.
+  PLATFORM_SETTINGS:  'platform_settings',
+  DEMO_OPERATIONS:    'demo_operations',
 } as const;
 
 export type CollectionKey = keyof typeof COLLECTIONS;

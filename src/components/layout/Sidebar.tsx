@@ -143,6 +143,7 @@ function useSidebarWidths() {
 export function Sidebar() {
   const { collapsed: collapsedWidth, expanded: expandedWidth } = useSidebarWidths();
   const perms = usePermissions();
+  const user = useAppStore((state) => state.user);
   const businessMode = resolveBusinessMode(useAppStore((state) => state.company));
   const hasOwnerAccess = useOwnerAccess();
 
@@ -245,9 +246,13 @@ export function Sidebar() {
   }, []);
   const demoFullLogo = isDarkTheme ? DEMO_LOGO_URLS.logoDark : DEMO_LOGO_URLS.logoLight;
 
+  // Phase 5 (§7): Group Admin navigation — visible only to GroupAdmin actors.
+  const isGroupAdmin = user?.role === 'GroupAdmin';
+
   const visibleNav = ERP_NAV_ITEMS.reduce<NavItem[]>((acc, item) => {
     if (item.path) {
       if (item.ownerOnly && !hasOwnerAccess) return acc;
+      if (item.groupAdminOnly && !isGroupAdmin) return acc;
       if (isDemo && item.module && isDemoHiddenModule(item.module)) return acc;
       if (item.module && !perms.canView(item.module)) return acc;
       if (item.module && !isModuleAllowedForBusinessMode(item.module, businessMode)) return acc;
@@ -256,6 +261,7 @@ export function Sidebar() {
     }
     const kids = (item.children||[]).filter(c => {
       if (c.ownerOnly && !hasOwnerAccess) return false;
+      if (c.groupAdminOnly && !isGroupAdmin) return false;
       if (isDemo && c.module && isDemoHiddenModule(c.module)) return false;
       if (c.module && !isModuleAllowedForBusinessMode(c.module, businessMode)) return false;
       return !c.module || perms.canView(c.module);

@@ -29,6 +29,10 @@ function isRealCompanyId(id: string | undefined | null): id is string {
   return !!id && id !== 'all' && id !== 'default';
 }
 
+function isRealGroupId(id: string | undefined | null): id is string {
+  return !!id && id !== 'all' && id !== 'default';
+}
+
 /**
  * Resolve the write-time company for a record creation. Never returns the
  * neutral 'default' placeholder — a real company must be resolvable from the
@@ -46,6 +50,172 @@ export function resolveWriteCompanyId(): string {
       : isRealCompanyId(state.user?.companyId)
         ? state.user!.companyId!
         : '';
+}
+
+/**
+ * PHASE 1 (Multi-Tenant) — authoritative Group resolution at write time
+ * (Master Plan §3.4, implementation-critical, non-negotiable).
+ *
+ * Mirrors resolveWriteCompanyId() exactly: the groupId is NEVER client-
+ * supplied — it is derived from the resolved write-time companyId's owning
+ * Group, looked up from the ALREADY-LOADED company state (the app loads the
+ * companies list at boot via useGlobalBoot; the store's companyGroupIds map
+ * is populated from those documents — no new Firestore read is required).
+ *
+ * Resolution order:
+ *  1. the explicit target companyId, when given and real (callers that
+ *     resolved a payload companyId pass it so cross-company writes by
+ *     owner/super-admin still stamp the TARGET company's Group)
+ *  2. the standard resolveWriteCompanyId() result
+ *  3. the loaded companyGroupIds map (populated at boot from the companies
+ *     collection — includes the target company for multi-company-capable
+ *     identities)
+ *  4. the active company config object's own groupId (covers demo mode and
+ *     the pre-boot window where the map is not yet populated)
+ *  5. '' — fail closed: never persist a placeholder Group, exactly like the
+ *     companyId fail-closed convention. A missing groupId is inert until
+ *     Phase 2 begins enforcing it; the Phase 1 backfill catches up history.
+ */
+export function resolveWriteGroupId(companyId?: string): string {
+  const state = useAppStore.getState();
+  const targetCompanyId = isRealCompanyId(companyId) ? companyId : resolveWriteCompanyId();
+  if (!isRealCompanyId(targetCompanyId)) return '';
+
+  const fromMap = state.companyGroupIds?.[targetCompanyId];
+  if (isRealGroupId(fromMap)) return fromMap;
+
+  const config = state.company?.id === targetCompanyId
+    ? state.company
+    : state.globalCompany?.id === targetCompanyId
+      ? state.globalCompany
+      : null;
+  const fromConfig = config?.groupId;
+  if (isRealGroupId(fromConfig)) return fromConfig;
+
+  return '';
+}
+
+/**
+ * Resolves the write-time company's own `companyCode` — the existing,
+ * data-driven template/theme selector documents already key off
+ * (src/templates/documents/PI/index.ts, src/templates/documents/shared/theme.ts:
+ * `company.companyCode === 'CGPL' | 'STS'`). Generated-document `templateUsed`
+ * fields must be stamped from THIS, never a literal company-name string —
+ * every company's own companyCode, whatever it is, resolves correctly here;
+ * an unrecognized code (e.g. a company that isn't CGPL/STS) simply falls
+ * through those templates' own default branch, exactly as intended.
+ * Mirrors resolveWriteGroupId()'s lookup order (explicit target id, else the
+ * standard resolveWriteCompanyId() result), reading the already-loaded
+ * `company`/`globalCompany` config objects — no extra Firestore read.
+ */
+export function resolveWriteCompanyCode(companyId?: string): string {
+  const state = useAppStore.getState();
+  const targetCompanyId = isRealCompanyId(companyId) ? companyId : resolveWriteCompanyId();
+  if (!isRealCompanyId(targetCompanyId)) return '';
+
+  const config = state.company?.id === targetCompanyId
+    ? state.company
+    : state.globalCompany?.id === targetCompanyId
+      ? state.globalCompany
+      : null;
+  return typeof config?.companyCode === 'string' ? config.companyCode.trim() : '';
+}
+
+/**
+ * PHASE 1 (Multi-Tenant) — collections EXCLUDED from the write-helper
+ * `groupId` auto-stamping (Master Plan §3.2's explicit exclusion list):
+ *   - `companies`      — it IS the thing groupId is looked up from; its own
+ *     groupId is assigned by the Phase 1 backfill (and later the Super Admin
+ *     Groups UI), never derived from itself.
+ *   - `roles`          — per §5.6, role documents are Company-scoped, NOT
+ *     Group-scoped; they carry companyId only.
+ *   - `users`          — own groupId semantics per §3.2 (GroupAdmin's group at
+ *     creation; derived+optional for other roles) — handled in the users
+ *     write path, not the generic helper.
+ *   - `user_auth_maps` — mirrors users.groupId (authIdentity write path).
+ *   - `groups` / `group_members` / `platform_settings` / `demo_operations` /
+ *     `backup_metadata` — platform-level collections, no tenant scoping.
+ */
+const GROUP_ID_EXCLUDED_COLLECTIONS = new Set<string>([
+  COLLECTIONS.COMPANIES,
+  COLLECTIONS.ROLES,
+  COLLECTIONS.USERS,
+  COLLECTIONS.USER_AUTH_MAPS,
+  COLLECTIONS.GROUPS,
+  COLLECTIONS.GROUP_MEMBERS,
+  COLLECTIONS.PLATFORM_SETTINGS,
+  COLLECTIONS.DEMO_OPERATIONS,
+  'backup_metadata',
+]);
+
+// Phase 4 (Master Plan §6): platform-level collections owned by the Super
+// Admin control plane. These collections carry NO tenant scoping — their
+// documents have no companyId (groups, group_members, platform_settings,
+// backup_metadata) and the rules gate them to the owner/Super Admin identity
+// (plus GroupAdmin own-Group reads on groups/group_members). The generic
+// write helpers therefore must NOT stamp companyId onto them (the Group
+// stamp is already skipped via GROUP_ID_EXCLUDED_COLLECTIONS): the Master
+// Plan §3.1 schemas list no companyId on these documents, and a stray
+// companyId would be a schema violation (and, worse, would let a forged
+// companyId ride on a platform write). The control plane's mutations go
+// through platformAdmin.ts, which uses raw Firestore writes for the
+// groupId-bearing paths (group_members grant, users groupId assignment,
+// company bootstrap) precisely because the generic helpers deliberately
+// strip client-supplied groupId.
+const PLATFORM_COLLECTIONS = new Set<string>([
+  COLLECTIONS.GROUPS,
+  COLLECTIONS.GROUP_MEMBERS,
+  COLLECTIONS.PLATFORM_SETTINGS,
+  COLLECTIONS.DEMO_OPERATIONS,
+  'backup_metadata',
+]);
+
+// Phase 4 (Master Plan §6.5/§6.7): platform-wide reads by the Super Admin
+// control plane. The owner/Super Admin identity may read these collections
+// platform-wide at the rules layer (isOwnerIdentity()/isSuperAdmin() are
+// unconditional in every relevant read rule), and the Master Plan's platform
+// screens (Groups, Companies, Users, Security, Settings) all need the FULL
+// dataset regardless of the actor's activeCompanyId — a company constraint
+// would silently return only one tenant's rows. getAllPlatform() is the only
+// client read path for them: raw getDocs with NO company/ownership
+// constraint, guarded to the owner/Super Admin identity (fail closed).
+const PLATFORM_READ_COLLECTIONS = new Set<string>([
+  COLLECTIONS.GROUPS,
+  COLLECTIONS.GROUP_MEMBERS,
+  COLLECTIONS.PLATFORM_SETTINGS,
+  COLLECTIONS.SECURITY_LOGS,
+  COLLECTIONS.AUDIT_LOGS,
+  'backup_metadata',
+  COLLECTIONS.COMPANIES,
+  COLLECTIONS.USERS,
+]);
+
+// Phase 3 (F-07, Master Plan §8.1/§8.3): the collections whose records are
+// warehouse-scoped — the actor's own warehouseId must equal the record's
+// warehouseId (rules-level sameWarehouse()) AND the client query must carry
+// the warehouseId equality so the list query stays provable (the §8.3
+// query-engine narrowing). §8.1 deliberately scopes this to stock / dispatch /
+// goods_receipts ("the three collections where warehouse-level data actually
+// differs meaningfully"); stock_ledger is included because it is the movement
+// ledger of stock — it carries warehouseId and would otherwise leak every
+// warehouse's stock movements through the ledger path (audit §17 row: Stock
+// Ledger shares stock's residual "cross-warehouse access within company"
+// risk). The warehouses collection itself stays company-readable by design
+// (§8.1 note in firestore.rules: warehouse metadata is needed for selection
+// across roles, and the explicit warehouses block governs it separately).
+const WAREHOUSE_SCOPED_COLLECTIONS = new Set<string>([
+  COLLECTIONS.STOCK,
+  COLLECTIONS.STOCK_LEDGER,
+  COLLECTIONS.DISPATCH,
+  COLLECTIONS.GOODS_RECEIPTS,
+]);
+
+// §8.2: warehouse-restricted roles are the existing warehouse-adjacent roles
+// (Warehouse / Operations). Mirrors the rules' actorIsWarehouseRestricted()
+// regex exactly (roleMatches('.*Warehouse.*') / roleMatches('.*Operations.*')).
+// Every other role (Admin, GroupAdmin, Director, Manager, ...) is unaffected.
+export function isWarehouseRestrictedRole(role: string | undefined | null): boolean {
+  return !!role && (/.*Warehouse.*/.test(role) || /.*Operations.*/.test(role));
 }
 
 /**
@@ -69,10 +239,17 @@ export function resolveWriteCompanyId(): string {
  *
  * 'all' is preserved as-is for owner/super-admin global reads (the plan
  * builders translate it to an empty company constraint).
+ *
+ * Phase 2 (Master Plan §9.4): the 'group' sentinel is recognized and passed
+ * through, parallel to the 'all' sentinel — when a Group Admin's active
+ * context is Group-view mode, companyScopedQuery() translates it to a
+ * groupId constraint (the rules' sameGroup() additive-OR makes that query
+ * provable).
  */
 export function resolveReadCompanyId(): string {
   const state = useAppStore.getState();
   if (state.activeCompanyId === 'all') return 'all';
+  if (state.activeCompanyId === 'group') return 'group';
   return resolveWriteCompanyId();
 }
 
@@ -102,8 +279,57 @@ export function resolveReadCompanyId(): string {
  */
 export function companyScopedQuery(colName: string): QueryConstraint[] {
   const { activeCompanyId, user } = useAppStore.getState();
-  if (colName === COLLECTIONS.ROLES) return [];
-  if (colName === COLLECTIONS.COMPANIES) return [];
+
+  // Phase 2 (Master Plan §9.4): Group-view mode — the active context is the
+  // GroupAdmin's authoritative Group. The groupId comes from the booted
+  // identity (user.groupId — the GroupAdmin's group, §3.2); the rules'
+  // groupAdminCanRead()/sameGroup() branches make `where('groupId','==',...)`
+  // provable for a Group Admin (including on `companies`, whose docs carry
+  // groupId per §3.2), and groupId itself is write-helper-stamped, never
+  // client-controlled. Only a GroupAdmin identity may resolve this branch
+  // (the boot flow never sets 'group' for other roles). Placed BEFORE the
+  // companies/roles special-casing so Group-view lists never fall through to
+  // a companyId constraint.
+  if (activeCompanyId === 'group') {
+    const groupId = user?.groupId;
+    if (!groupId) {
+      throw new Error(
+        'Group context is not resolved: the Group Admin identity has no authoritative groupId. ' +
+        'Contact an administrator to repair the user profile.'
+      );
+    }
+    return [where('groupId', '==', groupId)];
+  }
+
+  // F-01 (Phase 0): `companies` was previously returned with NO constraint by
+  // design ("global, unscoped" collection), but firestore.rules now scopes its
+  // read to the actor's own company (Super Admin/owner remain platform-wide).
+  // Leaving the client query unscoped would reproduce the documented "Failed to
+  // load data" regression class: Firestore cannot prove an unscoped list query
+  // safe against a per-document rule and denies the whole list. Scoping the
+  // query to the actor's own company keeps list queries provable for ordinary
+  // users; owner/super-admin keep the unscoped read they are exempted for at
+  // the rules layer.
+  //
+  // F-03 closure (Phase 1, Master Plan §5.6): `roles` is now Company-scoped —
+  // role documents are per-company keyed (`${companyId}_${roleName}` for system
+  // templates, ROL-* ids for custom roles) and carry the owning companyId, so a
+  // company-scoped read resolves the current user's role against THEIR company's
+  // role documents. Owner/super-admin keep the unscoped platform-wide read (the
+  // same exemption as the Phase 0 F-01 companies fix; the rules' sameCompany()
+  // grants them the same bypass).
+  if (colName === COLLECTIONS.COMPANIES || colName === COLLECTIONS.ROLES) {
+    if (user?.isOwner || user?.isSuperAdmin) return [];
+    const companyId = isRealCompanyId(activeCompanyId) ? activeCompanyId : user?.companyId;
+    if (!companyId || companyId === 'default') {
+      if (user?.isOwner || user?.isSuperAdmin) return [];
+      throw new Error(
+        'Tenant context is not resolved: the authenticated ERP identity has no valid companyId. ' +
+        'Contact an administrator to repair the user profile.'
+      );
+    }
+    return [where('companyId', '==', companyId)];
+  }
 
   if (!user) {
     throw new Error(
@@ -123,7 +349,33 @@ export function companyScopedQuery(colName: string): QueryConstraint[] {
       'Contact an administrator to repair the user profile.'
     );
   }
-  return [where('companyId', '==', companyId)];
+  const constraints: QueryConstraint[] = [where('companyId', '==', companyId)];
+
+  // Phase 3 (F-07, Master Plan §8.3): warehouse-scoped query narrowing — for
+  // the warehouse-scoped collections (stock / stock_ledger / dispatch /
+  // goods_receipts), a warehouse-restricted role (Warehouse / Operations,
+  // matching the rules' actorIsWarehouseRestricted()) MUST carry the
+  // warehouseId equality in the query itself. This keeps the list query
+  // provable against the rules' sameWarehouse() gate (Firestore cannot prove
+  // an unscoped query against a per-document rule and denies the whole list —
+  // the same F-01 class this function already solves for companyId) and makes
+  // the restriction structural, not a client-side filter. Fail closed: a
+  // warehouse-restricted actor with no authoritative warehouseId cannot
+  // construct a safe query at all (they may only ever see own-warehouse
+  // records). Owner / Super Admin bypass (rules-level exemption) — but the
+  // warehouseId is taken from the authoritative identity, never from the
+  // client.
+  if (WAREHOUSE_SCOPED_COLLECTIONS.has(colName) && isWarehouseRestrictedRole(user.role)) {
+    const warehouseId = user.warehouseId;
+    if (!warehouseId) {
+      throw new Error(
+        'Warehouse context is not resolved: the authenticated identity has no authoritative warehouseId. ' +
+        'Contact an administrator to assign the user to a warehouse.'
+      );
+    }
+    constraints.push(where('warehouseId', '==', warehouseId));
+  }
+  return constraints;
 }
 
 const COLLECTION_PERMISSION_MODULE: Record<string, string> = {
@@ -191,7 +443,11 @@ const OWNERSHIP_EXEMPT_COLLECTIONS = new Set<string>([
 export function resolveVisibility(col: string): Visibility {
   if (OWNERSHIP_EXEMPT_COLLECTIONS.has(col)) return 'all';
   const { user, roleData } = useAppStore.getState();
-  if (user?.role === 'Admin') return 'all';
+  // Phase 2 (Master Plan §5.2): GroupAdmin is a SCOPE extension with Admin
+  // grants — record-level visibility is 'all' exactly like Admin (the rules
+  // restrict WHICH companies they can reach via sameGroup; within the Group
+  // they are Admin-equivalent, incl. per-Company Admin role customizations).
+  if (user?.role === 'Admin' || user?.role === 'GroupAdmin') return 'all';
   if (roleData && roleData.permissions) {
     const moduleKey = COLLECTION_PERMISSION_MODULE[col] || col;
     const modulePermissions = roleData.permissions[moduleKey] || roleData.permissions[col];
@@ -231,10 +487,31 @@ export function applyAccessFilters<T = DocumentData>(
   // Firestore as where('companyId','==','default') — the Admin 403 storm).
   const effectiveCompanyId = resolveReadCompanyId();
 
+  // Phase 2 (§9.4): in Group-view mode ('group' sentinel) the in-memory
+  // defense-in-depth filter keys off the denormalized groupId (matching the
+  // query-level where('groupId','==',...) constraint) instead of companyId —
+  // a Group Admin's list spans every Company in their Group.
+  const effectiveGroupId = effectiveCompanyId === 'group' ? state.user?.groupId : '';
+
   const companyFiltered = docs.filter((docData: any) => {
     if (docData.isDeleted === true) return false;
-    if (!globalCols.includes(col as any) && effectiveCompanyId && effectiveCompanyId !== 'all' && docData.companyId !== effectiveCompanyId) {
-      return false;
+    if (!globalCols.includes(col as any) && effectiveCompanyId && effectiveCompanyId !== 'all') {
+      if (effectiveCompanyId === 'group') {
+        if (!effectiveGroupId || docData.groupId !== effectiveGroupId) return false;
+      } else if (docData.companyId !== effectiveCompanyId) {
+        return false;
+      }
+    }
+
+    // Phase 3 (F-07, Master Plan §8.3): in-memory defense-in-depth for the
+    // warehouse-scoped collections — a warehouse-restricted role (Warehouse /
+    // Operations) may only ever hold records of their OWN warehouse. This
+    // mirrors the query-level where('warehouseId','==',...) narrowing in
+    // companyScopedQuery() and the rules' sameWarehouse() gate; like the
+    // companyId filter above, it is belt-and-braces behind the real security
+    // boundary (Firestore rules), never the boundary itself.
+    if (WAREHOUSE_SCOPED_COLLECTIONS.has(col) && isWarehouseRestrictedRole(user?.role)) {
+      if (!user?.warehouseId || docData.warehouseId !== user.warehouseId) return false;
     }
 
     // Settings documents are already scoped by deterministic document ID and
@@ -311,6 +588,34 @@ export function applyAccessFilters<T = DocumentData>(
   }
 
   return companyFiltered;
+}
+
+// ── PLATFORM READ (Super Admin control plane, Master Plan §6) ───────────
+// The ONLY client read path for the platform collections and platform-wide
+// company/user datasets. The owner/Super Admin identity is exempt from
+// company/ownership scoping at the rules layer on every collection it may
+// reach here (platform collections have no companyId at all; companies/users
+// read rules exempt the platform identity unconditionally), so the query
+// carries NO company/ownership constraint — the in-memory defense filter
+// (applyAccessFilters) must not be applied either, because it would drop
+// platform documents (no companyId) and company-scope the users list.
+// Fail closed: any non-owner/non-Super-Admin caller is rejected outright —
+// this helper is never the security boundary (the rules are), but a stray
+// caller must not silently get an unscoped read either.
+export async function getAllPlatform<T = DocumentData>(
+  col: string, userConstraints: QueryConstraint[] = []
+): Promise<DocWithId<T>[]> {
+  if (!firebaseEnv.isConfigured) {
+    throw new Error(NOT_CONFIGURED_MSG);
+  }
+  const { user } = useAppStore.getState();
+  if (!user?.isOwner && !user?.isSuperAdmin) {
+    throw new Error('Platform reads require the Super Admin identity.');
+  }
+  const snap = await getDocs(query(collection(db, col), ...userConstraints));
+  let docs = snap.docs.map((d) => fromDoc<T>(d as any));
+  if (col === COLLECTIONS.USERS) docs = filterManageableUsers(docs);
+  return docs;
 }
 
 // ── GET ALL (With Smart Fallback for Missing Indexes) ────────
@@ -459,10 +764,21 @@ export async function createDoc<T extends DocumentData>(col: string, data: T): P
   const resolvedCompanyId = isRealCompanyId(explicitCompanyId)
     ? explicitCompanyId
     : resolveWriteCompanyId();
-  const { companyId: _stripped, ...restData } = data as DocumentData;
+  // Phase 1 (Multi-Tenant): strip any client-supplied groupId and stamp the
+  // authoritative value resolved from the target company's owning Group — the
+  // identical fail-closed pattern used for companyId above (Master Plan §3.4).
+  // Excluded collections (§3.2) never receive the auto-stamp. Phase 4
+  // (Master Plan §6): platform collections carry NO companyId at all — the
+  // resolved session company must never be stamped onto a groups /
+  // group_members / platform_settings document (a stray companyId would be a
+  // schema violation and a forged-companyId ride-along on a platform write).
+  const { companyId: _stripped, groupId: _strippedGroupId, ...restData } = data as DocumentData;
+  const isPlatform = PLATFORM_COLLECTIONS.has(col);
+  const resolvedGroupId = GROUP_ID_EXCLUDED_COLLECTIONS.has(col) ? '' : resolveWriteGroupId(resolvedCompanyId);
   const payload = sanitizePayload({
     ...restData,
-    ...(resolvedCompanyId ? { companyId: resolvedCompanyId } : {}),
+    ...(!isPlatform && resolvedCompanyId ? { companyId: resolvedCompanyId } : {}),
+    ...(resolvedGroupId ? { groupId: resolvedGroupId } : {}),
     createdBy: state.user?.id || 'system',
     updatedBy: state.user?.id || 'system',
     createdAt: serverTimestamp(),
@@ -489,10 +805,17 @@ export async function createDocWithId<T extends DocumentData>(col: string, id: s
   const resolvedCompanyId = isRealCompanyId(explicitCompanyId)
     ? explicitCompanyId
     : resolveWriteCompanyId();
-  const { companyId: _stripped, ...restData } = data as DocumentData;
+  // Phase 1 (Multi-Tenant): strip any client-supplied groupId and stamp the
+  // authoritative value (Master Plan §3.4) — see createDoc() for the rationale.
+  // Excluded collections (§3.2) never receive the auto-stamp. Phase 4: same
+  // companyId skip as createDoc() for the platform collections (§6).
+  const { companyId: _stripped, groupId: _strippedGroupId, ...restData } = data as DocumentData;
+  const isPlatform = PLATFORM_COLLECTIONS.has(col);
+  const resolvedGroupId = GROUP_ID_EXCLUDED_COLLECTIONS.has(col) ? '' : resolveWriteGroupId(resolvedCompanyId);
   const payload = sanitizePayload({
     ...restData,
-    ...(resolvedCompanyId ? { companyId: resolvedCompanyId } : {}),
+    ...(!isPlatform && resolvedCompanyId ? { companyId: resolvedCompanyId } : {}),
+    ...(resolvedGroupId ? { groupId: resolvedGroupId } : {}),
     createdBy: state.user?.id || 'system',
     updatedBy: state.user?.id || 'system',
     createdAt: serverTimestamp(),
@@ -510,13 +833,32 @@ export async function updateDocById(col: string, id: string, data: Partial<Docum
   }
 
   const state = useAppStore.getState();
-  const payload = sanitizePayload({ 
-    ...data, 
-    updatedBy: state.user?.id || 'system',
-    updatedAt: serverTimestamp() 
-  });
   const ref = doc(db, col, id);
   const snap = await getDoc(ref);
+  // Phase 1 (Multi-Tenant): on UPDATE, groupId is never client-controlled
+  // either — any client-supplied value is stripped for the denormalized
+  // collections and the authoritative value (derived from the document's
+  // OWN companyId) is re-stamped, mirroring the create helpers (Master Plan
+  // §3.4). The existing doc's companyId is authoritative: companyId is
+  // immutable at the rules layer (companyIdUnchanged()), so the Group derived
+  // from it can never legitimately change — a payload companyId (or a
+  // resolved session company) is only a fallback for docs that do not exist
+  // yet (the merge-create branch below). Excluded collections (§3.2) never
+  // receive the auto-stamp.
+  const { groupId: _strippedGroupId, ...restData } = data as DocumentData;
+  const existingCompanyId = snap.exists() ? (snap.data() as any)?.companyId : undefined;
+  const targetCompanyId = isRealCompanyId(existingCompanyId)
+    ? existingCompanyId
+    : isRealCompanyId((restData as any).companyId)
+      ? (restData as any).companyId
+      : resolveWriteCompanyId();
+  const resolvedGroupId = GROUP_ID_EXCLUDED_COLLECTIONS.has(col) ? '' : resolveWriteGroupId(targetCompanyId);
+  const payload = sanitizePayload({
+    ...restData,
+    ...(resolvedGroupId ? { groupId: resolvedGroupId } : {}),
+    updatedBy: state.user?.id || 'system',
+    updatedAt: serverTimestamp()
+  });
   if (!snap.exists()) {
     await setDoc(ref, payload, { merge: true });
     return;
@@ -646,10 +988,17 @@ export async function batchCreate(col: string, items: DocumentData[]): Promise<v
     const itemCompanyId = isRealCompanyId(item.companyId)
       ? item.companyId
       : resolveWriteCompanyId();
-    const { companyId: _stripped, ...restItem } = item;
+    // Phase 1 (Multi-Tenant): strip any client-supplied groupId and stamp the
+    // authoritative value resolved per-item from the item's target company
+    // (Master Plan §3.4). Excluded collections (§3.2) never receive it. Phase
+    // 4: same companyId skip as createDoc() for the platform collections (§6).
+    const { companyId: _stripped, groupId: _strippedGroupId, ...restItem } = item;
+    const isPlatform = PLATFORM_COLLECTIONS.has(col);
+    const itemGroupId = GROUP_ID_EXCLUDED_COLLECTIONS.has(col) ? '' : resolveWriteGroupId(itemCompanyId);
     const payload = sanitizePayload({
       ...restItem,
-      ...(itemCompanyId ? { companyId: itemCompanyId } : {}),
+      ...(!isPlatform && itemCompanyId ? { companyId: itemCompanyId } : {}),
+      ...(itemGroupId ? { groupId: itemGroupId } : {}),
       createdBy: state.user?.id || 'system',
       updatedBy: state.user?.id || 'system',
       createdAt: serverTimestamp(),

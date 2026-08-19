@@ -1,5 +1,6 @@
 import { COLLECTIONS } from '../../../lib/firebase';
-import { getAll, getOne } from '../../../lib/firestore';
+import { getAll, getOne, resolveWriteCompanyId } from '../../../lib/firestore';
+import { roleDocumentId } from '../../../lib/roleBootstrap';
 import {
   createProjectionWithUserId,
   deleteProjectionWithEntity,
@@ -35,11 +36,20 @@ function withNormalizedEmail(payload: Record<string, unknown>): Record<string, u
 
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
 
-/** Resolve a role document by name — system roles are keyed by name, custom roles by ROL-* id. */
+/** Resolve a role document by name — Phase 1 (F-03 closure): system roles are
+ *  now per-company keyed (`${companyId}_${roleName}`, companyId stamped), so
+ *  the keyed document id is tried first; custom roles keep their ROL-* ids and
+ *  are found by name scan. The legacy name-keyed id is tried as a fallback for
+ *  pre-migration docs. */
 async function findRoleByName(roleName: string): Promise<OrgRoleLike & { id: string } | null> {
   const name = text(roleName);
   if (!name) return null;
-  const byId = await getOne<OrgRoleLike & { id: string }>(COLLECTIONS.ROLES, name);
+  const companyId = resolveWriteCompanyId();
+  if (companyId) {
+    const keyed = await getOne<OrgRoleLike & { id: string }>(COLLECTIONS.ROLES, roleDocumentId(companyId, name)).catch(() => null);
+    if (keyed) return keyed;
+  }
+  const byId = await getOne<OrgRoleLike & { id: string }>(COLLECTIONS.ROLES, name).catch(() => null);
   if (byId) return byId;
   const all = await getAll<OrgRoleLike & { id: string }>(COLLECTIONS.ROLES);
   return all.find((role) => text(role.name).toLowerCase() === name.toLowerCase()) || null;

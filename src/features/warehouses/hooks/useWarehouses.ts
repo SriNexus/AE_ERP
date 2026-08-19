@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getAll, createDocWithId, updateDocById, deleteDocById, genId } from '../../../lib/firestore';
+import { getAll, getOne, createDocWithId, updateDocById, deleteDocById, genId } from '../../../lib/firestore';
+import { logCreate, logUpdate, logDelete } from '../../../lib/auditLogger';
 import { COLLECTIONS } from '../../../lib/firebase';
 import { useCurrentUser } from '../../../store/useAppStore';
 import type { WarehouseForm } from '../types';
@@ -22,10 +23,15 @@ export function useSaveWarehouse(editId: string | null, onSuccess: () => void) {
   return useMutation({
     mutationFn: async (data: WarehouseForm) => {
       if (editId) {
+        // F-16 (Phase 0): audit warehouse edits (previously unlogged).
+        const existing = await getOne<any>(COLLECTIONS.WAREHOUSES, editId).catch(() => null);
         await updateDocById(COLLECTIONS.WAREHOUSES, editId, data);
+        await logUpdate('warehouse', editId, existing ? { ...existing } : {}, { ...data }, 'warehouses');
       } else {
         const id = genId.generic('WH');
         await createDocWithId(COLLECTIONS.WAREHOUSES, id, { ...data, id, createdBy: user.id });
+        // F-16 (Phase 0): audit warehouse creation.
+        await logCreate('warehouse', id, { ...data, id }, 'warehouses');
       }
     },
     onSuccess: () => {
@@ -40,7 +46,11 @@ export function useSaveWarehouse(editId: string | null, onSuccess: () => void) {
 export function useDeleteWarehouse() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => deleteDocById(COLLECTIONS.WAREHOUSES, id),
+    mutationFn: async (id: string) => {
+      await deleteDocById(COLLECTIONS.WAREHOUSES, id);
+      // F-16 (Phase 0): audit warehouse deletion (soft delete).
+      await logDelete('warehouse', id, undefined, 'warehouses');
+    },
     onSuccess:  () => { qc.invalidateQueries({ queryKey: QK }); toast.success('Warehouse deleted'); },
     onError:    (e: any) => toast.error(e.message),
   });

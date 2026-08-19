@@ -20,7 +20,10 @@ describe('Commissioning page — hook-order source analysis', () => {
     const mod = await import('../../pages/Commissioning');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
-  });
+    // Cold import of the full Commissioning graph; under full-suite parallel
+    // load this can exceed the default 15s testTimeout (import weight, not a
+    // hang). 240s keeps the module-existence assertion meaningful on slow CI.
+  }, 240000);
 
   it('keeps every useMemo hook above the component return and has no early loading return', () => {
     // The page no longer uses an `if (loading) { … }` early return — loading

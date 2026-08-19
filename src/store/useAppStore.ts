@@ -12,6 +12,10 @@ export type AppUser = {
   role: string;
   phone?: string;
   companyId: string;
+  // Phase 2 (Master Plan §3.2/§9.4): the user's denormalized groupId — for a
+  // GroupAdmin this is their authoritative Group (drives the 'group' query
+  // sentinel); for every other role it mirrors their company's Group.
+  groupId?: string;
   warehouseId?: string;
   avatar?: string;
   avatarUrl?: string;
@@ -41,7 +45,14 @@ type AppStore = {
   globalCompany:CompanyConfig|null; company:CompanyConfig; activeCompanyId:string;
   sidebarOpen:boolean; roleData:any|null; teamMemberIds:string[]; permissionCache:RuntimePermissionCache;
   navigationStyle:NavigationStyle;
+  // Phase 1 (Multi-Tenant): companyId -> groupId lookup, populated at boot from
+  // the already-loaded companies list (Master Plan §3.4 — "already-loaded
+  // company/store state", no new Firestore read). resolveWriteGroupId() uses
+  // this to stamp authoritative groupId on writes. Not persisted — derived
+  // session state, rebuilt on every boot.
+  companyGroupIds: Record<string, string>;
   setUser:(u:AppUser)=>void; setRoleData:(r:any)=>void; setTeamMemberIds:(ids:string[])=>void; setPermissionCache:(cache:RuntimePermissionCache)=>void;
+  setCompanyGroupIds:(map:Record<string,string>)=>void;
   logout:()=>void; setGlobalCompany:(c:CompanyConfig)=>void; setCompany:(c:CompanyConfig)=>void;
   setActiveCompanyId:(id:string)=>void; setSidebarOpen:(v:boolean)=>void; toggleSidebar:()=>void;
   setNavigationStyle:(s:NavigationStyle)=>void;
@@ -54,13 +65,19 @@ export const useAppStore = create<AppStore>()(
     (set) => ({
       user:null, isAuthenticated:false, globalCompany:null, company:DEFAULT_COMPANY,
       activeCompanyId:'default', sidebarOpen:true, roleData:null, teamMemberIds:[], permissionCache:EMPTY_PERMISSION_CACHE,
+      companyGroupIds:{},
       setUser:(user)=>set({user,isAuthenticated:true}),
       setRoleData:(roleData)=>set({roleData}),
       setTeamMemberIds:(teamMemberIds)=>set({teamMemberIds}),
       setPermissionCache:(permissionCache)=>set({permissionCache}),
+      setCompanyGroupIds:(companyGroupIds)=>set((state)=>{
+        if (state.companyGroupIds === companyGroupIds) return {};
+        return {companyGroupIds};
+      }),
       logout:()=>{
     clearDemoSession();
     set({user:null,isAuthenticated:false,roleData:null,teamMemberIds:[],permissionCache:EMPTY_PERMISSION_CACHE,
+      companyGroupIds:{},
       // Root-cause fix (homepage demo-data isolation): company context must NOT
       // survive logout. activeCompanyId/company/globalCompany were persisted, so
       // a prior demo session left 'company-demo-neozy' in the store and the next

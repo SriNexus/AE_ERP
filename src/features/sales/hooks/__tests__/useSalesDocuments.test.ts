@@ -17,6 +17,11 @@ vi.mock('../../../../lib/firestore', () => ({
   genId: mocks.genId,
   fmtDate: vi.fn(),
   createDocWithId: mocks.createDocWithId,
+  resolveWriteCompanyCode: (companyId?: string) => {
+    const s = mocks.getState() as any;
+    const targetId = companyId || s.activeCompanyId || s.company?.id || s.user?.companyId || '';
+    return s.company?.id === targetId ? (s.company?.companyCode || '') : '';
+  },
 }));
 
 vi.mock('../../../../lib/documentNumbering', () => ({
@@ -38,7 +43,7 @@ describe('sales document creation', () => {
     vi.clearAllMocks();
     mocks.getState.mockReturnValue({
       activeCompanyId: 'company-1',
-      company: { id: 'company-1' },
+      company: { id: 'company-1', companyCode: 'AE-01' },
       user: { id: 'user-1', companyId: 'company-1' },
     });
     mocks.resolveDocumentDefaults.mockResolvedValue({
@@ -89,7 +94,9 @@ describe('sales document creation', () => {
         dueDate: '2026-07-27',
         terms: 'Net 15',
         notes: 'Default notes',
-        templateUsed: 'CSGPL',
+        // Data-driven: the resolved company's own companyCode (see
+        // resolveWriteCompanyCode()), never a hardcoded company-name literal.
+        templateUsed: 'AE-01',
       }),
     );
   });

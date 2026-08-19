@@ -102,7 +102,17 @@ export const firestoreAuthIdentityGateway: AuthIdentityGateway = {
       const currentUser = await transaction.get(userRef);
       if (!currentUser.exists()) throw new AuthIdentityError('erp-profile-missing', 'The ERP user disappeared during identity bootstrap.');
       if (mapping.exists() && text(mapping.data().userId) !== user.id) throw new AuthIdentityError('mapping-conflict', 'This authenticated account is already linked to another ERP user.');
-      transaction.set(mapRef, { authUid, userId: user.id, companyId: user.companyId, email: user.email, createdAt: mapping.exists() ? mapping.data().createdAt : serverTimestamp(), updatedAt: serverTimestamp() });
+      // Phase 1 (Multi-Tenant): user_auth_maps mirrors users.groupId (Master
+      // Plan §3.2) — stamp it from the validated ERP profile so the auth map
+      // carries the same group association as the user doc. Optional field:
+      // omitted when the profile has none (pre-backfill window).
+      const groupId = typeof user.groupId === 'string' && user.groupId.trim() ? user.groupId.trim() : '';
+      transaction.set(mapRef, {
+        authUid, userId: user.id, companyId: user.companyId, email: user.email,
+        ...(groupId ? { groupId } : {}),
+        createdAt: mapping.exists() ? mapping.data().createdAt : serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
     });
   },
 };

@@ -29,6 +29,10 @@ export type VisibilityScope = {
 export type ModulePermissionMap = { [K in Permission]: boolean } & { visibility: Visibility };
 export type FirestoreRoleDocument = {
   id?: string;
+  /** Phase 1 (F-03 closure, §5.6): role documents are Company-scoped — the
+   *  owning company is stamped on the doc (per-company keying for system
+   *  templates: `${companyId}_${roleName}`). */
+  companyId?: string;
   name: string;
   schemaVersion: 1;
   description?: string;
@@ -59,6 +63,13 @@ export const ALL_MODULES: Module[] = [
 const ALL_PERMISSIONS: Permission[] = ['view', 'create', 'edit', 'delete', 'cancel', 'approve', 'disburse', 'export', 'import', 'view_pricing'];
 
 const EXACT_ROLE_COMPATIBILITY: Record<string, string> = {
+  // Phase 2 (Master Plan §5.2, THE core RBAC decision): GroupAdmin is a
+  // SCOPE extension, not a permission extension — its grants are the target
+  // Company's own Admin role documents (canDo() reads the role doc of the
+  // Company the GroupAdmin is acting on, so per-Company Admin customizations
+  // apply). The rules layer separately restricts WHICH Companies a GroupAdmin
+  // can reach (sameGroup). This is why F-03 role keying stays per-Company.
+  groupadmin: 'Admin',
   admin: 'Admin',
   director: 'Director',
   sales: 'Sales',

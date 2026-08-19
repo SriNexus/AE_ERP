@@ -611,7 +611,12 @@ describe('VL-13 — Firestore rules hardening (static contract)', () => {
     const block = readSchemeBlock();
     expect(block).toContain('sameCompany(request.resource.data)');
     expect(block).toContain('sameCompany(resource.data)');
-    expect(block).toMatch(/allow delete: if isAdmin\(\) && sameCompany\(resource\.data\)/);
+    // F-13 (Phase 0): actorIsActive() prefix added — authority is still
+    // Admin-only + same-company after the deactivation gate. Phase 2
+    // (Master Plan §5.2/§9.3): additive-OR Group Admin branch keeps the
+    // Admin sameCompany branch intact and adds the sameGroup-scoped
+    // Group Admin hard-delete.
+    expect(block).toMatch(/allow delete: if actorIsActive\(\) && \(\(isAdmin\(\) && sameCompany\(resource\.data\)\) \|\| \(isGroupAdmin\(\) && sameGroup\(resource\.data\)\)\)/);
   });
 });
 

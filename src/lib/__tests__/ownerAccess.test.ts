@@ -6,7 +6,10 @@ describe('hidden ERP owner policy', () => {
   it('normalizes the Firebase identity without storing a password', () => {
     expect(isOwnerEmail('  SHREENIWAS.TRIPATHI0@GMAIL.COM ')).toBe(true);
     expect(isOwnerEmail('admin@example.com')).toBe(false);
-    expect(createOwnerAppIdentity('firebase-owner').email).toBe('');
+    // The Owner's own ProfileSection reads this identity through
+    // normalizeUserProfile(), which requires a non-empty email — so the
+    // synthetic identity must carry the real authenticated email, normalized.
+    expect(createOwnerAppIdentity('firebase-owner', ' Shreeniwas.Tripathi0@Gmail.com ').email).toBe('shreeniwas.tripathi0@gmail.com');
     expect(readFileSync('src/lib/ownerAccess.ts', 'utf8').toLowerCase()).not.toContain('password');
   });
 

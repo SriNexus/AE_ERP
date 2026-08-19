@@ -2,7 +2,7 @@
 import { useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { onAuthStateChanged } from 'firebase/auth';
-import { createDocWithId, getAll, updateDocById } from './firestore';
+import { createDocWithId, getAll, resolveWriteCompanyId, updateDocById } from './firestore';
 import { COLLECTIONS, auth, firebaseEnv } from './firebase';
 import { useAppStore } from '../store/useAppStore';
 import { resolveSessionCompanyId } from './tenantRouting';
@@ -11,9 +11,11 @@ import { isOfficialDemoCompany } from '../config/demo';
 import { DEMO_COMPANY } from '../config/demoCompany';
 import {
   buildRoleCache,
+  getCompanyRoleSeedDocuments,
   getMissingSystemRoleSeeds,
   getSystemRoleSeedDocuments,
   normalizeRoleName,
+  roleDocumentId,
 } from './roleBootstrap';
 
 type RawRoleDocument = {
@@ -68,7 +70,7 @@ export function canSelfHealSystemRoles(user: { isSuperAdmin?: boolean; isOwner?:
 export function useGlobalBoot() {
   const queryClient = useQueryClient();
   const bootstrapState = useRef<{ userId: string | null; seedAttempted: boolean }>({ userId: null, seedAttempted: false });
-  const { setGlobalCompany, setCompany, activeCompanyId, setActiveCompanyId, user, roleData, setRoleData, setTeamMemberIds, setPermissionCache } = useAppStore();
+  const { setGlobalCompany, setCompany, activeCompanyId, setActiveCompanyId, user, roleData, setRoleData, setTeamMemberIds, setPermissionCache, setCompanyGroupIds } = useAppStore();
 
   // Auth-session reconciliation (root cause: "Missing or insufficient
   // permissions" on every Firestore call while the UI still renders as
@@ -119,6 +121,18 @@ export function useGlobalBoot() {
   }, [user?.id, user?.companyId, user?.isOwner, user?.isSuperAdmin, activeCompanyId, setActiveCompanyId]);
 
   const { data: companies } = useQuery({ queryKey:['companies_global'], queryFn:()=>getAll(COLLECTIONS.COMPANIES,[]), staleTime:1000*60*30, enabled:!!user&&!isOfficialDemoCompany(user?.companyId) });
+  // Phase 1 (Multi-Tenant): populate the companyId -> groupId lookup from the
+  // companies list ALREADY loaded above — no new Firestore read. resolveWriteGroupId()
+  // (src/lib/firestore.ts §3.4) stamps authoritative groupId on writes from this
+  // map, so the client can never supply a groupId of its own.
+  useEffect(() => {
+    if (!companies || companies.length === 0) return;
+    const map: Record<string, string> = {};
+    for (const co of companies as any[]) {
+      if (co?.id && typeof co.groupId === 'string' && co.groupId) map[co.id] = co.groupId;
+    }
+    if (Object.keys(map).length > 0) setCompanyGroupIds(map);
+  }, [companies, setCompanyGroupIds]);
   // Demo user: apply the permanent Demo Company config and skip Firestore companies
   const isDemo = isOfficialDemoCompany(user?.companyId);
   
@@ -144,11 +158,21 @@ export function useGlobalBoot() {
       }
       document.title = `${defaultCo.shortName || defaultCo.name}`;
     }
-    // 'default' is a neutral placeholder (post-logout), not a real company id —
-    // resolve it to the default company so company-scoped queries (Home, etc.)
-    // use the real id instead of 'default' (which matches no documents).
+    // 'default' is a neutral placeholder (post-logout), not a real company id.
+    // Ordinary users: resolve it to the default company so company-scoped
+    // queries (Home, etc.) use a real id instead of 'default' (which matches
+    // no documents). Owner/Super-Admin: resolve it to the existing 'all'
+    // sentinel instead — they are the Platform-context identity and must not
+    // be silently pinned to whichever company happens to be default just
+    // because they logged in (that previously showed that company's data,
+    // dashboard and logo as if it were the Owner's own company). 'all' is
+    // already a fully-supported neutral value everywhere company-scoped
+    // reads/writes resolve it (companyScopedQuery, resolveWriteCompanyId
+    // falls back to `company` state below, which still resolves to a real
+    // company for any write-fallback need).
+    const isOwnerOrSuperAdmin = !!(user?.isOwner || user?.isSuperAdmin);
     if (activeCompanyId === 'default' && defaultCo) {
-      setActiveCompanyId(defaultCo.id);
+      setActiveCompanyId(isOwnerOrSuperAdmin ? 'all' : defaultCo.id);
     }
     // Demo-data isolation (root cause): for owner/super-admin sessions the
     // active company is their explicit selection, and a stale
@@ -160,8 +184,7 @@ export function useGlobalBoot() {
     // tenant-routing effect above; overriding that here would fight it and
     // cause an infinite setActiveCompanyId loop ("Maximum update depth
     // exceeded"). The isolation fallback therefore applies to selections only.
-    const isOwnerOrSuperAdmin = !!(user?.isOwner || user?.isSuperAdmin);
-    let targetId = activeCompanyId === 'default' ? defaultCo?.id : activeCompanyId;
+    let targetId = activeCompanyId === 'default' ? (isOwnerOrSuperAdmin ? 'all' : defaultCo?.id) : activeCompanyId;
     if (targetId && targetId !== 'all' && defaultCo && isOwnerOrSuperAdmin && !companies.some((c: any) => c.id === targetId)) {
       targetId = defaultCo.id;
       if (activeCompanyId !== targetId) setActiveCompanyId(defaultCo.id);
@@ -182,7 +205,14 @@ export function useGlobalBoot() {
     }
   }, [companies, activeCompanyId, isDemo]);
 
-  const { data: roles } = useQuery({ queryKey:['roles_global'], queryFn:()=>getAll(COLLECTIONS.ROLES,[]), staleTime:1000*60*30, enabled:!!user });
+  // Phase 1 (F-03 closure, Master Plan §5.6): the roles query is now
+  // Company-scoped via companyScopedQuery() — every role doc carries the
+  // companyId of the company it belongs to (per-company keying
+  // `${companyId}_${roleName}` for system templates), so the permission
+  // bootstrap resolves the current user's role against THEIR company's role
+  // documents. Owner/super-admin keep the unscoped platform-wide read (the
+  // same exemption as the Phase 0 F-01 companies fix).
+  const { data: roles } = useQuery({ queryKey:['roles_global'], queryFn:()=>getAll(COLLECTIONS.ROLES), staleTime:1000*60*30, enabled:!!user });
   // Phase 13: team-hierarchy resolution must be data-driven (any role whose
   // FirestoreRoleDocument sets visibility:'team' on any module), not limited
   // to the two hardcoded legacy role-name strings — a custom/data-driven
@@ -249,11 +279,29 @@ export function useGlobalBoot() {
       if (missingSystemRoles.length > 0 && canSelfHeal && !bootstrapState.current.seedAttempted) {
         bootstrapState.current.seedAttempted = true;
         try {
-          await Promise.all(
-            missingSystemRoles.map((role) => createDocWithId(COLLECTIONS.ROLES, String(role.id || role.name), role as any))
-          );
+          // Phase 1 (F-03 closure): seeds are written as per-company role
+          // documents — id `${companyId}_${roleName}`, companyId stamped — so
+          // the company-scoped roles read resolves them (the old name-keyed
+          // shared-template write would be invisible to the scoped query). The
+          // seed target is the resolved write-time company: the company the
+          // current session's permission bootstrap is scoped to. Fail closed
+          // (skip) when no real company resolves — an owner/super-admin in
+          // the neutral pre-boot window must not write a malformed role doc.
+          const seedCompanyId = resolveWriteCompanyId();
+          if (!seedCompanyId) {
+            diagnostics.push('role-seed-skipped:no-company');
+          } else {
+            const companySeeds = missingSystemRoles.map((role) => ({
+              ...role,
+              id: roleDocumentId(seedCompanyId, String(role.name || role.id)),
+              companyId: seedCompanyId,
+            }));
+            await Promise.all(
+              companySeeds.map((role) => createDocWithId(COLLECTIONS.ROLES, String(role.id), role as any))
+            );
+            currentRoles = [...currentRoles, ...companySeeds];
+          }
 
-          currentRoles = [...currentRoles, ...missingSystemRoles];
           queryClient.setQueryData(['roles_global'], currentRoles);
           queryClient.setQueryData(['roles'], currentRoles);
         } catch (error) {

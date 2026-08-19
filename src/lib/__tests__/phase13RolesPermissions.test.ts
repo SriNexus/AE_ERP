@@ -17,6 +17,44 @@ import fs from 'node:fs';
 import { resolveVisibility, isOwnershipScopedCollection } from '../firestore';
 import { COLLECTIONS } from '../firebase';
 import { useAppStore } from '../../store/useAppStore';
+import { canDo } from '../permissions';
+
+// Phase 2 (Master Plan §5.2): GroupAdmin is a SCOPE extension, not a
+// permission extension — its grants resolve to the target Company's own Admin
+// role documents via EXACT_ROLE_COMPATIBILITY ('groupadmin' -> 'Admin').
+describe('Phase 2 — GroupAdmin inherits Admin grants (§5.2)', () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      user: { id: 'ga-1', name: 'GA', email: 'ga@test.erp', role: 'GroupAdmin', companyId: 'company-alpha', groupId: 'GROUP-A' },
+      activeCompanyId: 'company-alpha',
+      isAuthenticated: true,
+      permissionCache: {
+        ready: true,
+        roles: {
+          admin: { id: 'CO-A_Admin', name: 'Admin', companyId: 'company-alpha', schemaVersion: 1, permissions: { users: { view: true }, leads: { view: true }, projects: { create: true } } },
+        },
+        permissions: {},
+      } as never,
+      roleData: null,
+    });
+  });
+
+  it('a GroupAdmin resolves the same actions as an Admin on the target Company\'s module', () => {
+    // resolveCompatibleRole('GroupAdmin') finds no cache entry for
+    // 'groupadmin' and falls back to EXACT_ROLE_COMPATIBILITY (§5.2:
+    // groupadmin -> Admin), then canDo() resolves the target Company's Admin
+    // role doc — so GroupAdmin actors get Admin grants (users:view,
+    // leads:view, projects:create, ...) without a parallel permission set.
+    expect(canDo('users', 'view')).toBe(true);
+    expect(canDo('leads', 'view')).toBe(true);
+    expect(canDo('projects', 'create')).toBe(true);
+  });
+
+  it('a GroupAdmin still cannot do an action Admin cannot do (no over-grant)', () => {
+    // Non-existent module permission resolves false for Admin too.
+    expect(canDo('platform_settings' as never, 'delete' as never)).toBe(false);
+  });
+});
 
 describe('resolveVisibility — single source of truth for self/team/all', () => {
   beforeEach(() => {
@@ -115,8 +153,12 @@ describe('Permanent delete is Super-Admin-only (Blueprint §13)', () => {
   const rules = fs.readFileSync('firestore.rules', 'utf-8');
 
   it('firestore.rules gates product_categories delete to isSuperAdmin(), not the universal "if false"', () => {
-    const block = rules.slice(rules.indexOf('match /product_categories/'), rules.indexOf('match /product_categories/') + 400);
-    expect(block).toContain('allow delete: if isSuperAdmin()');
+    // Window sized past the additive-OR read/create/update lines (Phase 2
+    // widened each clause) so the delete clause is captured.
+    const block = rules.slice(rules.indexOf('match /product_categories/'), rules.indexOf('match /product_categories/') + 700);
+    // F-13 (Phase 0): clause is gated on actorIsActive() — the assertion
+    // checks the super-admin authority is still present after the prefix.
+    expect(block).toContain('allow delete: if actorIsActive() && isSuperAdmin()');
   });
 
   it('every other explicitly-declared collection (and the catch-all) still denies delete outright — the Super Admin allowance is narrowly scoped, not a blanket relaxation', () => {

@@ -20,10 +20,12 @@
     "demo:reset:plan": "node --experimental-strip-types scripts/demo/planDemoReset.ts",
     "demo:cleanup": "node --experimental-strip-types scripts/demo/cleanupDemoData.ts",
     "test:rules": "firebase emulators:exec --only firestore --project neozy-demo-isolation-test \"vitest run --config vitest.emulator.config.ts\"",
+    "test:rules:storage": "firebase emulators:exec --only firestore,storage --project neozy-multitenant-storage-test \"vitest run --config vitest.emulator.storage.config.ts\"",
     "demo:readiness": "node --experimental-strip-types scripts/demo/readiness.ts",
     "demo:help": "node --experimental-strip-types scripts/demo/help.ts",
     "test:demo": "vitest run src/lib/__tests__/demoTooling.test.ts src/lib/__tests__/demoBusinessGraph.test.ts src/lib/__tests__/demoFinalHardening.test.ts src/lib/__tests__/demoApiIsolation.test.ts src/lib/__tests__/demoSecurityRulesContract.test.ts src/lib/__tests__/demoPhase1Readiness.test.ts src/lib/__tests__/integrationPlatform.test.ts",
-    "test:demo:e2e": "playwright test --config playwright.demo.config.ts"
+    "test:demo:e2e": "playwright test --config playwright.demo.config.ts",
+    "test:platform:e2e": "node tests/platform-e2e/run-emulator-tests.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.100.9",

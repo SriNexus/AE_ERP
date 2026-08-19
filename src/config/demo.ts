@@ -2,6 +2,11 @@ export const OFFICIAL_DEMO_EMAIL = 'demo@neozy.in' as const;
 export const DEMO_COMPANY_ID = 'company-demo-neozy' as const;
 export const DEMO_ERP_USER_ID = 'MUSR-DEMO-0001' as const;
 export const DEMO_ROLE_ID = 'Demo Operator' as const;
+// Phase 1 (Multi-Tenant): the demo tenant's own Group. The demo dataset is a
+// fully self-contained tenant (company + users + business data), so it gets
+// its own Group per Master Plan §10.3 step 1 (isDemo: true) rather than being
+// folded into the production default Group.
+export const DEMO_GROUP_ID = 'group-demo-neozy' as const;
 // Root cause of "the live Demo tenant still shows old data despite the
 // corrected generator": isDemoSeeded() (src/lib/sandboxReset.ts) compares
 // this exact value against a per-browser localStorage marker, and only

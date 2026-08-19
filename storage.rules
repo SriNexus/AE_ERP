@@ -22,6 +22,39 @@ service firebase.storage {
         : '';
     }
 
+    // Phase 8 (Master Plan §9.5): parallel groupId lookup, identical
+    // firestore.get()-based pattern to currentUserCompanyId() above. Mirrors
+    // user_auth_maps.groupId (Phase 1, §3.2) — '' for a user with no Group
+    // identity, which fails every GroupAdmin check below closed, not open.
+    function currentUserGroupId() {
+      return signedIn() && firestore.exists(authMapPath())
+        ? firestore.get(authMapPath()).data.groupId
+        : '';
+    }
+
+    // Mirrors firestore.rules' groupIsActive(): a suspended Group's
+    // GroupAdmin must lose Storage access exactly as they lose Firestore
+    // access (§9.6's stated principle, applied here for parity — the Master
+    // Plan's §9.5 text doesn't spell this out explicitly, but leaving it out
+    // would mean a suspended Group's GroupAdmin keeps pulling Storage
+    // documents even though every Firestore read/write is already cut off).
+    function groupIsActive(groupId) {
+      return groupId is string && groupId.size() > 0
+        && firestore.exists(/databases/(default)/documents/groups/$(groupId))
+        && firestore.get(/databases/(default)/documents/groups/$(groupId)).data.status == 'Active';
+    }
+
+    // Phase 8 (§9.5): a GroupAdmin acts as Admin of any Company inside their
+    // own, active Group (§5.2's "scope extension, not permission extension"
+    // principle, mirrored to Storage) — never a caller-supplied companyId,
+    // always the actor's own authoritative groupId from the auth-map chain.
+    function isGroupAdminOfCompany(companyId) {
+      return signedIn() && currentUserRole() == 'GroupAdmin'
+        && firestore.exists(/databases/(default)/documents/companies/$(companyId))
+        && firestore.get(/databases/(default)/documents/companies/$(companyId)).data.groupId == currentUserGroupId()
+        && groupIsActive(currentUserGroupId());
+    }
+
     function isOwnProfilePath(userId) {
       return signedIn() && currentUserId() == userId;
     }
@@ -87,31 +120,65 @@ service firebase.storage {
     // Accounts denied. Partner: own case only. TL/Manager: their own
     // partner's case only. Director: view-only (read, no write). Any other
     // same-company staff: existing behavior preserved (company access).
+    // NOTE (Phase 8 discovery): these two functions previously used an
+    // imperative `if (cond) return x;` chain. That is NOT valid Cloud
+    // Storage Rules syntax (unlike Firestore Rules' newer dialect, the
+    // Storage Rules runtime only accepts a single ternary-chain return
+    // expression per function) — the real Storage Rules emulator rejects it
+    // with a parse error at deploy/test time. This had never been caught
+    // because no real Storage Rules emulator test existed before Phase 8
+    // (the two prior "storage rules" tests were readFileSync() string/regex
+    // assertions, not actual rules evaluation). Rewritten below as an
+    // equivalent ternary chain — same priority-ordered decision logic,
+    // same outcome for every case, now syntactically valid.
     function canReadScopedDocuments(companyId, docPath) {
-      if (!signedIn() || currentUserCompanyId() != companyId) return false;
-      if (currentUserRole() == 'Accounts') return false;
-      if (currentUserRole() == 'Admin') return true;
-      if (isCaseDocManagerRole()) return isManagerOfPartner(docPartnerId(docPath));
-      if (currentUserRole() == 'Partner') return isOwnerPartner(docPartnerId(docPath));
-      return true;
+      // Phase 8 (§9.5): GroupAdmin reads any Company in their own active
+      // Group as if they were that Company's Admin (§5.2) — checked before
+      // the same-company gate, which would otherwise deny a sibling Company.
+      return !signedIn() ? false
+        : isGroupAdminOfCompany(companyId) ? true
+        : currentUserCompanyId() != companyId ? false
+        : currentUserRole() == 'Accounts' ? false
+        : currentUserRole() == 'Admin' ? true
+        : isCaseDocManagerRole() ? isManagerOfPartner(docPartnerId(docPath))
+        : currentUserRole() == 'Partner' ? isOwnerPartner(docPartnerId(docPath))
+        : true;
     }
 
     function canWriteScopedDocuments(companyId, docPath) {
-      if (!signedIn() || currentUserCompanyId() != companyId) return false;
-      if (currentUserRole() == 'Accounts' || currentUserRole() == 'Director') return false;
-      if (currentUserRole() == 'Admin') return true;
-      if (isCaseDocManagerRole()) return isManagerOfPartner(docPartnerId(docPath));
-      if (currentUserRole() == 'Partner') return isOwnerPartner(docPartnerId(docPath));
-      return true;
+      return !signedIn() ? false
+        : isGroupAdminOfCompany(companyId) ? true
+        : currentUserCompanyId() != companyId ? false
+        : (currentUserRole() == 'Accounts' || currentUserRole() == 'Director') ? false
+        : currentUserRole() == 'Admin' ? true
+        : isCaseDocManagerRole() ? isManagerOfPartner(docPartnerId(docPath))
+        : currentUserRole() == 'Partner' ? isOwnerPartner(docPartnerId(docPath))
+        : true;
     }
 
-    // Company paths that are NOT covered by the scoped document rules below
-    // keep the existing same-company access (commissioning signatures,
-    // products, surveys, engineering designs, lead/customer documents, …).
-    function isScopedDocumentPath(allPaths) {
-      return allPaths.matches('cases/.*/documents/.*')
-        || allPaths.matches('projects/.*/documents/.*');
-    }
+    // NOTE (Phase 8 discovery): the exclusion of scoped-document paths from
+    // the general company catch-all below previously used
+    // `allPaths.matches('cases/.*/documents/.*')` / `.split('/')`. The real
+    // Storage Rules runtime this project's emulator downloads
+    // (cloud-storage-rules-runtime-v1.1.3.jar) rejects BOTH `.matches()` and
+    // `.split()` at evaluation time ("Function not found error") — and
+    // because a thrown/errored rules expression evaluates to deny (not a
+    // distinctly-surfaced failure), this silently made EVERY request through
+    // the general `companies/{companyId}/{allPaths=**}` catch-all fail
+    // closed unconditionally, not just scoped-document paths (products,
+    // surveys, engineering designs, commissioning signatures, everything).
+    // This had never been caught because no real Storage Rules emulator test
+    // existed before Phase 8. Fixed below by capturing the first path
+    // segment natively in the match PATTERN itself (guaranteed-supported
+    // routing, not a runtime string method) instead of parsing `allPaths` at
+    // evaluation time — see the two `companies/{companyId}/...` match blocks
+    // after the scoped-document blocks. Verified against every real
+    // `src/lib/storage.ts`/feature-module upload call site that nothing is
+    // ever written under a `cases/{id}/...` or `projects/{id}/...` path
+    // other than the `.../documents/{fileName}` shape, so excluding by first
+    // segment alone (`cases`/`projects`) is behaviorally identical to the
+    // original three/four-segment-specific regex for every path this
+    // application actually uses.
 
     match /users/{userId}/profile/{allPaths=**} {
       allow read, write: if isOwnProfilePath(userId);
@@ -130,8 +197,26 @@ service firebase.storage {
       allow write: if canWriteScopedDocuments(companyId, /databases/(default)/documents/projects/$(projectId));
     }
 
-    match /companies/{companyId}/{allPaths=**} {
-      allow read, write: if signedIn() && currentUserCompanyId() == companyId && !isScopedDocumentPath(allPaths);
+    function canAccessGeneralCompanyPath(companyId) {
+      // Phase 8 (§9.5): additive-OR, never a rewrite of the existing
+      // same-company clause (Master Plan §16.2 rule 4) — a GroupAdmin gains
+      // access to sibling Companies in their own active Group; the original
+      // same-company behavior for every other actor is unchanged.
+      return signedIn() && (currentUserCompanyId() == companyId || isGroupAdminOfCompany(companyId));
+    }
+
+    // A direct file immediately under companies/{companyId}/ (no
+    // intermediate folder) — cannot be a cases/projects scoped-document path.
+    match /companies/{companyId}/{singleSegment} {
+      allow read, write: if canAccessGeneralCompanyPath(companyId);
+    }
+
+    // Any deeper path EXCEPT one whose first segment is 'cases' or
+    // 'projects' (those are exclusively governed by the two scoped-document
+    // match blocks above — see the NOTE above this section for why the
+    // exclusion is by first-segment, not the original regex).
+    match /companies/{companyId}/{first}/{rest=**} {
+      allow read, write: if !(first == 'cases' || first == 'projects') && canAccessGeneralCompanyPath(companyId);
     }
 
     match /integration-secrets/{allPaths=**} {

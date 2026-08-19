@@ -17,7 +17,7 @@ import demoLogoIcon from '../assets/login/demo-logo-icon.png?url';
 import demoLogoFullLight from '../assets/login/demo-logo-light.png?url';
 import demoLogoFullDark from '../assets/login/demo-logo-dark.png?url';
 
-import { DEMO_COMPANY_ID } from './demo';
+import { DEMO_COMPANY_ID, DEMO_GROUP_ID } from './demo';
 import type { CompanyConfig } from './company';
 
 /**
@@ -61,6 +61,9 @@ export const DEMO_COMPANY: CompanyConfig = {
   // a demo-mode business-mode switcher can be introduced later if a
   // dedicated single-mode demo scenario is ever wanted (not required now).
   businessMode: 'Both',
+  // Phase 1 (Multi-Tenant): the demo tenant's Group — the demo dataset is a
+  // fully self-contained tenant, so it resolves to its own demo Group.
+  groupId: DEMO_GROUP_ID,
 };
 
 /**

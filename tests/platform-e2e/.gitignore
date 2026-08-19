@@ -1,0 +1,5 @@
+# Copied fresh from the repo root by run-emulator-tests.mjs on every run —
+# never hand-edit these, never commit them.
+firestore.rules
+firestore.indexes.json
+storage.rules

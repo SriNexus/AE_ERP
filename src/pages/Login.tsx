@@ -293,7 +293,7 @@ export default function Login() {
         // Owner/Super-Admin homepage at the demo company. Start neutral
         // ('default') and let useGlobalBoot resolve the real default company.
         setActiveCompanyId('default');
-        setUser(createOwnerAppIdentity(firebaseUser.uid, 'default'));
+        setUser(createOwnerAppIdentity(firebaseUser.uid, firebaseUser.email || '', 'default'));
         navigate('/');
         return;
       }

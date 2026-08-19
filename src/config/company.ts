@@ -9,6 +9,13 @@ export type CompanyConfig = {
   id: string;
   name: string;
   shortName: string;
+  // Phase 1 (Multi-Tenant): FK to groups/{groupId} — the tenant boundary above
+  // Company. Populated by the Phase 1 backfill for existing companies; new
+  // companies receive it at write time via resolveWriteGroupId()/the write
+  // helpers, never client-controlled. Optional here because pre-Phase-1
+  // companies exist without it during the migration window (Master Plan §3.2:
+  // "Required, Immutable after Phase 1 backfill completes").
+  groupId?: string;
   companyCode: string;     // e.g. CGPL, STS
   tagline: string;
   /** Phase 1: which workflow(s) this company operates. Defaults to 'Both' for

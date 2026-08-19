@@ -117,7 +117,9 @@ export function CreatePIModal({
         total,
         notes,
         sourceCustomerId: customer.id,
-        templateUsed: 'CSGPL',
+        // useCreatePI's createPI() (useSales.ts) derives the actual
+        // templateUsed value from the resolved company's own companyCode —
+        // this payload field is not read there and is left off deliberately.
         companyId,
         generatedBy: user.id,
         createdBy: user.id,
@@ -131,7 +133,7 @@ export function CreatePIModal({
         <FormSection title="Customer">
           <FormRow>
             <Input label="Customer" value={customer ? customerName(customer) : ''} disabled />
-            <Input label="Template" value="CSGPL" disabled />
+            <Input label="Template" value={company?.companyCode || '—'} disabled />
           </FormRow>
           <FormRow>
             <Input label="PI Date" type="date" value={date} onChange={(e) => setDate(e.target.value)} />

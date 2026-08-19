@@ -9,6 +9,10 @@ export function verifyPlan(plan:DemoSeedPlan):VerificationIssue[]{
  const issue=(code:string,d:DemoDocument|undefined,detail:string)=>issues.push({code,document:d?`${d.collection}/${d.id}`:undefined,detail});
  for(const d of plan.documents){const key=`${d.collection}/${d.id}`;if(ids.has(key))issue('DUPLICATE_ID',d,key);ids.add(key);
   if(d.collection==='user_auth_maps'){if(d.data.userId!==DEMO_ERP_USER_ID||d.data.companyId!==DEMO_COMPANY_ID||d.data.email!==OFFICIAL_DEMO_EMAIL)issue('IDENTITY_MAPPING',d,'Canonical mapping mismatch')}
+  // Phase 1 (Multi-Tenant): `groups` is a platform-level collection (the demo
+  // tenant's Group) — it carries no companyId by design; exempt it from the
+  // tenant-scoped marker checks.
+  else if(d.collection==='groups'){if(d.data.isDemo!==true)issue('DEMO_GROUP',d,'Demo Group must be marked isDemo: true')}
   else{if(d.data.companyId!==DEMO_COMPANY_ID)issue('COMPANY_SCOPE',d,'Wrong companyId');if(d.data.isDemo!==true||d.data.demoSeedId!==DEMO_SEED_ID)issue('MARKER',d,'Missing demo markers')}
   for(const path of findForbiddenFields(d.data))issue('FORBIDDEN_FIELD',d,path);if(d.data.isSuperAdmin===true)issue('SUPER_ADMIN',d,'Demo data may not grant super-admin');
   for(const value of Object.values(d.data)){if(typeof value==='string'&&/@(gmail|yahoo|outlook|hotmail)\./i.test(value)&&value!==OFFICIAL_DEMO_EMAIL)issue('REAL_EMAIL_DOMAIN',d,value);if(typeof value==='string'&&/^\+?91[6-9]\d{9}$/.test(value.replace(/[ -]/g,'')))issue('REAL_LOOKING_PHONE',d,value)}
@@ -26,4 +30,4 @@ export function verifyPlan(plan:DemoSeedPlan):VerificationIssue[]{
  return issues;
 }
 export function assertPlanVerified(plan:DemoSeedPlan){const i=verifyPlan(plan);if(i.length)throw new Error(`Demo verification failed: ${i.map(x=>`${x.code}:${x.document||''}:${x.detail}`).join('; ')}`)}
-export async function verifyPersistedPlan(db:any,plan:DemoSeedPlan){assertPlanVerified(plan);for(const d of plan.documents){const snap=await db.collection(d.collection).doc(d.id).get();if(!snap.exists)throw new Error(`Missing persisted demo document ${d.collection}/${d.id}`);const data=snap.data()||{};if(d.collection==='user_auth_maps'){if(data.userId!==d.data.userId||data.companyId!==DEMO_COMPANY_ID)throw new Error(`Persisted mapping mismatch ${d.id}`)}else if(data.companyId!==DEMO_COMPANY_ID||data.demoSeedId!==DEMO_SEED_ID||data.isDemo!==true)throw new Error(`Persisted demo marker mismatch ${d.collection}/${d.id}`)}}
+export async function verifyPersistedPlan(db:any,plan:DemoSeedPlan){assertPlanVerified(plan);for(const d of plan.documents){const snap=await db.collection(d.collection).doc(d.id).get();if(!snap.exists)throw new Error(`Missing persisted demo document ${d.collection}/${d.id}`);const data=snap.data()||{};if(d.collection==='user_auth_maps'){if(data.userId!==d.data.userId||data.companyId!==DEMO_COMPANY_ID)throw new Error(`Persisted mapping mismatch ${d.id}`)}else if(d.collection==='groups'){if(data.isDemo!==true)throw new Error(`Persisted Demo Group marker mismatch ${d.collection}/${d.id}`)}else if(data.companyId!==DEMO_COMPANY_ID||data.demoSeedId!==DEMO_SEED_ID||data.isDemo!==true)throw new Error(`Persisted demo marker mismatch ${d.collection}/${d.id}`)}}

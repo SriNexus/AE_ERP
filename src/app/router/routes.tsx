@@ -10,6 +10,7 @@ import { ProtectedRoute } from '../../components/auth/ProtectedRoute';
 import { RoleRoute }      from '../../components/auth/RoleRoute';
 import { OwnerRoute } from '../../components/auth/OwnerRoute';
 import { SuperAdminRoute } from '../../components/auth/SuperAdminRoute';
+import { GroupAdminRoute } from '../../components/auth/GroupAdminRoute';
 import { useGlobalBoot }  from '../../lib/useGlobalBoot';
 import { ErrorBoundary }  from '../../components/shared/ErrorBoundary';
 import { useAppStore }    from '../../store/useAppStore';
@@ -126,6 +127,17 @@ const AiIntelligence = lazy(() => import('../../pages/AiIntelligence'));
 
 // Audit Logs
 const AuditLogs = lazy(() => import('../../pages/AuditLogs'));
+
+// Phase 4 (Master Plan §6): Super Admin Control Plane
+const PlatformDashboard = lazy(() => import('../../pages/platform/PlatformDashboard'));
+const PlatformGroups    = lazy(() => import('../../pages/platform/PlatformGroups'));
+const PlatformCompanies = lazy(() => import('../../pages/platform/PlatformCompanies'));
+const PlatformUsers     = lazy(() => import('../../pages/platform/PlatformUsers'));
+const GroupOverview     = lazy(() => import('../../pages/group/GroupOverview'));
+const GroupTeams        = lazy(() => import('../../pages/group/GroupTeams'));
+const GroupSettingsPage = lazy(() => import('../../pages/group/GroupSettings'));
+const PlatformSecurity  = lazy(() => import('../../pages/platform/PlatformSecurity'));
+const PlatformSettings  = lazy(() => import('../../pages/platform/PlatformSettings'));
 
 // Settings
 const UsersPage    = lazy(() => import('../../pages/Users'));
@@ -292,6 +304,30 @@ export function AppRoutes() {
 
         <Route path="/ai-intelligence" element={<SuperAdminRoute><SafePage><AiIntelligence /></SafePage></SuperAdminRoute>} />
         <Route path="/audit-logs" element={<SuperAdminRoute><SafePage><AuditLogs /></SafePage></SuperAdminRoute>} />
+
+        {/* Phase 4 (Master Plan §6): Super Admin Control Plane — every screen
+            gated by SuperAdminRoute (owner identity only), no RoleRoute. */}
+        <Route path="/platform"            element={<SuperAdminRoute><SafePage><PlatformDashboard /></SafePage></SuperAdminRoute>} />
+        <Route path="/platform/groups"     element={<SuperAdminRoute><SafePage><PlatformGroups /></SafePage></SuperAdminRoute>} />
+        <Route path="/platform/companies"  element={<SuperAdminRoute><SafePage><PlatformCompanies /></SafePage></SuperAdminRoute>} />
+        <Route path="/platform/users"      element={<SuperAdminRoute><SafePage><PlatformUsers /></SafePage></SuperAdminRoute>} />
+        <Route path="/platform/security"   element={<SuperAdminRoute><SafePage><PlatformSecurity /></SafePage></SuperAdminRoute>} />
+        <Route path="/platform/settings"   element={<SuperAdminRoute><SafePage><PlatformSettings /></SafePage></SuperAdminRoute>} />
+
+        {/* Phase 5 (Master Plan §7): Group Admin Control Plane — every screen
+            gated by GroupAdminRoute (GroupAdmin role + groupId). Screens reuse
+            the existing business pages (Companies/Users/Warehouses/Roles/
+            AuditLogs) — the 'group' sentinel (activeCompanyId) + query layer
+            scope them Group-wide; new screens are GroupOverview/GroupTeams/
+            GroupSettings. */}
+        <Route path="/group"              element={<GroupAdminRoute><SafePage><GroupOverview /></SafePage></GroupAdminRoute>} />
+        <Route path="/group/companies"   element={<GroupAdminRoute><SafePage><Companies /></SafePage></GroupAdminRoute>} />
+        <Route path="/group/warehouses"  element={<GroupAdminRoute><SafePage><Warehouses /></SafePage></GroupAdminRoute>} />
+        <Route path="/group/users"       element={<GroupAdminRoute><SafePage><UsersPage /></SafePage></GroupAdminRoute>} />
+        <Route path="/group/teams"       element={<GroupAdminRoute><SafePage><GroupTeams /></SafePage></GroupAdminRoute>} />
+        <Route path="/group/roles"       element={<GroupAdminRoute><SafePage><RolesPage /></SafePage></GroupAdminRoute>} />
+        <Route path="/group/audit-log"   element={<GroupAdminRoute><SafePage><AuditLogs /></SafePage></GroupAdminRoute>} />
+        <Route path="/group/settings"    element={<GroupAdminRoute><SafePage><GroupSettingsPage /></SafePage></GroupAdminRoute>} />
 
         {/* Channel Partners */}
         {/* VL-9/VL-10: standalone Registration list (team/management/admin view).

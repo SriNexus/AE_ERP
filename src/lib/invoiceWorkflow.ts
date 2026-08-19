@@ -1,4 +1,4 @@
-import { createDocWithId, updateDocById, genId, getAll, getOne, resolveWriteCompanyId } from './firestore';
+import { createDocWithId, updateDocById, genId, getAll, getOne, resolveWriteCompanyId, resolveWriteCompanyCode } from './firestore';
 import { getNextDocumentNumber, resolveDocumentDefaults } from './documentNumbering';
 import { COLLECTIONS, firebaseEnv } from './firebase';
 import { sanitizeFirestoreData } from './sanitizer';
@@ -17,29 +17,47 @@ function addDaysIso(dateValue: string | undefined, days: number): string {
 
 export async function generatePIsFromOrder(order: any) {
   const state = useAppStore.getState();
-  const csgplItems: any[] = [];
-  const santoshItems: any[] = [];
-
-  // 1. Split items by category to determine PI Templates
-  (order.items || []).forEach((it: any) => {
-    const cat = String(it.category || '').toLowerCase();
-    if (cat.includes('bos') || cat.includes('structure')) {
-      santoshItems.push(it);
-    } else {
-      csgplItems.push(it);
-    }
-  });
-
-  const generatedPIs: string[] = [];
 
   // Canonical tenant resolution — never the neutral 'default' placeholder.
   const companyId = resolveWriteCompanyId() || order.companyId || '';
   const documentDefaults = await resolveDocumentDefaults(companyId);
+
+  // Data-driven template selection — the company's own companyCode, the same
+  // source src/templates/documents/PI/index.ts and shared/theme.ts already
+  // key their template/theme rendering off. Historically this function
+  // always split an order's items into two Proforma Invoices for two
+  // separate legal entities (CGPL: general items, STS/Santosh Techno: BOS &
+  // structural items) — a real dual-entity billing arrangement, not a
+  // generic multi-tenant rule. That split is preserved exactly, but now only
+  // actually applies to a company whose own companyCode is 'CGPL' — the
+  // dual-entity setup it was built for. Any other company (including
+  // Ashish Enterprises, companyCode 'AE-01') gets one PI covering every
+  // item, correctly labelled with its own companyCode — it must not inherit
+  // a CGPL/STS identity it was never associated with.
+  const companyCode = resolveWriteCompanyCode(companyId);
+  const isDualEntityCompany = companyCode === 'CGPL';
+
+  const cgplItems: any[] = [];
+  const santoshItems: any[] = [];
+  if (isDualEntityCompany) {
+    (order.items || []).forEach((it: any) => {
+      const cat = String(it.category || '').toLowerCase();
+      if (cat.includes('bos') || cat.includes('structure')) {
+        santoshItems.push(it);
+      } else {
+        cgplItems.push(it);
+      }
+    });
+  } else {
+    cgplItems.push(...(order.items || []));
+  }
+
+  const generatedPIs: string[] = [];
   const grossForItems = (items: any[]) => items.reduce((sum, item) => {
     const base = Number(item.qty || 0) * Number(item.price || 0);
     return sum + base + (base * Number(item.tax || 0) / 100);
   }, 0);
-  let remainingGroupGross = grossForItems([...csgplItems, ...santoshItems]);
+  let remainingGroupGross = grossForItems([...cgplItems, ...santoshItems]);
   let remainingOrderTotal = Number(order.total || remainingGroupGross);
 
   // Internal helper to create PI
@@ -106,9 +124,15 @@ export async function generatePIsFromOrder(order: any) {
     generatedPIs.push(piId);
   }
 
-  // 2. Generate required PIs based on template rules
-  await createPI(csgplItems, 'CSGPL');
-  await createPI(santoshItems, 'SANTOSH_VARANASI');
+  // Generate the PI(s). Dual-entity companies (companyCode 'CGPL') get one
+  // PI per legal entity, each correctly labelled with that entity's own
+  // companyCode; every other company gets a single PI labelled with its own
+  // companyCode ('' only if the company config has none loaded yet — never a
+  // guessed literal).
+  await createPI(cgplItems, companyCode);
+  if (isDualEntityCompany) {
+    await createPI(santoshItems, 'STS');
+  }
 
   // 3. Update Order
   await updateDocById(COLLECTIONS.ORDERS, order.id, {

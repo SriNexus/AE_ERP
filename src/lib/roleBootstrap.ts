@@ -350,6 +350,43 @@ export function normalizeRoleName(value: unknown) {
   return String(value || '').trim().toLowerCase();
 }
 
+/**
+ * PHASE 1 (F-03 closure, Master Plan §5.6) — per-company role-document keying.
+ *
+ * Role documents are now Company-scoped: every role doc belongs to exactly one
+ * company and carries that company's `companyId` field, and its deterministic
+ * document id is `${companyId}_${roleName}` (mirroring the `group_members`
+ * `${groupId}_${userId}` deterministic-id convention). This replaces the
+ * pre-Phase-1 model where system role templates were keyed by role NAME alone
+ * and SHARED across every company — the exact dependency that blocked F-03's
+ * company-scoped read in Phase 0 (company-scoping a shared name-keyed doc
+ * breaks role resolution → permission bootstrap fails closed → lockout).
+ *
+ * Custom roles created via the Roles UI keep their existing `ROL-*` generated
+ * ids (they were never name-keyed and already carry `companyId`); only the
+ * shared SYSTEM templates move to the keyed scheme, via the Phase 1 backfill
+ * (`scripts/backfill-group-denorm.cjs`) and the boot self-heal path.
+ */
+export function roleDocumentId(companyId: string, roleName: string): string {
+  return `${companyId}_${roleName}`;
+}
+
+/**
+ * PHASE 1 (F-03 closure) — per-company system-role seed documents. Same seed
+ * content as getSystemRoleSeedDocuments(), but keyed for one company:
+ * `id = ${companyId}_${roleName}` with `companyId` stamped, so the
+ * company-scoped roles read (rules `canReadCompanyScoped()` + the client
+ * query) resolves them. Used by useGlobalBoot's self-heal seeding and by the
+ * role-copy section of scripts/backfill-group-denorm.cjs.
+ */
+export function getCompanyRoleSeedDocuments(companyId: string): FirestoreRoleDocument[] {
+  return getSystemRoleSeedDocuments().map((seed) => ({
+    ...seed,
+    id: roleDocumentId(companyId, seed.name),
+    companyId,
+  }));
+}
+
 export function getSystemRoleSeedDocuments(): FirestoreRoleDocument[] {
   return SYSTEM_ROLE_NAMES.map((roleName) => {
     const definition = LEGACY_SYSTEM_ROLES[roleName];

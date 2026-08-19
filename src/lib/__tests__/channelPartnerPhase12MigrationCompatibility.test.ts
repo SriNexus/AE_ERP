@@ -265,12 +265,24 @@ describe('VL-12 — NO data migration, NO unapproved rename', () => {
   });
 
   it('no script under scripts/ is a loan→scheme migration', () => {
+    // Precise heuristic: a REAL loan→scheme data migration copies/renames
+    // data FROM the loan collection TO the scheme collection, so it must
+    // reference BOTH collections in a single code statement (e.g.
+    // `copy('registrations', 'scheme_registrations')` or a rename wiring
+    // the two together). Checking per-line — not file-wide co-occurrence —
+    // is deliberate: the Phase 1 (Multi-Tenant) backfill scripts (Master
+    // Plan §3.2) legitimately list both `registrations` and
+    // `scheme_registrations` in the groupId-denormalization collection list
+    // and copy role templates from `roles/{name}`, but never connect the
+    // two Registration domains in any statement.
     for (const rel of listSourceFiles('scripts')) {
       const source = readSource(rel);
-      const mentionsScheme = source.includes('scheme_registrations') || source.includes('SCHEME_REGISTRATIONS');
-      const mentionsLoan = source.includes("'registrations'") || source.includes('COLLECTIONS.LOAN_APPLICATIONS');
-      const migrationVerb = /backfill|migrat|copy.*(?:from|to)|rename/i.test(source);
-      expect(mentionsScheme && mentionsLoan && migrationVerb, `${rel} looks like a loan→scheme migration`).toBe(false);
+      const loanRef = /(?:'registrations'|COLLECTIONS\.LOAN_APPLICATIONS)/;
+      const schemeRef = /(?:'scheme_registrations'|SCHEME_REGISTRATIONS)/;
+      const flagged = source
+        .split('\n')
+        .some((line) => loanRef.test(line) && schemeRef.test(line) && /copy|rename|migrat|move/i.test(line));
+      expect(flagged, `${rel} looks like a loan→scheme migration`).toBe(false);
     }
   });
 

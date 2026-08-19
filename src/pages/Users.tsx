@@ -9,15 +9,17 @@
 import { useState, useMemo, useCallback, useEffect, useDeferredValue, useRef, type FormEvent } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { getAll, fmtDate } from '../lib/firestore';
+import { getAll, getOne, fmtDate } from '../lib/firestore';
+import { logCreate, logUpdate, logRoleChange, logPermissionChange, logDelete } from '../lib/auditLogger';
 import { createUserProjection, updateUserProjection, deleteUserProjection } from '../features/users/hooks/useUsers';
 import { isEligibleManagerOption, type OrgRoleLike, type OrgUserLike } from '../features/users/orgHierarchy';
-import { COLLECTIONS, firebaseConfig } from '../lib/firebase';
+import { COLLECTIONS, firebaseConfig, db } from '../lib/firebase';
 import { initializeApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword } from 'firebase/auth';
+import { query as fbQuery, collection, where, getDocs } from 'firebase/firestore';
 import { Shield, Plus, RefreshCw, Eye, Edit2, Trash2, X, UserCheck, UserX, UserCog, Users as UsersIcon } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { useCurrentUser } from '../store/useAppStore';
+import { useAppStore, useCurrentUser } from '../store/useAppStore';
 import { usePermissions } from '../lib/permissions';
 import { useWarehouses } from '../features/warehouses/hooks/useWarehouses';
 import {
@@ -44,6 +46,7 @@ const DATE_OPTIONS = [
 export default function UsersPage() {
   const qc = useQueryClient();
   const currentUser = useCurrentUser();
+  const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const perms = usePermissions();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -93,9 +96,22 @@ export default function UsersPage() {
     retry: 1,
   });
 
+  // Phase 5 (§7.5/§7.7): roles are per-Company documents (F-03 keying — no
+  // groupId field), so in "All Companies (Group view)" mode the group-scoped
+  // query would be unprovable at the rules layer. The role dropdown falls back
+  // to the Group Admin's HOME company role documents (their Admin-equivalent
+  // permission source per §5.2) — still rules-provable via canReadCompanyScoped().
   const { data: roles = [] } = useQuery({
-    queryKey: ['roles'],
-    queryFn: () => getAll<OrgRoleLike>(COLLECTIONS.ROLES),
+    queryKey: ['roles', activeCompanyId === 'group' ? `home:${currentUser?.companyId || ''}` : 'scoped'],
+    queryFn: async () => {
+      if (activeCompanyId === 'group') {
+        const homeCompanyId = currentUser?.companyId;
+        if (!homeCompanyId) return [];
+        const snap = await getDocs(fbQuery(collection(db, COLLECTIONS.ROLES), where('companyId', '==', homeCompanyId)));
+        return snap.docs.map((d: any) => ({ ...d.data(), id: d.id }));
+      }
+      return getAll<OrgRoleLike>(COLLECTIONS.ROLES);
+    },
     staleTime: 300000,
     enabled: perms.ready,
   });
@@ -141,7 +157,23 @@ export default function UsersPage() {
     mutationFn: async (d: typeof FORM0) => {
       if (editId) {
         const { password: _, ...rest } = d;
+        // F-16 (Phase 0): capture the pre-mutation state so role/permission/
+        // status changes are audited with old + new values. Previously the
+        // most security-sensitive user mutations (role change, super-admin
+        // grant, deactivation) left NO audit trail at all.
+        const existing = await getOne<any>(COLLECTIONS.USERS, editId).catch(() => null);
         await updateUserProjection(editId, rest);
+        if (existing) {
+          if ((existing.role || '') !== (rest.role || '')) {
+            await logRoleChange(editId, existing.email || rest.email || '', existing.role || '', rest.role || '');
+          }
+          if (Boolean(existing.isSuperAdmin) !== Boolean(rest.isSuperAdmin)) {
+            await logPermissionChange(editId, existing.email || rest.email || '', rest.role || existing.role || '', { isSuperAdmin: Boolean(rest.isSuperAdmin) });
+          }
+          if ((existing.status || 'Active') !== (rest.status || 'Active')) {
+            await logUpdate('user', editId, { status: existing.status || 'Active' }, { status: rest.status || 'Active' }, 'users');
+          }
+        }
       } else {
         const secondaryApp = initializeApp(firebaseConfig, 'SecondaryApp' + Date.now());
         const secondaryAuth = getAuth(secondaryApp);
@@ -154,6 +186,8 @@ export default function UsersPage() {
         }
         const { password: _, ...rest } = d;
         await createUserProjection(authId, { ...rest, id: authId, createdBy: currentUser?.id });
+        // F-16 (Phase 0): audit user creation.
+        await logCreate('user', authId, { name: rest.name, email: rest.email, role: rest.role, status: rest.status }, 'users');
       }
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['users'] }); toast.success(editId ? 'Updated' : 'User added'); closeForm(); },
@@ -161,7 +195,11 @@ export default function UsersPage() {
   });
 
   const del = useMutation({
-    mutationFn: (id: string) => deleteUserProjection(id),
+    mutationFn: async (id: string) => {
+      await deleteUserProjection(id);
+      // F-16 (Phase 0): audit user deletion (soft delete).
+      await logDelete('user', id, undefined, 'users');
+    },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['users'] }); toast.success('Deleted'); setDelId(null); },
     onError: (e: any) => toast.error(e.message),
   });
@@ -665,7 +703,12 @@ export default function UsersPage() {
                 <InputSelect label="Role" value={form.role} onChange={e => setForm({ ...form, role: e.target.value })}
                   options={[
                     { label: DEFAULT_USER_ROLE, value: DEFAULT_USER_ROLE },
-                    ...(roles as any[]).filter((r: any) => r.name !== DEFAULT_USER_ROLE).map((r: any) => ({ label: r.name, value: r.name })),
+                    // Phase 5 (§7.5): a Group Admin actor cannot assign the
+                    // GroupAdmin role (rules-enforced) — hide the option as a
+                    // matching convenience, not the security boundary.
+                    ...(roles as any[])
+                      .filter((r: any) => r.name !== DEFAULT_USER_ROLE && !(currentUser?.role === 'GroupAdmin' && String(r.name || '').trim() === 'GroupAdmin'))
+                      .map((r: any) => ({ label: r.name, value: r.name })),
                   ]} />
               ) : (
                 <div>
