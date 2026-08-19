@@ -6,6 +6,7 @@ import { createDocWithId, getAll, resolveWriteCompanyId, updateDocById } from '.
 import { COLLECTIONS, auth, firebaseEnv } from './firebase';
 import { useAppStore } from '../store/useAppStore';
 import { resolveSessionCompanyId } from './tenantRouting';
+import { loadCurrentUserProfile, syncCurrentUserProfile } from './userProfile';
 import { registerServiceWorker, getFcmToken, persistDeviceToken, deactivateDeviceTokens } from './fcmTokenManager';
 import { isOfficialDemoCompany } from '../config/demo';
 import { DEMO_COMPANY } from '../config/demoCompany';
@@ -135,7 +136,52 @@ export function useGlobalBoot() {
   }, [companies, setCompanyGroupIds]);
   // Demo user: apply the permanent Demo Company config and skip Firestore companies
   const isDemo = isOfficialDemoCompany(user?.companyId);
-  
+
+  // Root cause (live-verified, 2026-08-19): `user` is persisted to
+  // localStorage (useAppStore's `neozy-v1` persist key) so a page reload/
+  // resumed session restores the "logged in" identity instantly from cache —
+  // but nothing anywhere else in the boot flow ever re-fetches that identity
+  // against the live users/{id} Firestore doc. Any server-side profile change
+  // made while a browser session stays open (a role promotion, a Group/
+  // company reassignment, a new groupId backfilled onto the profile) is
+  // therefore invisible to that already-open tab until the user manually
+  // logs out and back in. Concretely: promoting admin@neozy.in from 'Admin'
+  // to 'GroupAdmin' and stamping groupId='group-csgpl' on their Firestore
+  // profile did not update their already-persisted session, which still
+  // carried the pre-promotion object with role updated (from an intervening
+  // partial state update elsewhere) but no groupId at all — Users.tsx's
+  // useGroupCompanies(currentUser?.groupId) then never fires
+  // (enabled: !!groupId), groupCompanies stays permanently empty, the
+  // Company field never renders (neither auto-assigned nor as a picker), and
+  // submit always hits the "Select a Company" guard with nothing to select.
+  //
+  // Fix: once per resumed/booted session (ref-guarded per user.id, so this
+  // never refetches on every render or every page navigation), re-read the
+  // actor's own canonical profile and reconcile the persisted identity via
+  // the existing syncCurrentUserProfile() — the same normalizeUserProfile()/
+  // profileToAppUser() mapping the real login flow already uses, so every
+  // field (not just groupId) self-heals to match Firestore. Best-effort and
+  // non-blocking: the Owner's synthetic identity has no users/{id} doc by
+  // design (skipped), a demo session has its own fixed identity (skipped),
+  // and any read failure is swallowed — a stale-but-valid cached identity is
+  // still usable, so this must never block boot or log the user out.
+  const profileSyncRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!user?.id || user.isOwner || isDemo) return;
+    if (profileSyncRef.current === user.id) return;
+    profileSyncRef.current = user.id;
+    let cancelled = false;
+    (async () => {
+      try {
+        const profile = await loadCurrentUserProfile(user.id);
+        if (!cancelled) syncCurrentUserProfile(profile);
+      } catch {
+        // Best-effort self-heal — see comment above.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id, user?.isOwner, isDemo]);
+
   useEffect(() => {
     // Demo mode: always use the permanent Demo Company configuration
     if (isDemo) {

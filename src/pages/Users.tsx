@@ -817,18 +817,25 @@ export default function UsersPage() {
                   ]} />
               </FormRow>
             )}
-            {/* Group Admin: only asked when their Group actually has more
-                than one Company — a single-Company Group is assigned
-                automatically (see the auto-select effect above), never
-                making the admin pick from a list of one. */}
-            {!editId && isGroupAdminActor && groupCompanies.length > 1 && (
+            {/* Group Admin: the Company field is always shown for
+                transparency (never a hidden auto-assignment). A single-
+                Company Group is auto-resolved by the effect above and shown
+                read-only/disabled here (nothing to pick from); a multi-
+                Company Group requires an explicit pick from the Group's own
+                Companies only. */}
+            {!editId && isGroupAdminActor && groupCompanies.length > 0 && (
               <FormRow>
                 <InputSelect label="Company" required value={form.companyId}
+                  disabled={groupCompanies.length === 1}
                   onChange={e => setForm({ ...form, companyId: e.target.value, warehouseId: '' })}
-                  options={[
-                    { label: 'Select a Company…', value: '' },
-                    ...groupCompanies.map((c: any) => ({ label: c.name || c.shortName || c.id, value: c.id })),
-                  ]} />
+                  options={
+                    groupCompanies.length === 1
+                      ? groupCompanies.map((c: any) => ({ label: c.name || c.shortName || c.id, value: c.id }))
+                      : [
+                        { label: 'Select a Company…', value: '' },
+                        ...groupCompanies.map((c: any) => ({ label: c.name || c.shortName || c.id, value: c.id })),
+                      ]
+                  } />
               </FormRow>
             )}
             <FormRow>

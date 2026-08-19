@@ -167,6 +167,44 @@ describe('canonical user profile consolidation', () => {
     });
   });
 
+  // Regression (2026-08-19): the persisted (localStorage) app-store `user`
+  // was found live in production missing `groupId` even though the
+  // Firestore profile carried it — because nothing re-fetched an
+  // already-authenticated session's identity after a server-side profile
+  // change (see useGlobalBoot.ts's profileSyncRef effect, which calls
+  // exactly this loadCurrentUserProfile -> syncCurrentUserProfile pipeline).
+  // Downstream, Users.tsx's useGroupCompanies(currentUser?.groupId) is
+  // `enabled: !!groupId` — a lost groupId silently breaks Group Admin's
+  // Company auto-assignment with no error, just an empty list. This proves
+  // groupId survives the full pipeline end-to-end.
+  it('carries groupId through loadCurrentUserProfile -> syncCurrentUserProfile into the app store', async () => {
+    mocks.getOne.mockResolvedValueOnce({
+      id: 'MUSR-default-0234824979',
+      companyId: 'CO-1783978330465-3EV9',
+      email: 'admin@neozy.in',
+      name: 'Admin',
+      role: 'GroupAdmin',
+      status: 'Active',
+      groupId: 'group-csgpl',
+    });
+
+    const profile = await loadCurrentUserProfile('MUSR-default-0234824979');
+    expect(profile.groupId).toBe('group-csgpl');
+
+    useAppStore.setState({
+      user: {
+        id: 'MUSR-default-0234824979', name: 'Admin', displayName: 'Admin',
+        email: 'admin@neozy.in', role: 'GroupAdmin', companyId: 'CO-1783978330465-3EV9',
+        // Reproduces the exact stale-cache shape observed in production: no groupId at all.
+      },
+      isAuthenticated: true,
+    });
+
+    syncCurrentUserProfile(profile);
+
+    expect(useAppStore.getState().user).toMatchObject({ groupId: 'group-csgpl', role: 'GroupAdmin' });
+  });
+
   it('updates the canonical user document without touching Auth when email is unchanged', async () => {
     mocks.getOne.mockResolvedValueOnce({
       id: 'MUSR-default-0234824979',
