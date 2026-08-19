@@ -302,3 +302,50 @@ describe('Source code verification — the role self-heal effect is gated correc
     expect(setPermissionCacheIdx).toBeGreaterThan(lastCatchIdx);
   });
 });
+
+/**
+ * Blank-screen root cause (auth/provisioning reliability investigation): the
+ * roles bootstrap effect's ONLY path to setPermissionCache({ready:true,...})
+ * was gated on `if (!user || !roles) return;` — `roles` (the roles_global
+ * query's `data`) stays undefined BOTH while the query is still pending AND
+ * forever after it permanently fails (react-query never populates `data` on
+ * error). Either way, permissionCache.ready never became true, with no
+ * error, no timeout, no visible state. RoleRoute.tsx's `!cacheReady` guard
+ * and Sidebar's nav-item filter (usePermissions().ready) both key off that
+ * exact flag, so the user saw a completely blank main panel AND an empty
+ * sidebar, indefinitely.
+ */
+describe('Source code verification — a permanently failing roles_global query cannot hang permissionCache.ready forever', () => {
+  it('destructures isError/error from the roles_global query and bounds permissionCache.ready on failure', async () => {
+    const fs = await import('node:fs');
+    const source = fs.readFileSync('src/lib/useGlobalBoot.ts', 'utf-8');
+    expect(source).toContain("isError: rolesQueryFailed, error: rolesQueryError");
+    expect(source).toContain('if (!user || !rolesQueryFailed) return;');
+    // Must not silently pretend the load succeeded — ready:true with an
+    // EMPTY role map (fail-closed, matching this codebase's existing
+    // philosophy), tagged with a diagnostic RoleRoute can detect.
+    expect(source).toMatch(/setPermissionCache\(\{\s*ready:\s*true,\s*roles:\s*\{\},[\s\S]*?diagnostics:\s*\[`roles-query-failed:/);
+  });
+
+  it('does not overwrite an already-successful permissionCache with the failure state', async () => {
+    const fs = await import('node:fs');
+    const source = fs.readFileSync('src/lib/useGlobalBoot.ts', 'utf-8');
+    expect(source).toContain('if (useAppStore.getState().permissionCache.ready) return;');
+  });
+});
+
+describe('Source code verification — RoleRoute never renders an unexplained blank page', () => {
+  it('shows a visible loading state instead of returning null while permissions are still loading', async () => {
+    const fs = await import('node:fs');
+    const source = fs.readFileSync('src/components/auth/RoleRoute.tsx', 'utf-8');
+    expect(source).not.toMatch(/if \(!cacheReady \|\| !perms\.ready\) \{\s*return null;/);
+    expect(source).toContain('return <RoleRouteLoading />;');
+  });
+
+  it('shows a recoverable error state (not a silent redirect/blank) when the roles query genuinely failed', async () => {
+    const fs = await import('node:fs');
+    const source = fs.readFileSync('src/components/auth/RoleRoute.tsx', 'utf-8');
+    expect(source).toContain("cacheDiagnostics.some((entry) => entry.startsWith('roles-query-failed:'))");
+    expect(source).toContain('return <RoleRoutePermissionLoadError />;');
+  });
+});

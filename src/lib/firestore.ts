@@ -26,7 +26,15 @@ const NOT_CONFIGURED_MSG = 'Firebase is not configured. This application require
 // ═══════════════════════════════════════════════════════════
 
 function isRealCompanyId(id: string | undefined | null): id is string {
-  return !!id && id !== 'all' && id !== 'default';
+  // 'group' is the Group-view sentinel (activeCompanyId, Master Plan §7.2) —
+  // not a real company id. Omitting it here let a Group Admin's "All
+  // Companies (Group view)" selection flow straight into
+  // resolveWriteCompanyId(), stamping the literal string "group" as a new
+  // document's companyId (e.g. Users.tsx's create-user form, which has no
+  // company field of its own and falls through entirely to this resolver) —
+  // the root cause of Group Admin user creation silently failing/producing
+  // an unusable record.
+  return !!id && id !== 'all' && id !== 'default' && id !== 'group';
 }
 
 function isRealGroupId(id: string | undefined | null): id is string {

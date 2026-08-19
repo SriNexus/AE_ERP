@@ -9,13 +9,12 @@
 import { useState, useMemo, useCallback, useEffect, useDeferredValue, useRef, type FormEvent } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { getAll, getOne, fmtDate } from '../lib/firestore';
+import { getAll, getAllPlatform, getOne, fmtDate } from '../lib/firestore';
 import { logCreate, logUpdate, logRoleChange, logPermissionChange, logDelete } from '../lib/auditLogger';
 import { createUserProjection, updateUserProjection, deleteUserProjection } from '../features/users/hooks/useUsers';
+import { provisionAuthenticatedUser } from '../lib/authProvisioning';
 import { isEligibleManagerOption, type OrgRoleLike, type OrgUserLike } from '../features/users/orgHierarchy';
-import { COLLECTIONS, firebaseConfig, db } from '../lib/firebase';
-import { initializeApp } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword } from 'firebase/auth';
+import { COLLECTIONS, db } from '../lib/firebase';
 import { query as fbQuery, collection, where, getDocs } from 'firebase/firestore';
 import { Shield, Plus, RefreshCw, Eye, Edit2, Trash2, X, UserCheck, UserX, UserCog, Users as UsersIcon } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -33,7 +32,15 @@ import { Badge, statusBadge } from '../components/ui/Badge';
 
 const PER_PAGE = 15;
 const DEFAULT_USER_ROLE = 'Sales Executive';
-const FORM0 = { name: '', email: '', phone: '', role: DEFAULT_USER_ROLE, managerId: '', status: 'Active', warehouseId: '', password: '', isSuperAdmin: false };
+const FORM0 = {
+  name: '', email: '', phone: '', role: DEFAULT_USER_ROLE, managerId: '', status: 'Active', warehouseId: '', password: '', isSuperAdmin: false,
+  // Super Admin only (§ tenant-assignment requirement): the target Group and
+  // Company must be explicitly selected and cross-validated before a new
+  // user is provisioned — never silently inferred. Ignored for every other
+  // actor (Group Admin/Company Admin creations resolve their own company
+  // automatically, unchanged — see resolveWriteCompanyId()).
+  groupId: '', companyId: '',
+};
 
 const DATE_OPTIONS = [
   { label: 'All dates', value: '' },
@@ -49,6 +56,26 @@ export default function UsersPage() {
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const perms = usePermissions();
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // Tenant-assignment requirement: a Super Admin creating a user must
+  // explicitly select the target Group and Company (never an inferred
+  // default) — see the Group/Company picker in the create form below and
+  // its cross-validation in handleSubmit. Platform-wide reads (every Group/
+  // every Company, not just the actor's own) require the Owner/Super Admin
+  // identity — getAllPlatform() itself throws otherwise, hence `enabled`.
+  const isPlatformActor = !!(currentUser?.isOwner || currentUser?.isSuperAdmin);
+  const { data: platformGroups = [] } = useQuery({
+    queryKey: ['platform-groups'],
+    queryFn: () => getAllPlatform<any>(COLLECTIONS.GROUPS),
+    staleTime: 30_000,
+    enabled: isPlatformActor,
+  });
+  const { data: platformCompanies = [] } = useQuery({
+    queryKey: ['platform-companies'],
+    queryFn: () => getAllPlatform<any>(COLLECTIONS.COMPANIES),
+    staleTime: 30_000,
+    enabled: isPlatformActor,
+  });
 
   // Filters
   const [search, setSearch] = useState(() => searchParams.get('q') || '');
@@ -156,7 +183,11 @@ export default function UsersPage() {
   const save = useMutation({
     mutationFn: async (d: typeof FORM0) => {
       if (editId) {
-        const { password: _, ...rest } = d;
+        // groupId/companyId are a creation-time-only decision (the Super
+        // Admin picker below) — always stripped here regardless of form
+        // state, so an edit can never accidentally overwrite an existing
+        // user's tenant assignment with an empty/stale value.
+        const { password: _, groupId: _groupId, companyId: _companyId, ...rest } = d;
         // F-16 (Phase 0): capture the pre-mutation state so role/permission/
         // status changes are audited with old + new values. Previously the
         // most security-sensitive user mutations (role change, super-admin
@@ -175,17 +206,15 @@ export default function UsersPage() {
           }
         }
       } else {
-        const secondaryApp = initializeApp(firebaseConfig, 'SecondaryApp' + Date.now());
-        const secondaryAuth = getAuth(secondaryApp);
-        let authId;
-        try {
-          const authResult = await createUserWithEmailAndPassword(secondaryAuth, d.email, d.password);
-          authId = authResult.user.uid;
-        } finally {
-          await secondaryAuth.signOut();
-        }
         const { password: _, ...rest } = d;
-        await createUserProjection(authId, { ...rest, id: authId, createdBy: currentUser?.id });
+        const authId = await provisionAuthenticatedUser({
+          email: d.email,
+          password: d.password,
+          createProfile: async (authId) => {
+            await createUserProjection(authId, { ...rest, id: authId, createdBy: currentUser?.id });
+            return authId;
+          },
+        });
         // F-16 (Phase 0): audit user creation.
         await logCreate('user', authId, { name: rest.name, email: rest.email, role: rest.role, status: rest.status }, 'users');
       }
@@ -211,6 +240,10 @@ export default function UsersPage() {
       name: u.name || '', email: u.email || '', phone: u.phone || '',
       role: u.role || '', managerId: u.managerId || '', status: u.status || 'Active',
       warehouseId: u.warehouseId || '', password: '', isSuperAdmin: u.isSuperAdmin === true,
+      // Not editable here — a user's company/group assignment is a creation-
+      // time-only decision (see the Super Admin picker in the create form
+      // and the explicit strip in handleSubmit's edit branch below).
+      groupId: '', companyId: '',
     });
     setEditId(u.id);
     setShowForm(true);
@@ -220,6 +253,19 @@ export default function UsersPage() {
     e.preventDefault();
     if (!form.name || !form.email) return toast.error('Name & email required');
     if (!editId && !form.password) return toast.error('Temporary password required');
+    // Tenant-assignment requirement: a Super Admin must explicitly select
+    // and cross-validate the target Group + Company before a new user is
+    // provisioned — never an inferred default (that inference is reserved
+    // for Group Admin/Company Admin creations, which always resolve to
+    // their own company automatically).
+    if (!editId && isPlatformActor) {
+      if (!form.groupId) return toast.error('Select a Group');
+      if (!form.companyId) return toast.error('Select a Company');
+      const selectedCompany = platformCompanies.find((c: any) => c.id === form.companyId);
+      if (!selectedCompany || selectedCompany.groupId !== form.groupId) {
+        return toast.error('The selected Company does not belong to the selected Group');
+      }
+    }
     save.mutate(form);
   }
 
@@ -697,6 +743,26 @@ export default function UsersPage() {
               <Input label="Full Name" required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
               <Input label="Email" type="email" required value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
             </FormRow>
+            {/* Tenant-assignment requirement: Super Admin must explicitly
+                pick the target Group + Company before creating a user —
+                Group Admin/Company Admin never see this, their new user
+                always resolves to their own company automatically. */}
+            {!editId && isPlatformActor && (
+              <FormRow>
+                <InputSelect label="Group" required value={form.groupId}
+                  onChange={e => setForm({ ...form, groupId: e.target.value, companyId: '' })}
+                  options={[
+                    { label: 'Select a Group…', value: '' },
+                    ...platformGroups.filter((g: any) => g.status !== 'Suspended').map((g: any) => ({ label: g.name || g.shortName || g.id, value: g.id })),
+                  ]} />
+                <InputSelect label="Company" required value={form.companyId}
+                  onChange={e => setForm({ ...form, companyId: e.target.value })}
+                  options={[
+                    { label: form.groupId ? 'Select a Company…' : 'Select a Group first', value: '' },
+                    ...platformCompanies.filter((c: any) => c.groupId === form.groupId).map((c: any) => ({ label: c.name || c.shortName || c.id, value: c.id })),
+                  ]} />
+              </FormRow>
+            )}
             <FormRow>
               <Input label="Phone" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} />
               {canEditRoles ? (

@@ -29,9 +29,8 @@ import {
 import toast from 'react-hot-toast';
 import { Badge, Button, Card, ConfirmDialog, Input, Modal, Pagination, Select, statusBadge } from '../../ui';
 import { getAll, fmtDate } from '../../../lib/firestore';
-import { COLLECTIONS, firebaseConfig } from '../../../lib/firebase';
-import { initializeApp } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword } from 'firebase/auth';
+import { COLLECTIONS } from '../../../lib/firebase';
+import { provisionAuthenticatedUser } from '../../../lib/authProvisioning';
 import {
   createUserProjection,
   updateUserProjection,
@@ -114,17 +113,12 @@ export default function MobileUsersWorkspace({ mode }: { mode: Mode }) {
         const { password, ...rest } = d;
         await updateUserProjection(editId, rest);
       } else {
-        const secondaryApp = initializeApp(firebaseConfig, 'SecondaryApp' + Date.now());
-        const secondaryAuth = getAuth(secondaryApp);
-        let authId: string;
-        try {
-          const authResult = await createUserWithEmailAndPassword(secondaryAuth, d.email, d.password);
-          authId = authResult.user.uid;
-        } finally {
-          await secondaryAuth.signOut();
-        }
         const { password, ...rest } = d;
-        await createUserProjection(authId, { ...rest, id: authId, createdBy: currentUser.id });
+        await provisionAuthenticatedUser({
+          email: d.email,
+          password: d.password,
+          createProfile: (authId) => createUserProjection(authId, { ...rest, id: authId, createdBy: currentUser.id }),
+        });
       }
     },
     onSuccess: () => {

@@ -212,7 +212,30 @@ export function useGlobalBoot() {
   // bootstrap resolves the current user's role against THEIR company's role
   // documents. Owner/super-admin keep the unscoped platform-wide read (the
   // same exemption as the Phase 0 F-01 companies fix).
-  const { data: roles } = useQuery({ queryKey:['roles_global'], queryFn:()=>getAll(COLLECTIONS.ROLES), staleTime:1000*60*30, enabled:!!user });
+  const { data: roles, isError: rolesQueryFailed, error: rolesQueryError } = useQuery({ queryKey:['roles_global'], queryFn:()=>getAll(COLLECTIONS.ROLES), staleTime:1000*60*30, enabled:!!user });
+  // Blank-screen safety net: without this, a permanently failing (not merely
+  // slow) roles_global query left `roles` undefined forever, the bootstrap
+  // effect below's `if (!user || !roles) return;` guard never let `run()`
+  // execute, and setPermissionCache({ready:true,...}) was NEVER called — with
+  // no error, no timeout, no visible state. RoleRoute (permissionCache.ready)
+  // and Sidebar's nav filter (usePermissions().ready) both gate on that same
+  // flag, so the user saw a completely blank main panel AND an empty sidebar,
+  // indefinitely, with nothing in the UI to explain why. On a genuine query
+  // error (not the normal in-flight pending state), this bounds the wait:
+  // permissionCache still becomes ready (fail-closed, matching the rest of
+  // this codebase's philosophy — an empty role map, not a fabricated one),
+  // and RoleRoute can detect the 'roles-query-failed' diagnostic to show a
+  // recoverable message instead of an unexplained blank page.
+  useEffect(() => {
+    if (!user || !rolesQueryFailed) return;
+    if (useAppStore.getState().permissionCache.ready) return;
+    setPermissionCache({
+      ready: true,
+      roles: {},
+      loadedAt: new Date().toISOString(),
+      diagnostics: [`roles-query-failed:${rolesQueryError instanceof Error ? rolesQueryError.message : String(rolesQueryError)}`],
+    });
+  }, [user?.id, rolesQueryFailed, rolesQueryError, setPermissionCache]);
   // Phase 13: team-hierarchy resolution must be data-driven (any role whose
   // FirestoreRoleDocument sets visibility:'team' on any module), not limited
   // to the two hardcoded legacy role-name strings — a custom/data-driven

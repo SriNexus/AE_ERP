@@ -22,13 +22,12 @@ import { sendNotification, notifyRoleUsers } from './notifications';
 import { useAppStore } from '../store/useAppStore';
 import { NotificationType } from '../types';
 import { ChannelPartnerDomainService } from '../services/ChannelPartnerDomainService';
-import { db, firebaseConfig } from './firebase';
+import { db } from './firebase';
 import { doc, getOne, getAll, writeBatch } from './firestore';
 import { COLLECTIONS } from './firebase';
 import { partnerManagerEligibilityError } from '../features/users/orgHierarchy';
 import { createUserProjection } from '../features/users/hooks/useUsers';
-import { initializeApp } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword } from 'firebase/auth';
+import { provisionAuthenticatedUser } from './authProvisioning';
 import type { ChannelPartner } from '../features/channel-partner/types';
 import type { AppUser } from '../types';
 
@@ -307,29 +306,29 @@ export async function provisionPartnerUser(input: {
   if (!stringValue(input.password)) throw new Error('Password is required to provision a partner user.');
   if (!stringValue(input.companyId)) throw new Error('Company is required to provision a partner user.');
 
-  // Mirror Users.tsx: create the Firebase Auth account with a secondary app,
-  // then persist the canonical ERP user projection (role 'Partner').
-  const secondaryApp = initializeApp(firebaseConfig, `PartnerProvision-${Date.now()}`);
-  const secondaryAuth = getAuth(secondaryApp);
-  let userId = '';
-  try {
-    const authResult = await createUserWithEmailAndPassword(secondaryAuth, email, input.password);
-    userId = authResult.user.uid;
-  } finally {
-    await secondaryAuth.signOut().catch(() => undefined);
-  }
-
+  // Shared provisioning primitive (src/lib/authProvisioning.ts): creates the
+  // Firebase Auth account via an isolated secondary app, then persists the
+  // canonical ERP user projection (role 'Partner') — rolling the Auth
+  // account back if the profile write fails, so a failed attempt never
+  // leaves an orphaned Auth-only identity behind.
   const state = useAppStore.getState();
-  await createUserProjection(userId, {
-    id: userId,
-    name,
-    displayName: name,
+  const userId = await provisionAuthenticatedUser({
     email,
-    phone: stringValue(input.phone),
-    role: 'Partner',
-    companyId: input.companyId,
-    status: 'Active',
-    createdBy: state.user?.id || 'system',
+    password: input.password,
+    createProfile: async (id) => {
+      await createUserProjection(id, {
+        id,
+        name,
+        displayName: name,
+        email,
+        phone: stringValue(input.phone),
+        role: 'Partner',
+        companyId: input.companyId,
+        status: 'Active',
+        createdBy: state.user?.id || 'system',
+      });
+      return id;
+    },
   });
 
   if (input.partnerId) {

@@ -225,6 +225,37 @@ describe('Tenant context fail-closed — Admin companyId="default" 403-storm roo
       useAppStore.setState({ activeCompanyId: 'default', company: { ...useAppStore.getState().company, id: 'default' }, user: null });
       expect(resolveWriteCompanyId()).toBe('');
     });
+
+    // Root cause (auth/provisioning reliability investigation): 'group' is
+    // the Group-view sentinel (Master Plan §7.2, "All Companies (Group
+    // view)") — not a real company id. isRealCompanyId() previously excluded
+    // only 'all'/'default', so a Group Admin creating a user (or writing any
+    // other document) while in Group-view mode had the literal string
+    // "group" stamped as the new document's companyId — Users.tsx's
+    // create-user form has no company field of its own and falls through
+    // entirely to this resolver. That produced an unusable record (or a
+    // rules denial), surfacing as "Group Admin user creation does not
+    // complete correctly".
+    it('never returns the "group" Group-view sentinel — falls back to a real company id instead', () => {
+      useAppStore.setState({
+        activeCompanyId: 'group',
+        company: { ...useAppStore.getState().company, id: 'default' },
+        user: {
+          id: 'ga-1', name: 'Group Admin', email: 'ga@test.erp', role: 'GroupAdmin',
+          companyId: 'CO-1783978330465-3EV9', groupId: 'group-1',
+        },
+      });
+      expect(resolveWriteCompanyId()).toBe('CO-1783978330465-3EV9');
+    });
+
+    it('"group" with no other real company anywhere fails closed to empty, not the literal sentinel', () => {
+      useAppStore.setState({
+        activeCompanyId: 'group',
+        company: { ...useAppStore.getState().company, id: 'default' },
+        user: null,
+      });
+      expect(resolveWriteCompanyId()).toBe('');
+    });
   });
 
   describe('source contracts — no "default" fallback for authenticated identities', () => {
@@ -240,10 +271,13 @@ describe('Tenant context fail-closed — Admin companyId="default" 403-storm roo
       expect(source).toContain("companyId === 'default'");
     });
 
-    it('userIdentity.ts: systemCompanyId can never yield "default" for user creation', () => {
+    it('userIdentity.ts: systemCompanyId can never yield "default" or "group" for user creation', () => {
       const source = src('src/lib/userIdentity.ts');
       expect(source).not.toMatch(/\|\| 'default';/);
-      expect(source).toContain("(id && id !== 'all' && id !== 'default' ? id : '')");
+      // 'group' (the Group-view sentinel, Master Plan §7.2) must also never
+      // be treated as a real company id here — see authProvisioning.ts's
+      // root-cause comment / firestore.ts's isRealCompanyId().
+      expect(source).toContain("(id && id !== 'all' && id !== 'default' && id !== 'group' ? id : '')");
     });
 
     it('Login.tsx: no "default" company fallback for an authenticated ERP identity', () => {

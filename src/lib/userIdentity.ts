@@ -59,13 +59,18 @@ function requireIdentityInput(payload: ProjectionSafePayload, fallbackPhone = ''
 
 function systemCompanyId(payload: ProjectionSafePayload): string {
   const state = useAppStore.getState();
-  // Neutral 'all'/'default' placeholders are NOT real companies. A user identity
-  // must resolve to an actual company (explicit payload, active selection,
-  // loaded company config, or canonical ERP profile) — otherwise the final
-  // fallback is '' and requireIdentityInput() throws, so user creation FAILS
-  // CLOSED instead of silently creating users under companyId 'default' (the
-  // Admin companyId='default' 403-storm root cause).
-  const real = (id?: string) => (id && id !== 'all' && id !== 'default' ? id : '');
+  // Neutral 'all'/'default'/'group' placeholders are NOT real companies. A
+  // user identity must resolve to an actual company (explicit payload,
+  // active selection, loaded company config, or canonical ERP profile) —
+  // otherwise the final fallback is '' and requireIdentityInput() throws, so
+  // user creation FAILS CLOSED instead of silently creating users under
+  // companyId 'default' (the Admin companyId='default' 403-storm root cause)
+  // or the literal string 'group' (the Group Admin Group-view sentinel,
+  // Master Plan §7.2 — a Group Admin creating a user while viewing "All
+  // Companies (Group view)" previously had that sentinel stamped straight
+  // onto the new user's companyId, since Users.tsx's create-user form has no
+  // company field of its own).
+  const real = (id?: string) => (id && id !== 'all' && id !== 'default' && id !== 'group' ? id : '');
   return real(stringValue(payload.companyId))
     || real(state.activeCompanyId)
     || real(state.company?.id)
