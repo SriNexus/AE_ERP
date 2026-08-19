@@ -45,3 +45,20 @@ describe('Users.tsx — Super Admin Group+Company picker', () => {
     expect(usersPage).toContain('const { password: _, groupId: _groupId, companyId: _companyId, ...rest } = d;');
   });
 });
+
+describe('Users.tsx — Group Admin single-vs-multiple Company/Warehouse auto-assign', () => {
+  it('a Group Admin with exactly one Company in their Group gets it assigned automatically, never asked to pick', () => {
+    expect(usersPage).toContain("const isGroupAdminActor = !isPlatformActor && currentUser?.role === 'GroupAdmin';");
+    expect(usersPage).toMatch(/if \(isGroupAdminActor && !form\.companyId && groupCompanies\.length === 1\) \{/);
+    expect(usersPage).toContain('!editId && isGroupAdminActor && groupCompanies.length > 1 &&');
+  });
+
+  it('handleSubmit still requires and cross-validates the Company for a Group Admin (covers the multi-Company case)', () => {
+    expect(usersPage).toMatch(/if \(!editId && isGroupAdminActor\) \{[\s\S]*?if \(!form\.companyId\)[\s\S]*?groupCompanies\.find/);
+  });
+
+  it('the Warehouse picker is scoped to the resolved Company and auto-assigns when exactly one exists', () => {
+    expect(usersPage).toContain('.filter((w: any) => w.companyId === newUserEffectiveCompanyId)');
+    expect(usersPage).toMatch(/if \(!form\.warehouseId && companyWarehouses\.length === 1\) \{/);
+  });
+});

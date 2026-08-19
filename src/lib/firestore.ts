@@ -852,15 +852,38 @@ export async function updateDocById(col: string, id: string, data: Partial<Docum
   // from it can never legitimately change — a payload companyId (or a
   // resolved session company) is only a fallback for docs that do not exist
   // yet (the merge-create branch below). Excluded collections (§3.2) never
-  // receive the auto-stamp.
-  const { groupId: _strippedGroupId, ...restData } = data as DocumentData;
+  // receive the AUTO-stamp here — that's deliberate: `users`' own groupId
+  // must be derived from the TARGET user's company (which may differ from
+  // the current session's active company, e.g. a Group Admin editing a user
+  // in a different Company of their Group), so entityProjection.ts computes
+  // it itself and passes it through in `data`.
+  //
+  // Root cause (Group Admin "missing or insufficient permissions" creating a
+  // user): this used to strip that already-correctly-computed groupId
+  // unconditionally, the same as any raw client-supplied one — so
+  // users/{authId} was ALWAYS written with no groupId at all, regardless of
+  // what entityProjection.ts had computed. firestore.rules' GroupAdmin
+  // create branch requires `hasGroupId(request.resource.data) &&
+  // request.resource.data.groupId == actorGroupId()` — with no groupId
+  // field present, that branch can never match, and the create falls through
+  // to the isAdmin() branch, which is false for a GroupAdmin actor (isAdmin()
+  // checks role=='Admin' literally; GroupAdmin is a role-COMPATIBLE alias
+  // only at the client canDo() layer, not in the rules) — PERMISSION_DENIED.
+  // Fix: for an excluded collection, trust an explicitly-supplied groupId in
+  // `data` (only entityProjection.ts ever passes one — verified no other
+  // caller does) instead of unconditionally discarding it; still never
+  // auto-COMPUTE one for these collections, and a raw call that doesn't pass
+  // groupId behaves exactly as before (resolvedGroupId '').
+  const { groupId: suppliedGroupId, ...restData } = data as DocumentData;
   const existingCompanyId = snap.exists() ? (snap.data() as any)?.companyId : undefined;
   const targetCompanyId = isRealCompanyId(existingCompanyId)
     ? existingCompanyId
     : isRealCompanyId((restData as any).companyId)
       ? (restData as any).companyId
       : resolveWriteCompanyId();
-  const resolvedGroupId = GROUP_ID_EXCLUDED_COLLECTIONS.has(col) ? '' : resolveWriteGroupId(targetCompanyId);
+  const resolvedGroupId = GROUP_ID_EXCLUDED_COLLECTIONS.has(col)
+    ? (isRealGroupId(suppliedGroupId) ? suppliedGroupId.trim() : '')
+    : resolveWriteGroupId(targetCompanyId);
   const payload = sanitizePayload({
     ...restData,
     ...(resolvedGroupId ? { groupId: resolvedGroupId } : {}),

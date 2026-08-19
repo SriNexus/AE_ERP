@@ -14,6 +14,7 @@ import { logCreate, logUpdate, logRoleChange, logPermissionChange, logDelete } f
 import { createUserProjection, updateUserProjection, deleteUserProjection } from '../features/users/hooks/useUsers';
 import { provisionAuthenticatedUser } from '../lib/authProvisioning';
 import { isEligibleManagerOption, type OrgRoleLike, type OrgUserLike } from '../features/users/orgHierarchy';
+import { useGroupCompanies } from '../features/company/hooks/useCompanies';
 import { COLLECTIONS, db } from '../lib/firebase';
 import { query as fbQuery, collection, where, getDocs } from 'firebase/firestore';
 import { Shield, Plus, RefreshCw, Eye, Edit2, Trash2, X, UserCheck, UserX, UserCog, Users as UsersIcon } from 'lucide-react';
@@ -76,6 +77,14 @@ export default function UsersPage() {
     staleTime: 30_000,
     enabled: isPlatformActor,
   });
+
+  // Group Admin: a new user always belongs to a Company within the Group
+  // Admin's own Group — never asked to pick a Group (there is only one, the
+  // actor's own). When that Group has exactly one Company, it is assigned
+  // silently (no picker); when it has more than one, the Group Admin must
+  // pick which Company (the create form below + handleSubmit's validation).
+  const isGroupAdminActor = !isPlatformActor && currentUser?.role === 'GroupAdmin';
+  const { data: groupCompanies = [] } = useGroupCompanies(isGroupAdminActor ? currentUser?.groupId : undefined);
 
   // Filters
   const [search, setSearch] = useState(() => searchParams.get('q') || '');
@@ -168,10 +177,44 @@ export default function UsersPage() {
   // and already sent on save — but no <Select> ever existed to let a user
   // actually set it, so it could never be assigned through this UI at all.
   const { data: warehouses = [] } = useWarehouses();
+
+  // The Company the new user will actually belong to — used to (a) scope the
+  // Warehouse picker to only that Company's warehouses (never a sibling
+  // Company's) and (b) drive the single-option auto-assign rule below.
+  const newUserEffectiveCompanyId = isPlatformActor
+    ? form.companyId
+    : isGroupAdminActor
+      ? (form.companyId || (groupCompanies.length === 1 ? String((groupCompanies[0] as any)?.id || '') : ''))
+      : String(currentUser?.companyId || '');
+
+  const companyWarehouses = useMemo(() => (
+    !editId && newUserEffectiveCompanyId
+      ? (warehouses as any[]).filter((w: any) => w.companyId === newUserEffectiveCompanyId)
+      : (warehouses as any[])
+  ), [warehouses, editId, newUserEffectiveCompanyId]);
   const warehouseOptions = useMemo(() => [
     { label: 'No warehouse assigned', value: '' },
-    ...(warehouses as any[]).map((w: any) => ({ label: w.name, value: w.id })),
-  ], [warehouses]);
+    ...companyWarehouses.map((w: any) => ({ label: w.name, value: w.id })),
+  ], [companyWarehouses]);
+
+  // Tenant-assignment requirement: when exactly one Company (Group Admin) or
+  // exactly one Warehouse (any actor) is available, assign it automatically
+  // instead of making the admin pick from a list of one. Only while the
+  // create form is open and untouched by a real selection — never overrides
+  // an explicit choice, and never runs while editing an existing user.
+  useEffect(() => {
+    if (!showForm || editId) return;
+    if (isGroupAdminActor && !form.companyId && groupCompanies.length === 1) {
+      setForm((current) => (current.companyId ? current : { ...current, companyId: String((groupCompanies[0] as any)?.id || '') }));
+    }
+  }, [showForm, editId, isGroupAdminActor, groupCompanies]);
+
+  useEffect(() => {
+    if (!showForm || editId) return;
+    if (!form.warehouseId && companyWarehouses.length === 1) {
+      setForm((current) => (current.warehouseId ? current : { ...current, warehouseId: String((companyWarehouses[0] as any)?.id || '') }));
+    }
+  }, [showForm, editId, companyWarehouses]);
 
   const canCreateUsers = perms.can('users', 'create');
   const canEditUsers = perms.can('users', 'edit');
@@ -264,6 +307,17 @@ export default function UsersPage() {
       const selectedCompany = platformCompanies.find((c: any) => c.id === form.companyId);
       if (!selectedCompany || selectedCompany.groupId !== form.groupId) {
         return toast.error('The selected Company does not belong to the selected Group');
+      }
+    }
+    // Group Admin: a Company must be resolved (auto-assigned for a
+    // single-Company Group, explicitly picked for a multi-Company one) and
+    // must genuinely belong to the actor's own Group before the user is
+    // provisioned — never an inferred/forged assignment.
+    if (!editId && isGroupAdminActor) {
+      if (!form.companyId) return toast.error('Select a Company');
+      const selectedCompany = groupCompanies.find((c: any) => c.id === form.companyId);
+      if (!selectedCompany) {
+        return toast.error('The selected Company does not belong to your Group');
       }
     }
     save.mutate(form);
@@ -760,6 +814,20 @@ export default function UsersPage() {
                   options={[
                     { label: form.groupId ? 'Select a Company…' : 'Select a Group first', value: '' },
                     ...platformCompanies.filter((c: any) => c.groupId === form.groupId).map((c: any) => ({ label: c.name || c.shortName || c.id, value: c.id })),
+                  ]} />
+              </FormRow>
+            )}
+            {/* Group Admin: only asked when their Group actually has more
+                than one Company — a single-Company Group is assigned
+                automatically (see the auto-select effect above), never
+                making the admin pick from a list of one. */}
+            {!editId && isGroupAdminActor && groupCompanies.length > 1 && (
+              <FormRow>
+                <InputSelect label="Company" required value={form.companyId}
+                  onChange={e => setForm({ ...form, companyId: e.target.value, warehouseId: '' })}
+                  options={[
+                    { label: 'Select a Company…', value: '' },
+                    ...groupCompanies.map((c: any) => ({ label: c.name || c.shortName || c.id, value: c.id })),
                   ]} />
               </FormRow>
             )}
