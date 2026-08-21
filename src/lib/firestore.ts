@@ -339,6 +339,28 @@ export function companyScopedQuery(colName: string): QueryConstraint[] {
     return [where('companyId', '==', companyId)];
   }
 
+  // `attendance` GroupAdmin read fix: the rules' groupAdminCanRead() branch
+  // depends on resource.data.groupId (not companyId), so a companyId-only
+  // list query is unprovable for a GroupAdmin actor and Firestore denies the
+  // whole list outright — live-verified 2026-08-21 (Group Admin's Attendance
+  // page showing 0 records, and the manual Check-In/Check-Out duplicate-check
+  // query throwing permission-denied for any employee other than the actor's
+  // own self-service record). isAdmin()/isOwnerIdentity()/isSuperAdmin() are
+  // document-independent so companyId-scoping already works for them; only
+  // GroupAdmin needs the groupId constraint instead, mirroring the identical,
+  // already-working `companies` Group-view pattern above (§9.3/§9.4).
+  if (colName === COLLECTIONS.ATTENDANCE && user?.role === 'GroupAdmin' && !user?.isOwner && !user?.isSuperAdmin) {
+    const companyId = isRealCompanyId(activeCompanyId) ? activeCompanyId : user?.companyId;
+    const groupId = resolveWriteGroupId(companyId);
+    if (!isRealGroupId(groupId)) {
+      throw new Error(
+        'Group context is not resolved: the Group Admin identity has no authoritative groupId. ' +
+        'Contact an administrator to repair the user profile.'
+      );
+    }
+    return [where('groupId', '==', groupId)];
+  }
+
   if (!user) {
     throw new Error(
       'Identity context is not resolved yet: the ERP identity has not finished loading. ' +

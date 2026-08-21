@@ -28,6 +28,7 @@ import { Badge, Button, Card, ConfirmDialog, Input, Modal, Pagination, Select, T
 import { getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate } from '../../../lib/firestore';
 import { COLLECTIONS } from '../../../lib/firebase';
 import { INDIAN_STATES } from '../../../config/company';
+import { warehouseGeoToForm, parseWarehouseGeo } from '../../../features/warehouses/types';
 import { usePermissions } from '../../../lib/permissions';
 import { useAppStore } from '../../../store/useAppStore';
 import { cn } from '../../../utils/cn';
@@ -43,7 +44,7 @@ type CompanyFilters = {
   status: string;
 };
 
-const FORM0: any = { name: '', shortName: '', companyCode: '', tagline: '', address: '', city: '', state: '', pincode: '', phone: '', email: '', website: '', gst: '', pan: '', cin: '', bankName: '', bankAccount: '', bankIfsc: '', bankBranch: '', currency: 'INR', currencySymbol: '₹', status: 'Active', primaryColor: '#4f46e5', accentColor: '#10b981', logo: '', iconLogo: '', qrCode: '', signature: '', isDefault: false };
+const FORM0: any = { name: '', shortName: '', companyCode: '', tagline: '', address: '', city: '', state: '', pincode: '', phone: '', email: '', website: '', gst: '', pan: '', cin: '', bankName: '', bankAccount: '', bankIfsc: '', bankBranch: '', currency: 'INR', currencySymbol: '₹', status: 'Active', primaryColor: '#4f46e5', accentColor: '#10b981', logo: '', iconLogo: '', qrCode: '', signature: '', isDefault: false, latitude: '', longitude: '', geofenceRadiusMeters: '' };
 
 function filterCompanies(records: CompanyRecord[], filters: CompanyFilters, all: CompanyRecord[]) {
   const term = filters.search.trim().toLowerCase();
@@ -163,7 +164,7 @@ export default function MobileCompaniesWorkspace({ mode }: { mode: Mode }) {
   function requestCloseForm() { if (dirty) { setConfirmClose(true); return; } closeForm(); }
 
   function openEdit(c: CompanyRecord) {
-    setForm({ ...FORM0, ...c });
+    setForm({ ...FORM0, ...c, ...warehouseGeoToForm(c as any) });
     setDirty(false);
     setEditId(c.id);
     setFormOpen(true);
@@ -174,7 +175,8 @@ export default function MobileCompaniesWorkspace({ mode }: { mode: Mode }) {
   function submitCompany(event: React.FormEvent) {
     event.preventDefault();
     if (!form.name) return toast.error('Company name required');
-    saveMut.mutate(form);
+    const geo = parseWarehouseGeo({ latitude: form.latitude, longitude: form.longitude, geofenceRadiusMeters: form.geofenceRadiusMeters });
+    saveMut.mutate({ ...form, ...geo });
   }
 
   async function deleteSelected() {
@@ -392,6 +394,19 @@ function CompanyDialogs({ formOpen, form, editId, saving, dirty, confirmClose, o
               <Input label="City" value={form.city} onChange={(e) => onChange({ city: e.target.value })} />
               <Select label="State" value={form.state} onChange={(e) => onChange({ state: e.target.value })} options={STATE_OPTS} />
               <Input label="Pincode" value={form.pincode} onChange={(e) => onChange({ pincode: e.target.value })} />
+            </div>
+          </div>
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-2">Geo-Fence / Attendance Location</p>
+            <p className="text-[11px] text-[var(--color-text-muted)] mb-2">
+              Default attendance location when employee's warehouse has no geo config.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Latitude" value={form.latitude} onChange={(e) => onChange({ latitude: e.target.value })} placeholder="e.g. 19.0760" />
+              <Input label="Longitude" value={form.longitude} onChange={(e) => onChange({ longitude: e.target.value })} placeholder="e.g. 72.8777" />
+            </div>
+            <div className="mt-3">
+              <Input label="Geofence Radius (meters)" value={form.geofenceRadiusMeters} onChange={(e) => onChange({ geofenceRadiusMeters: e.target.value })} placeholder="e.g. 500" />
             </div>
           </div>
           <div>

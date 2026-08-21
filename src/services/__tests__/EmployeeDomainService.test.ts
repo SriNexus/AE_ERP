@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   getOne: vi.fn(),
   genId: { employee: vi.fn(() => 'EMP-001') },
   resolveOrCreateMasterUser: vi.fn(),
+  getDocs: vi.fn(),
 }));
 
 vi.mock('../../lib/firestore', () => ({
@@ -27,10 +28,20 @@ vi.mock('../../lib/firestore', () => ({
 
 vi.mock('../../lib/userIdentity', () => ({
   resolveOrCreateMasterUser: mocks.resolveOrCreateMasterUser,
+  normalizePhone: (raw: string) => String(raw || '').replace(/\D/g, '').slice(-10),
+  masterUserId: (companyId: string, phone: string) => `MUSR-${companyId}-${phone}`,
 }));
 
 vi.mock('../../lib/firebase', () => ({
   COLLECTIONS: { EMPLOYEES: 'employees', USERS: 'users' },
+  db: {},
+}));
+
+vi.mock('firebase/firestore', () => ({
+  collection: vi.fn(),
+  query: vi.fn(),
+  where: vi.fn(),
+  getDocs: mocks.getDocs,
 }));
 
 import { EmployeeDomainService } from '../EmployeeDomainService';
@@ -88,5 +99,70 @@ describe('EmployeeDomainService.update', () => {
     await EmployeeDomainService.update('EMP-2', { warehouseId: 'WH-1' });
     expect(mocks.updateDocById).toHaveBeenCalledTimes(1); // only the Employee write
     expect(mocks.updateDocById).toHaveBeenCalledWith('employees', 'EMP-2', {});
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// linkOrCreateForUser — User → Employee provisioning regression tests
+// ═══════════════════════════════════════════════════════════════════
+describe('EmployeeDomainService.linkOrCreateForUser', () => {
+  function snapshot(docs: Array<{ id: string; data: Record<string, unknown> }>) {
+    return {
+      empty: docs.length === 0,
+      docs: docs.map((d) => ({ id: d.id, data: () => d.data })),
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.createDocWithId.mockResolvedValue(undefined);
+    mocks.updateDocById.mockResolvedValue(undefined);
+  });
+
+  it('creates a brand-new Employee, keyed to the given userId directly — never via resolveOrCreateMasterUser', async () => {
+    mocks.getDocs.mockResolvedValue(snapshot([])); // no existing match, by userId or master identity
+
+    const employeeId = await EmployeeDomainService.linkOrCreateForUser('AUTH-UID-001', {
+      name: 'NITESH', phone: '9876543210', email: 'nitesh@neozy.in', role: 'Sales Executive', companyId: 'comp-1',
+    });
+
+    expect(employeeId).toBe('EMP-001');
+    expect(mocks.resolveOrCreateMasterUser).not.toHaveBeenCalled();
+    expect(mocks.createDocWithId).toHaveBeenCalledTimes(1);
+    const [col, id, payload] = mocks.createDocWithId.mock.calls[0];
+    expect(col).toBe('employees');
+    expect(id).toBe('EMP-001');
+    expect(payload).toMatchObject({ userId: 'AUTH-UID-001', companyId: 'comp-1', name: 'NITESH', phone: '9876543210' });
+  });
+
+  it('is idempotent — a second call for the same userId returns the already-linked Employee and creates nothing', async () => {
+    mocks.getDocs.mockResolvedValueOnce(snapshot([{ id: 'EMP-EXISTING', data: { userId: 'AUTH-UID-001' } }]));
+
+    const employeeId = await EmployeeDomainService.linkOrCreateForUser('AUTH-UID-001', {
+      name: 'NITESH', phone: '9876543210', companyId: 'comp-1',
+    });
+
+    expect(employeeId).toBe('EMP-EXISTING');
+    expect(mocks.createDocWithId).not.toHaveBeenCalled();
+    expect(mocks.updateDocById).not.toHaveBeenCalled();
+  });
+
+  it('re-links a pre-existing Employee (created HR-first via create()) sharing the same phone, instead of creating a duplicate', async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce(snapshot([])) // not yet linked to this userId
+      .mockResolvedValueOnce(snapshot([{ id: 'EMP-PREEXISTING', data: { userId: 'MUSR-comp-1-9876543210' } }])); // found via deterministic master-identity id
+
+    const employeeId = await EmployeeDomainService.linkOrCreateForUser('AUTH-UID-002', {
+      name: 'NITESH', phone: '9876543210', companyId: 'comp-1',
+    });
+
+    expect(employeeId).toBe('EMP-PREEXISTING');
+    expect(mocks.createDocWithId).not.toHaveBeenCalled();
+    expect(mocks.updateDocById).toHaveBeenCalledWith('employees', 'EMP-PREEXISTING', { userId: 'AUTH-UID-002' });
+  });
+
+  it('requires companyId', async () => {
+    await expect(EmployeeDomainService.linkOrCreateForUser('AUTH-UID-003', { name: 'X', companyId: '' }))
+      .rejects.toThrow(/companyId is required/);
   });
 });

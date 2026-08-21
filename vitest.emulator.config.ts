@@ -13,6 +13,8 @@ export default defineConfig({
       'src/lib/__tests__/firestoreDemoIsolation.emulator.test.ts',
       'src/lib/__tests__/multiTenantSecurity.emulator.test.ts',
       'src/lib/__tests__/phase8GroupPerformance.emulator.test.ts',
+      'src/lib/__tests__/attendanceRules.emulator.test.ts',
+      'src/lib/__tests__/stockAdjustTransaction.emulator.test.ts',
     ],
   },
 });

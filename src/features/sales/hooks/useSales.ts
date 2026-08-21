@@ -1,7 +1,7 @@
 // features/sales/hooks/useSales.ts
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  getAll, deleteDocById, genId, fmtDate, createDocWithId, resolveWriteCompanyId, resolveWriteCompanyCode,
+  getAll, deleteDocById, genId, fmtDate, createDocWithId, resolveWriteCompanyId, resolveWriteCompanyCode, resolveWriteGroupId,
 } from '../../../lib/firestore';
 import { getNextDocumentNumber, resolveDocumentDefaults } from '../../../lib/documentNumbering';
 import { COLLECTIONS, db } from '../../../lib/firebase';
@@ -203,6 +203,8 @@ export function useSavePayment(onSuccess: (payment?: any) => void) {
       let orderCreatorId = '';
       if (amount <= 0) throw new Error('Payment amount must be greater than zero');
 
+      const groupId = resolveWriteGroupId(activeCompanyId);
+
       await runTransaction(db, async (transaction) => {
         const paymentRef = doc(db, COLLECTIONS.PAYMENTS, id);
         const paymentSnap = await transaction.get(paymentRef);
@@ -233,6 +235,12 @@ export function useSavePayment(onSuccess: (payment?: any) => void) {
           id,
           amount,
           companyId: activeCompanyId,
+          // Same "Group Admin cannot add stock" bug class: a raw Firestore
+          // transaction bypasses createDocWithId()'s automatic groupId
+          // stamping (Master Plan §3.4), and firestore.rules'
+          // groupAdminCanCreate() requires a `groupId` field to match a
+          // Group Admin actor recording a payment for a sibling Company.
+          ...(groupId ? { groupId } : {}),
           createdBy: user.id,
           updatedBy: user.id,
           createdAt: serverTimestamp(),

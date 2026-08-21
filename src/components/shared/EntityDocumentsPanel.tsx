@@ -26,6 +26,7 @@ import {
 } from '../../lib/caseDocuments';
 import { useCurrentUser } from '../../store/useAppStore';
 import { resolveWriteCompanyId } from '../../lib/firestore';
+import { captureLocation } from '../../lib/geo';
 
 export const ENTITY_SCOPE_FIELD = {
   orders: 'orderId',
@@ -102,7 +103,7 @@ export function EntityDocumentsPanel({ entityId, entityType, companyId, record, 
   // Canonical tenant resolution — never the neutral 'default' placeholder.
   const storagePath = `companies/${resolveWriteCompanyId() || companyId || ''}/${entityType}/${entityId || entityType}/documents`;
 
-  const handleChange = useCallback(async (next: Array<{ id: string; name: string; url?: string; mimeType?: string; size?: number; uploadedAt?: string; uploadedBy?: string; uploaderName?: string; label?: string }>) => {
+  const handleChange = useCallback(async (next: Array<{ id: string; name: string; url?: string; mimeType?: string; size?: number; uploadedAt?: string; uploadedBy?: string; uploaderName?: string; label?: string; location?: import('../../lib/geo').GeoEvidence }>) => {
     const prevIds = new Set(documents.map((d) => d.id));
     const nextIds = new Set(next.map((d) => d.id));
     const added = next.filter((d) => !prevIds.has(d.id));
@@ -119,6 +120,7 @@ export function EntityDocumentsPanel({ entityId, entityType, companyId, record, 
         uploadedBy: currentUser.id,
         uploaderName: currentUser.name,
         label: doc.label,
+        location: doc.location,
         sourceEntityType: ENTITY_SOURCE_TYPE[entityType],
       })),
       ...removed.map((doc) => deleteCaseDocument(doc.id)),
@@ -127,6 +129,15 @@ export function EntityDocumentsPanel({ entityId, entityType, companyId, record, 
     invalidateCaseDocuments();
   }, [documents, scope, currentUser, entityType, invalidateCaseDocuments]);
 
+  const handleCaptureLocation = useCallback(async () => {
+    try {
+      return await captureLocation();
+    } catch {
+      // GPS failure is non-fatal for document capture — the upload proceeds without location.
+      return undefined;
+    }
+  }, []);
+
   return (
     <DocumentManager
       documents={documents}
@@ -134,6 +145,8 @@ export function EntityDocumentsPanel({ entityId, entityType, companyId, record, 
       storagePath={storagePath}
       onChange={handleChange}
       currentUser={{ id: currentUser.id, name: currentUser.name }}
+      captureMode="both"
+      onCaptureLocation={handleCaptureLocation}
     />
   );
 }

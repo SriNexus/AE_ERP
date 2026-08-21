@@ -1340,13 +1340,13 @@ export const TUTORIALS: TutorialDefinition[] = [
   {
     id: 'attendance-quick-tour',
     title: 'Attendance — Quick Tour',
-    description: 'Learn the Attendance workspace — marking attendance, searching records and reading daily presence.',
+    description: 'Learn the Attendance workspace — checking in and out, searching records and reading daily presence.',
     category: 'hr',
     difficulty: 'Beginner',
     estimatedMinutes: 3,
     route: '/attendance',
-    learnings: ['Mark attendance', 'Search attendance records', 'Read presence status', 'Open an attendance record'],
-    keywords: ['attendance', 'present', 'absent', 'leave', 'timesheet', 'hr', 'tour'],
+    learnings: ['Check in and out', 'Search attendance records', 'Read presence status', 'Open an attendance record'],
+    keywords: ['attendance', 'present', 'absent', 'leave', 'timesheet', 'hr', 'tour', 'check in', 'check out'],
     steps: [
       {
         id: 'intro', type: 'info', route: '/attendance',
@@ -1355,10 +1355,10 @@ export const TUTORIALS: TutorialDefinition[] = [
           'Attendance records who was present, on leave, or absent on each day. These records are the ground truth for payroll and for spotting staffing gaps.',
       },
       {
-        id: 'create', type: 'highlight', target: 'attendance-create',
-        title: 'Mark attendance',
+        id: 'actions', type: 'highlight', target: 'attendance-actions',
+        title: 'Two ways to mark your own attendance',
         description:
-          'Mark Attendance records a day’s presence for a team — or catches up on a missed day. Keeping it updated daily means payroll never has to guess.',
+          'Manual Attendance is a one-click action — no form, no picking a date or time. Geo Attendance does the same thing but also verifies you are at the work location via GPS. Your first click of the day checks you in; the next checks you out.',
         placement: 'bottom',
       },
       {
@@ -1392,54 +1392,42 @@ export const TUTORIALS: TutorialDefinition[] = [
 
   {
     id: 'attendance-mark',
-    title: 'Mark Attendance',
-    description: 'The answer to “how do I mark who is present today?” — the daily attendance flow.',
+    title: 'Check In / Check Out',
+    description: 'The answer to “how do I mark my own attendance today?” — the daily check-in/check-out flow.',
     category: 'hr',
     difficulty: 'Beginner',
     estimatedMinutes: 2,
     route: '/attendance',
-    learnings: ['Open the Mark Attendance form', 'Pick the date', 'Set employee status', 'Save the record'],
-    keywords: ['attendance', 'mark', 'present', 'absent', 'daily', 'hr'],
+    learnings: ['Find the attendance action buttons', 'Check in with one click', 'Check out with one click'],
+    keywords: ['attendance', 'mark', 'present', 'absent', 'daily', 'hr', 'check in', 'check out'],
     steps: [
       {
         id: 'intro', type: 'info', route: '/attendance',
-        title: 'Marking the day',
+        title: 'Marking your day',
         description:
-          'At the start of each day — or when catching up — mark who is present, on leave or absent. Five minutes now prevents payroll guesswork at month end.',
+          'There is no form to fill in. The system already knows who you are — one click records the current moment as your check-in or check-out, whichever is next.',
       },
       {
-        id: 'create-button', type: 'highlight', target: 'attendance-create',
-        title: 'The Mark Attendance button',
-        description: 'Top-right of the Attendance screen. Visible to roles with attendance permission.',
+        id: 'actions', type: 'highlight', target: 'attendance-actions',
+        title: 'Manual Attendance and Geo Attendance',
+        description:
+          'Both buttons live here, side by side. Manual Attendance works anywhere. Geo Attendance additionally confirms your GPS location is within the work area before recording the event.',
         placement: 'bottom',
       },
       {
-        id: 'open-form', type: 'click', target: 'attendance-create',
-        title: 'Open the form',
-        description: 'Click Mark Attendance to open the form.',
-        hint: 'Click “Mark Attendance” to continue. Use Skip Step if you prefer not to open the form.',
-        placement: 'bottom',
+        id: 'first-click', type: 'info',
+        title: 'First click of the day',
+        description: 'Automatically records a Check In — no date, time, or status to choose.',
       },
       {
-        id: 'date', type: 'info',
-        title: 'Pick the date',
-        description: 'The form defaults to today. If you are catching up on a missed day, change the date to the correct one.',
-      },
-      {
-        id: 'status', type: 'info',
-        title: 'Set status',
-        description:
-          'Mark each employee Present, Absent or Leave. Status drives the reports and payroll inputs, so accuracy matters more than speed.',
-      },
-      {
-        id: 'save', type: 'info',
-        title: 'Save',
-        description: 'Save records the attendance. For this tutorial you can close the form instead.',
+        id: 'second-click', type: 'info',
+        title: 'Second click of the day',
+        description: 'The same button now records your Check Out and calculates working hours automatically.',
       },
       {
         id: 'done', type: 'complete',
         title: 'Done',
-        description: 'You now know exactly how to mark attendance for the day.',
+        description: 'You now know exactly how to check in and out for the day.',
       },
     ],
   },

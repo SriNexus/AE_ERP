@@ -7,6 +7,7 @@ import { COLLECTIONS, auth, firebaseEnv } from './firebase';
 import { useAppStore } from '../store/useAppStore';
 import { resolveSessionCompanyId } from './tenantRouting';
 import { loadCurrentUserProfile, syncCurrentUserProfile } from './userProfile';
+import { refreshAuthMappingIfStale } from './authIdentity';
 import { registerServiceWorker, getFcmToken, persistDeviceToken, deactivateDeviceTokens } from './fcmTokenManager';
 import { isOfficialDemoCompany } from '../config/demo';
 import { DEMO_COMPANY } from '../config/demoCompany';
@@ -165,6 +166,22 @@ export function useGlobalBoot() {
   // design (skipped), a demo session has its own fixed identity (skipped),
   // and any read failure is swallowed — a stale-but-valid cached identity is
   // still usable, so this must never block boot or log the user out.
+  //
+  // Also (2026-08-21, Group Admin "permission-denied on Stock/etc. even
+  // after the write payload carries the correct groupId" root cause):
+  // refreshing the CLIENT's in-memory identity above is not sufficient on
+  // its own — firestore.rules' actorGroupId() and every groupAdminCan*()
+  // check read groupId/companyId straight from the SERVER-SIDE
+  // user_auth_maps/{authUid} document, which this effect never touched.
+  // That document is otherwise written once at first login
+  // (resolveAuthenticatedErpUser(), src/lib/authIdentity.ts) and never
+  // refreshed again for a session that merely resumes (page reload) rather
+  // than explicitly logging back in — so a company/group reassignment made
+  // while a tab stays open self-healed the client's UI but left every
+  // Group-Admin-scoped write denied for the lifetime of that tab.
+  // refreshAuthMappingIfStale() closes that gap using the exact same
+  // gateway/comparison logic resolveAuthenticatedErpUser() already uses at
+  // login time — no second group-resolution system.
   const profileSyncRef = useRef<string | null>(null);
   useEffect(() => {
     if (!user?.id || user.isOwner || isDemo) return;
@@ -175,6 +192,8 @@ export function useGlobalBoot() {
       try {
         const profile = await loadCurrentUserProfile(user.id);
         if (!cancelled) syncCurrentUserProfile(profile);
+        const authUid = auth.currentUser?.uid;
+        if (authUid) await refreshAuthMappingIfStale(authUid, profile);
       } catch {
         // Best-effort self-heal — see comment above.
       }

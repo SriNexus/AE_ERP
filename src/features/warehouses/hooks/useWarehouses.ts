@@ -21,7 +21,7 @@ export function useSaveWarehouse(editId: string | null, onSuccess: () => void) {
   const user = useCurrentUser();
 
   return useMutation({
-    mutationFn: async (data: WarehouseForm) => {
+    mutationFn: async (data: Record<string, unknown>) => {
       if (editId) {
         // F-16 (Phase 0): audit warehouse edits (previously unlogged).
         const existing = await getOne<any>(COLLECTIONS.WAREHOUSES, editId).catch(() => null);

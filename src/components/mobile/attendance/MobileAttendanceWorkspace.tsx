@@ -7,42 +7,46 @@
  *   - Card-based list matching LeadCard pattern
  *   - Full-screen detail modal with Section/Detail components
  *   - Shared ConfirmDialog for deletes
- *   - Dirty state tracking + confirm close on forms
- *   - mode prop for 'records' | 'create'
+ *
+ * Manual Attendance is a one-click self-service action (ManualAttendancePanel
+ * + AttendanceService.markAttendance()), not a form — mirrors the desktop
+ * Attendance page's "Attendance Actions" row (Manual + Geo, side by side).
  *
  * Reuses:
- *   - useAttendance, useMarkAttendance, useDeleteAttendance, exportAttendanceCSV,
- *     ATTENDANCE_FORM_DEFAULT, ATTENDANCE_STATUSES from features/hr/hooks/useHR.ts
+ *   - useAttendance, useDeleteAttendance, exportAttendanceCSV,
+ *     effectiveAttendanceStatus/InTime/OutTime from features/hr/hooks/useHR.ts
  *   - useEmployees for employee lookup
- *   - fmtDate from lib/firestore
- *   - Shared ui components (Badge, Button, Card, ConfirmDialog, Input, Modal,
- *     Pagination, Select, Textarea) from ../../ui
+ *   - Shared ui components (Badge, Button, Card, ConfirmDialog, Modal,
+ *     Pagination) from ../../ui
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import type React from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import {
   Calendar, Clock, Download, Mail, Phone, Trash2,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { Badge, Button, Card, ConfirmDialog, Input, Modal, Pagination, Select, Textarea, statusBadge } from '../../ui';
+import { Badge, Button, Card, ConfirmDialog, Modal, Pagination, statusBadge } from '../../ui';
 import {
-  useAttendance, useMarkAttendance, useDeleteAttendance, exportAttendanceCSV,
-  ATTENDANCE_FORM_DEFAULT, ATTENDANCE_STATUSES, type AttendanceForm,
+  useAttendance, useDeleteAttendance, exportAttendanceCSV,
+  effectiveAttendanceStatus, effectiveInTime, effectiveOutTime,
 } from '../../../features/hr/hooks/useHR';
 import { useEmployees } from '../../../features/employees/hooks/useEmployees';
 
 import { usePermissions } from '../../../lib/permissions';
 import { cn } from '../../../utils/cn';
 import { MobileTimelinePreview } from '../shared/MobileTimelinePreview';
+import CheckInPanel from '../../../components/attendance/CheckInPanel';
+import ManualAttendancePanel from '../../../components/attendance/ManualAttendancePanel';
+import { AttendanceService } from '../../../services/AttendanceService';
+import { computeDashboardKPIs } from '../../../features/attendance/services/dashboardKPIs';
+import { formatDistanceMeters } from '../../../lib/geo';
 
 const PER_PAGE = 15;
 const ALL = 'All';
 
 type AttendanceRecord = Record<string, any> & { id: string };
-type Mode = 'records' | 'create';
 type AttendanceFilters = {
   search: string;
   status: string;
@@ -85,49 +89,34 @@ function downloadAttendanceCsv(rows: AttendanceRecord[], filename: string) {
   URL.revokeObjectURL(a.href);
 }
 
-export default function MobileAttendanceWorkspace({ mode }: { mode: Mode }) {
-  const navigate = useNavigate();
+export default function MobileAttendanceWorkspace() {
   const [params, setParams] = useSearchParams();
-  const qc = useQueryClient();
   const perms = usePermissions();
   const { data: attendance = [], isLoading, isError, refetch } = useAttendance();
   const { data: employees = [] } = useEmployees();
   const deleteMut = useDeleteAttendance();
 
+  // Phase 7: self-service check-in — today's attendance for the current user
+  const { data: todayAttendance } = useQuery({
+    queryKey: ['attendance', 'today'],
+    queryFn: () => AttendanceService.getTodayAttendanceForCurrentUser(),
+    staleTime: 30_000,
+  });
+
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(() => Math.max(1, Number(params.get('page')) || 1));
-  const [formOpen, setFormOpen] = useState(false);
-  const [editingRecord, setEditingRecord] = useState<AttendanceRecord | null>(null);
-  const [form, setForm] = useState<AttendanceForm>({ ...ATTENDANCE_FORM_DEFAULT });
   const [viewRecord, setViewRecord] = useState<AttendanceRecord | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [dirty, setDirty] = useState(false);
-  const [confirmClose, setConfirmClose] = useState(false);
-  const createParam = params.get('create');
 
-  useEffect(() => {
-    if (mode === 'create') setFormOpen(true);
-  }, [mode]);
-
-  useEffect(() => {
-    if (mode !== 'records' || createParam !== '1') return;
-    setEditingRecord(null);
-    setForm({ ...ATTENDANCE_FORM_DEFAULT, date: new Date().toISOString().split('T')[0] });
-    setDirty(false);
-    setFormOpen(true);
-  }, [mode, createParam]);
+  // Phase 13: GPS attendance KPIs derived from existing records
+  const gpsKPIs = useMemo(() => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    return computeDashboardKPIs(attendance as any[], (employees as any[]).length, todayStr);
+  }, [attendance, employees]);
 
   const canEdit = perms.can('attendance', 'create');
   const canDelete = perms.can('attendance', 'delete');
   const canExport = perms.can('attendance', 'export');
-
-  const saveMut = useMarkAttendance(() => {
-    setFormOpen(false);
-    setEditingRecord(null);
-    setForm({ ...ATTENDANCE_FORM_DEFAULT });
-    setDirty(false);
-    void qc.invalidateQueries({ queryKey: ['attendance'] });
-  });
 
   const filters = useMemo<AttendanceFilters>(() => ({
     search: params.get('q') || '',
@@ -168,35 +157,6 @@ export default function MobileAttendanceWorkspace({ mode }: { mode: Mode }) {
     });
   }
 
-  function requestCloseForm() {
-    if (dirty) { setConfirmClose(true); return; }
-    closeForm();
-  }
-
-  function closeForm() {
-    setFormOpen(false);
-    setEditingRecord(null);
-    setForm({ ...ATTENDANCE_FORM_DEFAULT });
-    setDirty(false);
-    if (mode === 'create') { navigate('/app', { replace: true }); return; }
-    if (params.get('create') === '1') {
-      const next = new URLSearchParams(params);
-      next.delete('create');
-      setParams(next, { replace: true });
-    }
-  }
-
-  function updateForm(patch: Partial<AttendanceForm>) {
-    setForm((current) => ({ ...current, ...patch }));
-    setDirty(true);
-  }
-
-  function submitAttendance(event: React.FormEvent) {
-    event.preventDefault();
-    if (!form.employeeId || !form.date) return toast.error('Employee & date required');
-    saveMut.mutate(form);
-  }
-
   async function deleteSelected() {
     await Promise.all(selectedRows.map((a) => deleteMut.mutateAsync(a.id)));
     setSelected(new Set());
@@ -209,29 +169,42 @@ export default function MobileAttendanceWorkspace({ mode }: { mode: Mode }) {
     toast.success(`Exported ${rows.length} record${rows.length > 1 ? 's' : ''}`);
   }
 
-  if (mode === 'create') {
-    return (
-      <AttendanceDialogs
-        formOpen={formOpen}
-        form={form}
-        editingRecord={editingRecord}
-        saving={saveMut.isPending}
-        dirty={dirty}
-        confirmClose={confirmClose}
-        employees={employees as any[]}
-        onCloseForm={requestCloseForm}
-        onDiscard={() => { setConfirmClose(false); closeForm(); }}
-        onKeepEditing={() => setConfirmClose(false)}
-        onChange={updateForm}
-        onSubmit={submitAttendance}
-      />
-    );
-  }
-
   return (
     <div className="space-y-4 pb-2 pt-2">
       <div className="px-1 pb-1 pt-2">
         <h1 data-tour="mobile-attendance-header" className="text-xl font-bold text-[var(--color-text)]">Attendance</h1>
+      </div>
+
+      {/* Attendance Actions: Manual (no GPS) + Geo (self-service GPS),
+          equivalent size/hierarchy, side by side. */}
+      <div className="px-1" data-tour="attendance-actions">
+        <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">
+          Attendance Actions
+        </p>
+        <div className="grid grid-cols-1 gap-2">
+          <ManualAttendancePanel todayRecord={todayAttendance} isLoading={isLoading} />
+          <CheckInPanel todayRecord={todayAttendance} isLoading={isLoading} />
+        </div>
+      </div>
+
+      {/* Phase 13: GPS Attendance Dashboard KPIs */}
+      <div className="px-1 grid grid-cols-2 gap-2">
+        <Card className="rounded-xl p-3">
+          <div className="text-xs font-medium text-[var(--color-text-muted)]">GPS Check-In</div>
+          <div className="text-lg font-bold text-[var(--color-text)]">{gpsKPIs.checkedInGPS}</div>
+        </Card>
+        <Card className="rounded-xl p-3">
+          <div className="text-xs font-medium text-[var(--color-text-muted)]">Late (GPS)</div>
+          <div className="text-lg font-bold text-amber-600">{gpsKPIs.lateGPS}</div>
+        </Card>
+        <Card className="rounded-xl p-3">
+          <div className="text-xs font-medium text-[var(--color-text-muted)]">Early Exit</div>
+          <div className="text-lg font-bold text-orange-600">{gpsKPIs.earlyExitCount}</div>
+        </Card>
+        <Card className="rounded-xl p-3">
+          <div className="text-xs font-medium text-[var(--color-text-muted)]">Missing Today</div>
+          <div className="text-lg font-bold text-rose-600">{gpsKPIs.missingToday}</div>
+        </Card>
       </div>
 
       {selected.size > 0 && (
@@ -288,21 +261,6 @@ export default function MobileAttendanceWorkspace({ mode }: { mode: Mode }) {
         onDelete={(a) => { setSelected(new Set([a.id])); setViewRecord(null); setDeleteOpen(true); }}
       />
 
-      <AttendanceDialogs
-        formOpen={formOpen}
-        form={form}
-        editingRecord={editingRecord}
-        saving={saveMut.isPending}
-        dirty={dirty}
-        confirmClose={confirmClose}
-        employees={employees as any[]}
-        onCloseForm={requestCloseForm}
-        onDiscard={() => { setConfirmClose(false); closeForm(); }}
-        onKeepEditing={() => setConfirmClose(false)}
-        onChange={updateForm}
-        onSubmit={submitAttendance}
-      />
-
       <ConfirmDialog
         open={deleteOpen}
         onClose={() => setDeleteOpen(false)}
@@ -325,8 +283,11 @@ function AttendanceCard({ record, employee, selected, onSelect, onView }: {
   onView: () => void;
 }) {
   const empName = record.employee || employee?.name || record.employeeId || '—';
-  const isLate = record.status === 'Late';
-  const isAbsent = record.status === 'Absent';
+  const status = effectiveAttendanceStatus(record);
+  const isLate = status === 'Late';
+  const isAbsent = status === 'Absent';
+  const inTime = effectiveInTime(record);
+  const outTime = effectiveOutTime(record);
   return (
     <Card data-tour="attendance-row" className={cn(
       'rounded-xl border border-[var(--color-border-subtle)] p-3 shadow-sm transition-shadow',
@@ -347,13 +308,13 @@ function AttendanceCard({ record, employee, selected, onSelect, onView }: {
           <p className="truncate text-[15px] font-bold leading-5 text-[var(--color-text)]">{empName}</p>
           <p className="mt-0.5 truncate text-xs font-medium text-[var(--color-text-muted)]">{record.date || '—'}</p>
           <div className="mt-2 space-y-0.5 text-xs leading-5 text-[var(--color-text-muted)]">
-            {record.inTime && (
-              <p className="truncate"><Clock className="inline h-3 w-3 mr-0.5" />{record.inTime}{record.outTime ? ` - ${record.outTime}` : ''}</p>
+            {inTime && (
+              <p className="truncate"><Clock className="inline h-3 w-3 mr-0.5" />{inTime}{outTime ? ` - ${outTime}` : ''}</p>
             )}
             {record.notes && <p className="truncate italic">{record.notes}</p>}
           </div>
           <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-            {statusBadge(record.status || 'Present')}
+            {statusBadge(status || 'Present')}
             {employee?.department ? <Badge variant="gray">{employee.department}</Badge> : null}
           </div>
         </button>
@@ -391,62 +352,6 @@ function AttendanceSkeletonCard() {
   );
 }
 
-/* ── Attendance Dialogs (Create form) ─────────────────────── */
-
-function AttendanceDialogs({ formOpen, form, editingRecord, saving, dirty, confirmClose, employees, onCloseForm, onDiscard, onKeepEditing, onChange, onSubmit }: {
-  formOpen: boolean;
-  form: AttendanceForm;
-  editingRecord: AttendanceRecord | null;
-  saving: boolean;
-  dirty: boolean;
-  confirmClose: boolean;
-  employees: any[];
-  onCloseForm: () => void;
-  onDiscard: () => void;
-  onKeepEditing: () => void;
-  onChange: (patch: Partial<AttendanceForm>) => void;
-  onSubmit: (event: React.FormEvent) => void;
-}) {
-  return (
-    <>
-      <Modal open={formOpen} onClose={onCloseForm} title="Mark Attendance" size="full">
-        <form onSubmit={onSubmit} className="space-y-4">
-          <Select label="Employee *" required value={form.employeeId}
-            onChange={(event) => {
-              const emp = employees.find((e: any) => e.id === event.target.value);
-              onChange({ employeeId: event.target.value, employee: emp?.name || '' });
-            }}
-            options={[
-              { label: 'Select Employee', value: '' },
-              ...employees
-                .filter((e: any) => e.status !== 'Terminated' && e.status !== 'Inactive')
-                .map((e: any) => ({ label: e.name, value: e.id })),
-            ]} />
-          <Input label="Date *" type="date" required value={form.date} onChange={(event) => onChange({ date: event.target.value })} />
-          <Select label="Status" value={form.status} onChange={(event) => onChange({ status: event.target.value })}
-            options={ATTENDANCE_STATUSES.map(s => ({ label: s, value: s }))} />
-          <div className="grid grid-cols-2 gap-3">
-            <Input label="In Time" type="time" value={form.inTime} onChange={(event) => onChange({ inTime: event.target.value })} />
-            <Input label="Out Time" type="time" value={form.outTime} onChange={(event) => onChange({ outTime: event.target.value })} />
-          </div>
-          <Textarea label="Notes" value={form.notes} onChange={(event) => onChange({ notes: event.target.value })} rows={2} />
-          {dirty ? <p className="text-xs font-medium text-[var(--color-warning-text)]">Unsaved changes</p> : null}
-          <div className="flex gap-2">
-            <Button type="button" variant="outline" className="flex-1" onClick={onCloseForm}>Cancel</Button>
-            <Button type="submit" className="flex-1" loading={saving}>Mark Attendance</Button>
-          </div>
-        </form>
-      </Modal>
-      <ConfirmDialog
-        open={confirmClose}
-        onClose={onKeepEditing}
-        onConfirm={onDiscard}
-        title="Discard Changes"
-        message="Close this form and discard unsaved changes?"
-      />
-    </>
-  );
-}
 
 /* ── Attendance View Modal ─────────────────────────────────── */
 
@@ -464,7 +369,7 @@ function AttendanceViewModal({ record, canEdit, canDelete, onClose, onEdit, onDe
       <div className="space-y-4">
         <section className="space-y-3">
           <div className="flex flex-wrap items-center gap-2">
-            {statusBadge(record.status || 'Present')}
+            {statusBadge(effectiveAttendanceStatus(record) || 'Present')}
           </div>
           <div className="grid grid-cols-2 gap-2">
             <Detail label="Employee" value={record.employee || '—'} />
@@ -473,8 +378,15 @@ function AttendanceViewModal({ record, canEdit, canDelete, onClose, onEdit, onDe
         </section>
 
         <Section title="Timing">
-          <Detail label="In Time" value={record.inTime || 'Not recorded'} />
-          <Detail label="Out Time" value={record.outTime || 'Not recorded'} />
+          <Detail label="In Time" value={effectiveInTime(record) || 'Not recorded'} />
+          <Detail label="Out Time" value={effectiveOutTime(record) || 'Not recorded'} />
+          <Detail
+            label="Distance"
+            value={
+              formatDistanceMeters(record.checkOut?.distanceFromLocationMeters ?? record.checkIn?.distanceFromLocationMeters)
+              || 'Not recorded'
+            }
+          />
         </Section>
 
         <Section title="Notes">

@@ -13,6 +13,7 @@ import { getAll, getAllPlatform, getOne, fmtDate } from '../lib/firestore';
 import { logCreate, logUpdate, logRoleChange, logPermissionChange, logDelete } from '../lib/auditLogger';
 import { createUserProjection, updateUserProjection, deleteUserProjection } from '../features/users/hooks/useUsers';
 import { provisionAuthenticatedUser } from '../lib/authProvisioning';
+import { EmployeeDomainService } from '../services/EmployeeDomainService';
 import { isEligibleManagerOption, type OrgRoleLike, type OrgUserLike } from '../features/users/orgHierarchy';
 import { useGroupCompanies } from '../features/company/hooks/useCompanies';
 import { COLLECTIONS, db } from '../lib/firebase';
@@ -260,6 +261,28 @@ export default function UsersPage() {
         });
         // F-16 (Phase 0): audit user creation.
         await logCreate('user', authId, { name: rest.name, email: rest.email, role: rest.role, status: rest.status }, 'users');
+
+        // User → Employee provisioning: every operational login gets a
+        // corresponding HR/Employee record, linked (not duplicated) via
+        // EmployeeDomainService.linkOrCreateForUser — reuses an existing
+        // Employee sharing this phone's master identity when one predates
+        // this login, otherwise creates a new one. Best-effort: the User
+        // account itself already exists and must not be rolled back merely
+        // because HR-side provisioning failed — surface a distinct warning
+        // instead of a false overall failure.
+        try {
+          const employeeId = await EmployeeDomainService.linkOrCreateForUser(authId, {
+            name: rest.name,
+            phone: rest.phone,
+            email: rest.email,
+            role: rest.role,
+            companyId: newUserEffectiveCompanyId,
+            createdBy: currentUser?.id,
+          });
+          await updateUserProjection(authId, { employeeId });
+        } catch (employeeError: any) {
+          toast.error(`User created, but the linked Employee/HR record could not be provisioned: ${employeeError?.message || 'unknown error'}`);
+        }
       }
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['users'] }); toast.success(editId ? 'Updated' : 'User added'); closeForm(); },

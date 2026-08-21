@@ -5,7 +5,7 @@
  * the COMPANY (a tenant), not of a Customer or Project — never conflate this
  * with `Customer.type` (B2B/B2C classification, Phase 2) or `Project.projectType`
  * (Residential/Commercial/Industrial, Phase 4). See
- * docs/NEOZY_MASTER_IMPLEMENTATION_BLUEPRINT.md §8 for the full enforcement table.
+ * docs/implementation/NEOZY_MASTER_IMPLEMENTATION_BLUEPRINT.md §8 for the full enforcement table.
  */
 import type { Module } from './permissions';
 

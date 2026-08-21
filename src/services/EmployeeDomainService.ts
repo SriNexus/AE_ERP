@@ -1,6 +1,7 @@
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { createDocWithId, genId, getOne, updateDocById } from '../lib/firestore';
-import { COLLECTIONS } from '../lib/firebase';
-import { resolveOrCreateMasterUser } from '../lib/userIdentity';
+import { COLLECTIONS, db } from '../lib/firebase';
+import { masterUserId, normalizePhone, resolveOrCreateMasterUser } from '../lib/userIdentity';
 
 type EmployeeDelta = Record<string, unknown>;
 
@@ -68,4 +69,77 @@ export class EmployeeDomainService {
       await updateDocById(COLLECTIONS.USERS, userId, userDelta);
     }
   }
+
+  /**
+   * User → Employee provisioning (closes the "user created but no
+   * corresponding Employee/HR record" gap).
+   *
+   * Called after a new login-capable User is created (Users.tsx), never the
+   * other way around — `create()` above already handles Employee-first
+   * provisioning via resolveOrCreateMasterUser(), which this method
+   * deliberately does NOT call: `userId` here is already a real,
+   * just-created Firebase-Auth-keyed users/{id} document, so no further
+   * phone-based identity resolution is needed (and calling it again would
+   * itself create a second, MUSR-prefixed users/ document — the very
+   * duplicate-user bug createProjectionWithUserId() was fixed for).
+   *
+   * Idempotent / duplicate-safe:
+   *  - a User already linked to an Employee (Employee.userId === userId)
+   *    is returned as-is — never creates a second Employee for one login.
+   *  - an EXISTING Employee that predates this login (created by HR via
+   *    `create()` above, which links Employee.userId to a deterministic
+   *    MUSR-{companyId}-{phone} identity — never a raw phone-string
+   *    comparison, which would be unreliable against inconsistently
+   *    formatted Employee.phone values) is re-linked to this real login
+   *    instead of leaving a duplicate, unlinked Employee behind.
+   *  - only when neither match is found is a brand-new Employee created.
+   */
+  static async linkOrCreateForUser(
+    userId: string,
+    userData: {
+      name?: unknown; phone?: unknown; email?: unknown; role?: unknown;
+      companyId: string; createdBy?: unknown;
+    },
+  ): Promise<string> {
+    const companyId = stringValue(userData.companyId);
+    if (!companyId) throw new Error('companyId is required to link an employee');
+    const createdBy = stringValue(userData.createdBy) || 'system';
+
+    const alreadyLinked = await findEmployeeByUserId(companyId, userId);
+    if (alreadyLinked) return alreadyLinked.id;
+
+    const phone = normalizePhone(stringValue(userData.phone));
+    if (phone) {
+      const candidateMusrId = masterUserId(companyId, phone);
+      const byMasterIdentity = await findEmployeeByUserId(companyId, candidateMusrId);
+      if (byMasterIdentity) {
+        await updateDocById(COLLECTIONS.EMPLOYEES, byMasterIdentity.id, { userId });
+        return byMasterIdentity.id;
+      }
+    }
+
+    const employeeId = genId.employee();
+    await createDocWithId(COLLECTIONS.EMPLOYEES, employeeId, {
+      id: employeeId,
+      companyId,
+      userId,
+      name: stringValue(userData.name),
+      phone: stringValue(userData.phone),
+      email: stringValue(userData.email),
+      role: stringValue(userData.role) || 'Employee',
+      status: 'Active',
+      createdBy,
+    });
+    return employeeId;
+  }
+}
+
+async function findEmployeeByUserId(companyId: string, userId: string): Promise<{ id: string } | null> {
+  const snap = await getDocs(query(
+    collection(db, COLLECTIONS.EMPLOYEES),
+    where('companyId', '==', companyId),
+    where('userId', '==', userId),
+  ));
+  const live = snap.docs.filter((d) => (d.data() as Record<string, unknown>).isDeleted !== true);
+  return live.length > 0 ? { id: live[0].id } : null;
 }

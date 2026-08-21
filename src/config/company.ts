@@ -51,6 +51,11 @@ export type CompanyConfig = {
   primaryColor: string;    // hex
   accentColor: string;     // hex
   status: string;
+  /** Phase 5/Geo-Attendance: default attendance location for this company.
+   * Used as fallback when the employee's assigned warehouse has no geo config. */
+  latitude?: number;
+  longitude?: number;
+  geofenceRadiusMeters?: number;
 };
 
 // ─── DEFAULT COMPANY (replace with your company details) ───
@@ -87,6 +92,9 @@ export const DEFAULT_COMPANY: CompanyConfig = {
   accentColor: '#10b981',
   status: 'Active',
   businessMode: 'Both',
+  latitude: 19.0760,
+  longitude: 72.8777,
+  geofenceRadiusMeters: 500,
 };
 
 // ─── ROLES ─────────────────────────────────────────────────

@@ -79,6 +79,11 @@ const ID_GA_NOGROUP = 'MUSR-GA-NOGROUP';
 const WAREHOUSE_A1 = 'WH-A1';
 const WAREHOUSE_A2 = 'WH-A2';
 const WAREHOUSE_B1 = 'WH-B1';
+// CO-C's warehouse (GROUP-A sibling company) — needed for GroupAdmin
+// sibling-company stock-write tests, where the actor's own auth-map
+// companyId (CO-A) differs from the target document's companyId (CO-C),
+// isolating the groupAdminCanCreate()/Update() branch specifically.
+const WAREHOUSE_C1 = 'WH-C1';
 const UID_WH_A1 = 'uid-wh-a1';
 const ID_WH_A1 = 'MUSR-WH-A1';
 const UID_OP_A2 = 'uid-op-a2';
@@ -226,6 +231,7 @@ async function seed() {
     await setDoc(doc(db, 'warehouses', WAREHOUSE_A1), { id: WAREHOUSE_A1, companyId: COMPANY_A, groupId: 'GROUP-A', name: 'Warehouse A1', status: 'Active' });
     await setDoc(doc(db, 'warehouses', WAREHOUSE_A2), { id: WAREHOUSE_A2, companyId: COMPANY_A, groupId: 'GROUP-A', name: 'Warehouse A2', status: 'Active' });
     await setDoc(doc(db, 'warehouses', WAREHOUSE_B1), { id: WAREHOUSE_B1, companyId: COMPANY_B, groupId: 'GROUP-B', name: 'Warehouse B1', status: 'Active' });
+    await setDoc(doc(db, 'warehouses', WAREHOUSE_C1), { id: WAREHOUSE_C1, companyId: COMPANY_C, groupId: 'GROUP-A', name: 'Warehouse C1', status: 'Active' });
 
     const warehouseIdentities: Array<{ uid: string; userId: string; companyId: string; email: string; role: string; warehouseId?: string }> = [
       // Warehouse-role in CO-A, assigned to WH-A1 (own-warehouse scope).
@@ -876,6 +882,92 @@ describe('Phase 3 (F-07) — non-restricted roles keep company/group-wide wareho
     const db = ctx(UID_SUPER_ADMIN, 'super@neozy.test');
     await assertSucceeds(getDoc(doc(db, 'stock', 'STK-A1')));
     await assertSucceeds(getDoc(doc(db, 'stock', 'STK-B1')));
+  });
+  // Regression coverage for the "Group Admin cannot add stock" runtime bug:
+  // warehouseActorCanCreate()/Update() OR in groupAdminCanCreate()/Update(),
+  // both of which require a `groupId` field on the written document
+  // (groupAdminCanCreate/Update → hasGroupId()). The client-side stock write
+  // path (useSaveStockEntry/stockIn) used a raw Firestore transaction that
+  // bypassed createDocWithId()/updateDocById()'s automatic groupId stamping,
+  // so a Group Admin write reaching only the groupAdminCanCreate() branch
+  // (e.g. acting on a sibling Company of their Group, where the actor's own
+  // auth-map companyId does not match the target document's companyId) was
+  // silently denied even though the UI showed the action as available. These
+  // tests pin the rules-layer contract the client fix now satisfies.
+  it('GroupAdmin CAN create stock in a sibling Company of their Group WHEN groupId is present', async () => {
+    const db = ctx(UID_GA_A, 'ga.a@neozy.test');
+    await assertSucceeds(setDoc(doc(db, 'stock', 'STK-GA-NEW'), {
+      id: 'STK-GA-NEW', companyId: COMPANY_C, groupId: 'GROUP-A', warehouseId: WAREHOUSE_C1,
+      productId: 'PROD-GA', availableQty: 1, reservedQty: 0, onHandQty: 1, isDeleted: false,
+    }));
+  });
+  it('GroupAdmin CANNOT create stock in a sibling Company of their Group WITHOUT groupId (the pre-fix bug shape)', async () => {
+    const db = ctx(UID_GA_A, 'ga.a@neozy.test');
+    await assertFails(setDoc(doc(db, 'stock', 'STK-GA-NOGROUP'), {
+      id: 'STK-GA-NOGROUP', companyId: COMPANY_C, warehouseId: WAREHOUSE_C1,
+      productId: 'PROD-GA2', availableQty: 1, reservedQty: 0, onHandQty: 1, isDeleted: false,
+    }));
+  });
+  it('GroupAdmin CANNOT create stock in another Group even with a forged matching groupId', async () => {
+    const db = ctx(UID_GA_A, 'ga.a@neozy.test');
+    await assertFails(setDoc(doc(db, 'stock', 'STK-GA-FORGED'), {
+      id: 'STK-GA-FORGED', companyId: COMPANY_B, groupId: 'GROUP-A', warehouseId: WAREHOUSE_B1,
+      productId: 'PROD-GA3', availableQty: 1, reservedQty: 0, onHandQty: 1, isDeleted: false,
+    }));
+  });
+});
+
+// Reproduces the ACTUAL real-world "admin@neozy.in still gets
+// permission-denied even though the previous fix stamps the correct groupId"
+// report end-to-end. Root cause: firestore.rules' actorGroupId() (every
+// groupAdminCan*() check) reads groupId from user_auth_maps/{authUid} — a
+// document written ONCE at first login and never refreshed again for an
+// ordinary session. A Company Admin promoted to Group Admin (a fresh groupId
+// stamped onto their LIVE users/{id} profile) keeps a mapping that was
+// created before that promotion and so still carries no groupId at all —
+// distinct from the already-covered "GroupAdmin identity legitimately has no
+// group" fail-closed case (UID_GA_NOGROUP above), where the users doc ALSO
+// has no groupId. Here the live profile is a real, fully-promoted Group
+// Admin; only the auth map lagged behind.
+describe('Regression — stale user_auth_maps (promoted-after-mapping-created) blocks Group Admin writes until self-healed', () => {
+  const UID_GA_STALE = 'uid-ga-stale';
+  const ID_GA_STALE = 'MUSR-GA-STALE';
+
+  beforeEach(async () => {
+    // Simulates the real production shape: users/{id}.groupId is the live,
+    // correct value (as if an admin just promoted this actor to Group Admin
+    // of GROUP-A), but their user_auth_maps/{authUid} entry predates that
+    // promotion and was never told about it — written directly here
+    // (bypassing rules) because no ordinary client write can backdate a
+    // mapping into this already-inconsistent state; it can only arise from
+    // the mapping having been created earlier, before the promotion.
+    await env.withSecurityRulesDisabled(async (unrestricted) => {
+      const db = unrestricted.firestore();
+      await setDoc(doc(db, 'users', ID_GA_STALE), { ...userDoc(ID_GA_STALE, 'GroupAdmin', COMPANY_A, 'ga.stale@neozy.test'), groupId: 'GROUP-A' });
+      await setDoc(doc(db, 'user_auth_maps', UID_GA_STALE), mappingDoc(UID_GA_STALE, ID_GA_STALE, COMPANY_A, 'ga.stale@neozy.test')); // no groupId
+    });
+  });
+
+  it('reproduces the bug: stock create in a sibling Company is DENIED while the mapping is stale, even with a correct groupId payload', async () => {
+    const db = ctx(UID_GA_STALE, 'ga.stale@neozy.test');
+    await assertFails(setDoc(doc(db, 'stock', 'STK-GA-STALE-1'), {
+      id: 'STK-GA-STALE-1', companyId: COMPANY_C, groupId: 'GROUP-A', warehouseId: WAREHOUSE_C1,
+      productId: 'PROD-STALE', availableQty: 1, reservedQty: 0, onHandQty: 1, isDeleted: false,
+    }));
+  });
+
+  it('proves the fix: after the mapping self-heal (adding groupId for the first time), the SAME write now succeeds', async () => {
+    const db = ctx(UID_GA_STALE, 'ga.stale@neozy.test');
+    // The exact write authIdentity.ts's refreshAuthMappingIfStale()/
+    // resolveAuthenticatedErpUser() perform — a groupId-less mapping is
+    // allowed to receive its first groupId (already proven generically at
+    // "user_auth_maps groupId mirrors users.groupId", line ~500 above).
+    await assertSucceeds(updateDoc(doc(db, 'user_auth_maps', UID_GA_STALE), { groupId: 'GROUP-A', updatedAt: new Date().toISOString() }));
+
+    await assertSucceeds(setDoc(doc(db, 'stock', 'STK-GA-STALE-2'), {
+      id: 'STK-GA-STALE-2', companyId: COMPANY_C, groupId: 'GROUP-A', warehouseId: WAREHOUSE_C1,
+      productId: 'PROD-STALE2', availableQty: 1, reservedQty: 0, onHandQty: 1, isDeleted: false,
+    }));
   });
 });
 

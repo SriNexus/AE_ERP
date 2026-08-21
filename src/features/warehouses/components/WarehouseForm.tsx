@@ -46,6 +46,35 @@ export function WarehouseFormComponent({ form, onChange, onSubmit, onCancel, loa
         </FormRow>
       </FormSection>
 
+      <FormSection title="Geo-Fence / Attendance Location">
+        <p className="text-xs text-[var(--color-text-muted)] mb-2">
+          Configure GPS coordinates for geo-fenced attendance check-in/check-out. Employees assigned to this warehouse will use these coordinates as their attendance location.
+        </p>
+        <FormRow>
+          <Input
+            label="Latitude"
+            value={form.latitude}
+            onChange={e => set('latitude', e.target.value)}
+            placeholder="e.g. 18.5204"
+            inputMode="decimal"
+          />
+          <Input
+            label="Longitude"
+            value={form.longitude}
+            onChange={e => set('longitude', e.target.value)}
+            placeholder="e.g. 73.8567"
+            inputMode="decimal"
+          />
+        </FormRow>
+        <Input
+          label="Geofence Radius (meters)"
+          value={form.geofenceRadiusMeters}
+          onChange={e => set('geofenceRadiusMeters', e.target.value)}
+          placeholder="e.g. 200"
+          inputMode="decimal"
+        />
+      </FormSection>
+
       <Textarea label="Notes" value={form.notes} onChange={e => set('notes', e.target.value)} rows={2} />
 
       <div className="flex justify-end gap-2">

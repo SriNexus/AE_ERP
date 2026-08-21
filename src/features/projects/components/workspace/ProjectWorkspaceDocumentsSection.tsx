@@ -27,6 +27,7 @@ import { updateDocById, resolveWriteCompanyId } from '../../../../lib/firestore'
 import { COLLECTIONS } from '../../../../lib/firebase';
 import { useCurrentUser } from '../../../../store/useAppStore';
 import { useCaseDocuments, useInvalidateCaseDocuments, resolveDocumentsFor, createCaseDocument, deleteCaseDocument, type CaseDocument } from '../../../../lib/caseDocuments';
+import { captureLocation } from '../../../../lib/geo';
 import type { ProjectRecord } from '../../types';
 
 interface Props {
@@ -69,6 +70,7 @@ function toNeozyDocument(doc: CaseDocument): NeozyDocument {
     label: doc.label,
     uploadedBy: doc.uploadedBy,
     uploaderName: doc.uploaderName,
+    location: doc.location,
   };
 }
 
@@ -116,6 +118,7 @@ export default function ProjectWorkspaceDocumentsSection({ project, isEditing, a
         uploadedBy: currentUser.id,
         uploaderName: currentUser.name,
         label: doc.label,
+        location: doc.location,
         sourceEntityType: 'project',
       })),
       ...removedFromShared.map((id) => deleteCaseDocument(id)),
@@ -130,6 +133,15 @@ export default function ProjectWorkspaceDocumentsSection({ project, isEditing, a
     onSaved();
   }, [project, documents, sharedDocs, legacyDocs, scope, currentUser, invalidateCaseDocuments, onSaved]);
 
+  const handleCaptureLocation = useCallback(async () => {
+    try {
+      return await captureLocation();
+    } catch {
+      // GPS failure is non-fatal for document capture — the upload proceeds without location.
+      return undefined;
+    }
+  }, []);
+
   return (
     <DocumentManager
       documents={documents}
@@ -137,6 +149,8 @@ export default function ProjectWorkspaceDocumentsSection({ project, isEditing, a
       storagePath={storagePath}
       onChange={handleChange}
       currentUser={{ id: currentUser.id, name: currentUser.name }}
+      captureMode="both"
+      onCaptureLocation={handleCaptureLocation}
     />
   );
 }

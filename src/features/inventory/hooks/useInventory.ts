@@ -1,7 +1,7 @@
 // features/inventory/hooks/useInventory.ts
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate,
+  getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate, resolveWriteGroupId,
 } from '../../../lib/firestore';
 import { COLLECTIONS } from '../../../lib/firebase';
 import { useCurrentUser, useAppStore } from '../../../store/useAppStore';
@@ -184,6 +184,14 @@ export function useSaveStockEntry(onSuccess: () => void) {
       const { sanitizePayload } = await import('../../../lib/sanitizer');
       const stockId = stockSummaryId(activeCompanyId, data.productId, data.warehouseId);
       const transactionId = genId.generic('TXN');
+      // Group Admin "cannot add stock" root cause: this write goes through a
+      // raw Firestore transaction, bypassing createDocWithId()'s automatic
+      // groupId stamping (Master Plan §3.4). firestore.rules'
+      // groupAdminCanCreate()/groupAdminCanUpdate() both require a `groupId`
+      // field on the document — without it, a Group Admin's otherwise
+      // rules-supported stock write is silently denied even though the UI
+      // shows "Add Stock"/"Adjust Stock" as available.
+      const groupId = resolveWriteGroupId(activeCompanyId);
 
       await runTransaction(db, async (transaction) => {
         const stockRef = doc(db, COLLECTIONS.STOCK, stockId);
@@ -214,6 +222,7 @@ export function useSaveStockEntry(onSuccess: () => void) {
           transactionId,
           movementAt: serverTimestamp(),
           companyId: activeCompanyId,
+          ...(groupId ? { groupId } : {}),
           updatedBy: user.id,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -231,6 +240,7 @@ export function useSaveStockEntry(onSuccess: () => void) {
           reservedQty: currentReserved,
           unit: data.unit,
           companyId: activeCompanyId,
+          ...(groupId ? { groupId } : {}),
           updatedBy: user.id,
           updatedAt: serverTimestamp(),
           createdAt: stockSnap.exists() ? stockSnap.data().createdAt : serverTimestamp(),

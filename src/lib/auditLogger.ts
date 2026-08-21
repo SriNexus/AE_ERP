@@ -33,7 +33,14 @@ export type AuditActionType =
   | 'failure' | 'security_event'
   | 'scheduler_execution'
   | 'unauthorized_access'
-  | 'demo_activity';
+  | 'demo_activity'
+  // Phase 15: Admin correction of GPS-verified attendance evidence
+  | 'attendance_correction'
+  // Reserved/unused — documented per §17 of the Master Plan. There is no
+  // persistence of blocked geofence attempts in the current architecture,
+  // so no detection logic can observe this event type. Kept as a forward
+  // placeholder only.
+  | 'geofence_violation';
 
 export type AuditSeverity = 'info' | 'success' | 'warning' | 'danger' | 'critical';
 

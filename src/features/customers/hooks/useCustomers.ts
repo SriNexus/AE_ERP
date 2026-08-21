@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { doc, runTransaction, serverTimestamp, type Transaction } from 'firebase/firestore';
-import { createDocWithId, getAll, genId, getOne, resolveWriteCompanyId } from '../../../lib/firestore';
+import { createDocWithId, getAll, genId, getOne, resolveWriteCompanyId, resolveWriteGroupId } from '../../../lib/firestore';
 import { resolveCurrentPartnerDocId } from '../../../lib/partnerOwnership';
 import {
   deleteProjectionWithEntity,
@@ -82,6 +82,12 @@ export async function createCustomerProjectionInTransaction(
   if (!phone || phone.length !== 10) throw new Error('A valid 10 digit phone is required');
 
   const createdBy = resolveCreatedBy(payload);
+  // Same "Group Admin cannot add stock" bug class: this raw Firestore
+  // transaction bypasses createDocWithId()'s automatic groupId stamping
+  // (Master Plan §3.4); firestore.rules' groupAdminCanCreate() requires a
+  // `groupId` field to match a Group Admin creating a Customer for a
+  // sibling Company of their Group.
+  const groupId = resolveWriteGroupId(companyId);
   const lockRef = doc(db, CUSTOMER_PHONE_LOCKS, customerPhoneLockId(companyId, phone));
   const lockSnap = await transaction.get(lockRef);
   if (lockSnap.exists() && lockSnap.data().isDeleted !== true && lockSnap.data().customerId !== id) {
@@ -99,6 +105,7 @@ export async function createCustomerProjectionInTransaction(
   transaction.set(lockRef, sanitizeFirestoreData({
     id: lockRef.id,
     companyId,
+    ...(groupId ? { groupId } : {}),
     phone,
     customerId: id,
     createdAt: now,
@@ -112,6 +119,7 @@ export async function createCustomerProjectionInTransaction(
     userId: masterUser.id,
     masterUserId: masterUser.id,
     companyId,
+    ...(groupId ? { groupId } : {}),
     createdBy,
     updatedBy: stringValue(payload.updatedBy) || createdBy,
     createdAt: now,
@@ -203,6 +211,8 @@ export async function updateCustomerProjectionWithPhoneLock(id: string, payload:
     return updateCustomerProjection(id, { ...payload, phone: nextPhone, companyId });
   }
 
+  const groupId = resolveWriteGroupId(companyId);
+
   await runTransaction(db, async (transaction) => {
     const nextLockRef = doc(db, CUSTOMER_PHONE_LOCKS, customerPhoneLockId(companyId, nextPhone));
     const nextLockSnap = await transaction.get(nextLockRef);
@@ -217,6 +227,9 @@ export async function updateCustomerProjectionWithPhoneLock(id: string, payload:
     transaction.set(nextLockRef, sanitizeFirestoreData({
       id: nextLockRef.id,
       companyId,
+      // A brand-new lock doc (phone changed) needs groupId stamped for the
+      // same reason as createCustomerProjectionInTransaction() above.
+      ...(groupId ? { groupId } : {}),
       phone: nextPhone,
       customerId: id,
       createdAt: nextLockSnap.exists() ? nextLockSnap.data().createdAt : serverTimestamp(),

@@ -227,7 +227,7 @@ export function MobileRoutes() {
 
         {/* HR module placeholders */}
         <Route path="employees"  element={<RoleRoute module="employees"><MobileEmployeesWorkspace mode="records" /></RoleRoute>} />
-        <Route path="attendance" element={<RoleRoute module="attendance"><MobileAttendanceWorkspace mode="records" /></RoleRoute>} />
+        <Route path="attendance" element={<RoleRoute module="attendance"><MobileAttendanceWorkspace /></RoleRoute>} />
         <Route path="payroll"    element={<RoleRoute module="payroll"><MobilePayrollWorkspace mode="records" /></RoleRoute>} />
 
         {/* Fraud & Risk */}

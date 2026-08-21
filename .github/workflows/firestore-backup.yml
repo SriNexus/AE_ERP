@@ -4,7 +4,7 @@ name: Firestore Managed Export (Nightly Backup)
 # audit's CRITICAL "no backup/DR of any kind" finding. Follows the exact
 # authentication pattern of the existing demo-reset.yml (Google Workload
 # Identity Federation via encrypted GitHub secrets) — zero new credential
-# provisioning. See docs/RUNBOOK_DISASTER_RECOVERY.md for the restore runbook
+# provisioning. See docs/operations/RUNBOOK_DISASTER_RECOVERY.md for the restore runbook
 # and the mandatory quarterly restore drill.
 on:
   schedule:

@@ -1,4 +1,4 @@
-import { createDocWithId, updateDocById, genId, getAll, getOne } from './firestore';
+import { createDocWithId, updateDocById, genId, getAll, getOne, resolveWriteGroupId } from './firestore';
 import { COLLECTIONS, firebaseEnv } from './firebase';
 import { sanitizeFirestoreData } from './sanitizer';
 import { useAppStore } from '../store/useAppStore';
@@ -87,6 +87,16 @@ export async function stockIn(payload: {
 
   const { db } = await import('./firebase');
   const { collection, doc, getDocs, query, runTransaction, serverTimestamp, where } = await import('firebase/firestore');
+  // Group Admin "cannot add stock" root cause: this write goes through a raw
+  // Firestore transaction, bypassing createDocWithId()/updateDocById()'s
+  // automatic groupId stamping (Master Plan §3.4). Without a `groupId` field,
+  // firestore.rules' groupAdminCanCreate()/groupAdminCanUpdate() (both
+  // require hasGroupId(data)) can never match, so a Group Admin's otherwise
+  // rules-supported stock write (warehouseActorCanCreate/Update() already OR
+  // in groupAdminCanCreate/Update()) was denied at the rules layer even
+  // though the UI showed "Add Stock" as available. Stamping it here — the
+  // same value every other write path already derives — closes that gap.
+  const groupId = resolveWriteGroupId(companyId);
   const matchingStock = await getDocs(query(
     collection(db, COLLECTIONS.STOCK),
     where('companyId', '==', companyId),
@@ -117,6 +127,7 @@ export async function stockIn(payload: {
       ...summaryBase,
       id: stockId,
       companyId,
+      ...(groupId ? { groupId } : {}),
       productId: payload.productId,
       warehouseId: payload.warehouseId,
       availableQty: afterQty,
@@ -131,6 +142,7 @@ export async function stockIn(payload: {
     transaction.set(ledgerRef, sanitizeFirestoreData({
       id: ledgerId,
       companyId,
+      ...(groupId ? { groupId } : {}),
       productId: payload.productId,
       warehouseId: payload.warehouseId,
       type: 'IN',

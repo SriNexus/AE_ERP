@@ -21,6 +21,7 @@ import { LeadDomainService } from '../../../../services/LeadDomainService';
 import { useCurrentUser } from '../../../../store/useAppStore';
 import { useCaseDocuments, useInvalidateCaseDocuments, resolveDocumentsFor, createCaseDocument, deleteCaseDocument, type CaseDocument } from '../../../../lib/caseDocuments';
 import { resolveWriteCompanyId } from '../../../../lib/firestore';
+import { captureLocation } from '../../../../lib/geo';
 
 interface Props {
   lead: any;
@@ -121,6 +122,7 @@ function toNeozyDocument(doc: CaseDocument): NeozyDocument {
     label: doc.label,
     uploadedBy: doc.uploadedBy,
     uploaderName: doc.uploaderName,
+    location: doc.location,
   };
 }
 
@@ -167,6 +169,7 @@ export default function LeadWorkspaceDocumentsSection({ lead, isEditing, activeC
         uploadedBy: currentUser.id,
         uploaderName: currentUser.name,
         label: doc.label,
+        location: doc.location,
         sourceEntityType: 'lead',
       })),
       ...removedFromShared.map((id) => deleteCaseDocument(id)),
@@ -194,6 +197,15 @@ export default function LeadWorkspaceDocumentsSection({ lead, isEditing, activeC
     onSaved();
   }, [lead, documents, sharedDocs, legacyDocs, scope, currentUser, invalidateCaseDocuments, onSaved]);
 
+  const handleCaptureLocation = useCallback(async () => {
+    try {
+      return await captureLocation();
+    } catch {
+      // GPS failure is non-fatal for document capture — the upload proceeds without location.
+      return undefined;
+    }
+  }, []);
+
   return (
     <DocumentManager
       documents={documents}
@@ -202,6 +214,8 @@ export default function LeadWorkspaceDocumentsSection({ lead, isEditing, activeC
       onChange={handleChange}
       maxDocuments={2}
       currentUser={{ id: currentUser.id, name: currentUser.name }}
+      captureMode="both"
+      onCaptureLocation={handleCaptureLocation}
     />
   );
 }

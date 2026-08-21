@@ -9,33 +9,15 @@ import toast from 'react-hot-toast';
 
 // ── Attendance ────────────────────────────────────────────────
 
+// Retained for the Bulk Status Change tool and the Status filter — both
+// operate on the legacy `status` field of already-created records. Manual
+// Attendance itself is no longer a form (see ManualAttendancePanel.tsx /
+// AttendanceService.markAttendance() — a one-click self-service action with
+// no employee/date/time/status input).
 export const ATTENDANCE_STATUSES = ['Present', 'Absent', 'Late', 'Half Day', 'Holiday', 'On Leave'];
-
-export const ATTENDANCE_FORM_DEFAULT = {
-  employeeId: '', employee: '', date: new Date().toISOString().split('T')[0],
-  status: 'Present', inTime: '', outTime: '', notes: '',
-};
-export type AttendanceForm = typeof ATTENDANCE_FORM_DEFAULT;
 
 export function useAttendance() {
   return useQuery({ queryKey: ['attendance'], queryFn: () => getAll(COLLECTIONS.ATTENDANCE), staleTime: 30_000 });
-}
-
-export function useMarkAttendance(onSuccess: () => void) {
-  const qc   = useQueryClient();
-  const user = useCurrentUser();
-  return useMutation({
-    mutationFn: async (data: AttendanceForm) => {
-      const id = genId.generic('ATT');
-      await createDocWithId(COLLECTIONS.ATTENDANCE, id, { ...data, id, createdBy: user.id });
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['attendance'] });
-      toast.success('Attendance marked');
-      onSuccess();
-    },
-    onError: (e: any) => toast.error(e.message),
-  });
 }
 
 export function useDeleteAttendance() {
@@ -47,15 +29,80 @@ export function useDeleteAttendance() {
   });
 }
 
+// ── Effective value helpers (Phase 9 precedence: manual field wins when
+// present, otherwise fall back to the GPS/manual_admin checkIn/checkOut
+// sub-record). Shared by exportAttendanceCSV and every attendance list/card
+// view so a record created via the Manual Attendance form (which now writes
+// checkIn/checkOut + computedStatus, not status/inTime/outTime) displays
+// exactly like a GPS-verified record. ──
+export function effectiveAttendanceStatus(a: any): string {
+  return a.status || a.computedStatus || '';
+}
+
+export function effectiveInTime(a: any): string {
+  return a.inTime || formatTimestampForCSV(a.checkIn?.timestamp);
+}
+
+export function effectiveOutTime(a: any): string {
+  return a.outTime || formatTimestampForCSV(a.checkOut?.timestamp);
+}
+
+function formatTimestampForCSV(ts?: string): string {
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+  } catch {
+    return '';
+  }
+}
+
+function csvEscape(val: unknown): string {
+  const s = val == null ? '' : String(val);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/**
+ * Phase 14 — GPS-aware CSV export.
+ *
+ * Original columns (Date, Employee, Status, In Time, Out Time, Notes)
+ * remain exactly as-is for backward compatibility with manual-only records.
+ * GPS-derived columns (Check-In Time, Check-Out Time, GPS Status,
+ * Working Hours, Early Exit) are appended and blank for manual-only rows.
+ *
+ * Effective status rule (Phase 9): manual status wins when present,
+ * otherwise computedStatus.
+ */
 export function exportAttendanceCSV(records: any[]) {
-  const rows = [
-    ['Date', 'Employee', 'Status', 'In Time', 'Out Time', 'Notes'],
-    ...records.map((a: any) => [a.date, a.employee, a.status, a.inTime, a.outTime, a.notes]),
+  const headers = [
+    'Date', 'Employee', 'Status', 'In Time', 'Out Time', 'Notes',
+    'Check-In Time', 'Check-Out Time', 'GPS Status', 'Working Hours', 'Early Exit',
   ];
+
+  const rows = records.map((a: any) => {
+    // ── Original manual columns (unchanged) ──
+    const base = [a.date, a.employee, a.status, a.inTime, a.outTime, a.notes];
+
+    // ── GPS-derived columns (Phase 14) ──
+    const checkInTime = formatTimestampForCSV(a.checkIn?.timestamp);
+    const checkOutTime = formatTimestampForCSV(a.checkOut?.timestamp);
+
+    // Effective status: manual status wins per Phase 9 precedence
+    const effectiveStatus = effectiveAttendanceStatus(a);
+    const workingHours = a.workingHours != null ? Number(a.workingHours).toFixed(2) : '';
+    const earlyExit = a.earlyExit === true ? 'Yes' : a.earlyExit === false ? 'No' : '';
+
+    return [...base, checkInTime, checkOutTime, effectiveStatus, workingHours, earlyExit];
+  });
+
+  const csvContent = [headers, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([rows.map(r => r.join(',')).join('\n')], { type: 'text/csv' }));
+  a.href = URL.createObjectURL(blob);
   a.download = 'attendance.csv';
   a.click();
+  URL.revokeObjectURL(a.href);
   toast.success('Exported!');
 }
 

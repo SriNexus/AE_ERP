@@ -43,16 +43,22 @@ import {
   WorkspaceHero,
 } from '../components/ui';
 import { Modal } from '../components/ui/Modal';
-import { Input, Select as InputSelect, FormRow } from '../components/ui/Input';
+import { Input, Select as InputSelect } from '../components/ui/Input';
 import {
-  Plus, Trash2, Calendar, RefreshCw, Download, Eye, Clock, X, User, CheckCircle2, AlertTriangle,
+  Trash2, Calendar, RefreshCw, Download, Eye, Clock, X, User, CheckCircle2, AlertTriangle,
 } from 'lucide-react';
 import { useEmployees } from '../features/employees/hooks/useEmployees';
 import {
-  useAttendance, useMarkAttendance, useDeleteAttendance, exportAttendanceCSV,
-  ATTENDANCE_FORM_DEFAULT, ATTENDANCE_STATUSES, type AttendanceForm,
+  useAttendance, useDeleteAttendance, exportAttendanceCSV,
+  ATTENDANCE_STATUSES,
+  effectiveAttendanceStatus, effectiveInTime, effectiveOutTime,
 } from '../features/hr/hooks/useHR';
 import toast from 'react-hot-toast';
+import CheckInPanel from '../components/attendance/CheckInPanel';
+import ManualAttendancePanel from '../components/attendance/ManualAttendancePanel';
+import { AttendanceService } from '../services/AttendanceService';
+import { computeDashboardKPIs } from '../features/attendance/services/dashboardKPIs';
+import { formatDistanceMeters } from '../lib/geo';
 
 const PER_PAGE = 10;
 
@@ -145,21 +151,28 @@ export default function Attendance() {
   const [bulkStatusOpen, setBulkStatusOpen] = useState(false);
   const [bulkStatus, setBulkStatus] = useState('');
 
-  // ── Form / view / delete
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState<AttendanceForm>({ ...ATTENDANCE_FORM_DEFAULT });
+  // ── View / delete
   const [viewItem, setViewItem] = useState<any>(null);
   const [delId, setDelId] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<'overview' | 'activity' | 'history'>('overview');
+  // Phase 15: Admin GPS correction
+  const [showCorrectionForm, setShowCorrectionForm] = useState(false);
+  const [correctionReason, setCorrectionReason] = useState('');
+  const [correctionLoading, setCorrectionLoading] = useState(false);
   const openParam = searchParams.get('open') || '';
-  const createParam = searchParams.get('create') || '';
   const userClosedRef = useRef(false);
 
   // ── Queries
   const { data: attendance = [], isLoading, isError, refetch } = useAttendance();
   const { data: employees = [] } = useEmployees();
-  const markMut = useMarkAttendance(() => { setShowForm(false); setForm({ ...ATTENDANCE_FORM_DEFAULT }); });
   const deleteMut = useDeleteAttendance();
+
+  // Phase 7: self-service check-in — today's attendance for the current user
+  const { data: todayAttendance } = useQuery({
+    queryKey: ['attendance', 'today'],
+    queryFn: () => AttendanceService.getTodayAttendanceForCurrentUser(),
+    staleTime: 30_000,
+  });
 
   // Phase 12: real, query-backed warehouse attribution for Attendance —
   // previously no Attendance/Payroll surface could answer "which warehouse
@@ -173,14 +186,6 @@ export default function Attendance() {
     const employee = viewItem ? employeesById.get(viewItem.employeeId) : null;
     return resolveEmployeeWarehouseInfo(employee, usersById, warehousesById).warehouseName;
   }, [viewItem, employeesById, usersById, warehousesById]);
-
-  // ── Update form date when date filter changes (only on initial)
-  useEffect(() => {
-    if (createParam === '1') {
-      setForm(prev => ({ ...prev, date: dateF || new Date().toISOString().split('T')[0] }));
-      setShowForm(true);
-    }
-  }, [createParam, dateF]);
 
   // ── URL sync ────────────────────────────────────────────────────
   function syncQueueParams(overrides: Record<string, string | number | undefined | null>) {
@@ -265,6 +270,14 @@ export default function Attendance() {
     };
   }, [allRecords, dateF, customFrom, customTo]);
 
+  // ── Phase 13: GPS Attendance KPIs ─────────────────────────────
+  // Derived from existing useAttendance() records — no second query needed.
+  // Reads computedStatus/earlyExit directly (Rule Engine is source of truth).
+  const gpsKPIs = useMemo(() => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    return computeDashboardKPIs(allRecords, empCount, todayStr);
+  }, [allRecords, empCount]);
+
   const isTotalDefault = !activeKpi && !search && !dateF && !statusF;
 
   // ── Selection ───────────────────────────────────────────────────
@@ -287,12 +300,6 @@ export default function Attendance() {
     setSearch(''); setDateF(''); setCustomFrom(''); setCustomTo('');
     setStatusF(''); setActiveKpi(''); setPage(1); setSelected(new Set());
     syncQueueParams({ q: '', date: '', from: '', to: '', status: '', kpi: '', page: 1 });
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!form.employeeId || !form.date) return toast.error('Employee & date required');
-    markMut.mutate(form);
   }
 
   function openDetail(a: any) {
@@ -330,6 +337,31 @@ export default function Attendance() {
     exportAttendanceCSV(rows);
     toast.success(`Exported ${rows.length} records`);
     setSelected(new Set());
+  }
+
+  // Phase 15: Admin GPS correction
+  async function handleCorrection() {
+    if (!viewItem || !correctionReason.trim()) return;
+    setCorrectionLoading(true);
+    try {
+      const result = await AttendanceService.correctAttendance(viewItem.id, {
+        reason: correctionReason.trim(),
+      });
+      if (result.success) {
+        toast.success('GPS record corrected');
+        if (result.error) {
+          // Audit log failed — distinct warning
+          toast(result.error, { icon: '⚠️' });
+        }
+        setShowCorrectionForm(false);
+        setCorrectionReason('');
+        refetch();
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Correction failed');
+    } finally {
+      setCorrectionLoading(false);
+    }
   }
 
   async function bulkDelete() {
@@ -399,6 +431,35 @@ export default function Attendance() {
       icon: <AlertTriangle className="h-4 w-4" />,
       description: 'Present / Total',
     },
+    // ── Phase 13: GPS Attendance KPIs ──────────────────────
+    {
+      key: 'checkedInGPS',
+      label: 'CHECKED IN (GPS)',
+      value: gpsKPIs.checkedInGPS,
+      icon: <CheckCircle2 className="h-4 w-4" />,
+      description: 'Self-service check-in today',
+    },
+    {
+      key: 'lateGPS',
+      label: 'LATE (GPS)',
+      value: gpsKPIs.lateGPS,
+      icon: <Clock className="h-4 w-4" />,
+      description: 'Late via GPS rule engine',
+    },
+    {
+      key: 'earlyExit',
+      label: 'EARLY EXIT',
+      value: gpsKPIs.earlyExitCount,
+      icon: <AlertTriangle className="h-4 w-4" />,
+      description: 'Left before shift end',
+    },
+    {
+      key: 'missingToday',
+      label: 'MISSING TODAY',
+      value: gpsKPIs.missingToday,
+      icon: <X className="h-4 w-4" />,
+      description: 'No attendance record today',
+    },
   ];
 
   // ── Active filter pills count ───────────────────────────────────
@@ -423,18 +484,25 @@ export default function Attendance() {
             <Button variant="outline" size="sm" icon={<Download className="h-3.5 w-3.5" />} onClick={() => exportAttendanceCSV(filtered)}>
               Export
             </Button>
-            {perms.canCreate('attendance') && (
-              <Button size="sm" data-tour="attendance-create" icon={<Plus className="h-4 w-4" />}
-                onClick={() => { setForm({ ...ATTENDANCE_FORM_DEFAULT, date: dateF || new Date().toISOString().split('T')[0] }); setShowForm(true); }}>
-                Mark Attendance
-              </Button>
-            )}
           </>
         }
       />
 
+      {/* ── Attendance Actions: Manual (no GPS) + Geo (self-service GPS),
+           equivalent size/hierarchy, side by side — not a giant standalone
+           section above the KPIs. ──────────────────────────────────── */}
+      <div data-tour="attendance-actions">
+        <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">
+          Attendance Actions
+        </p>
+        <div className="grid gap-1.5 sm:grid-cols-2">
+          <ManualAttendancePanel todayRecord={todayAttendance} isLoading={isLoading} />
+          <CheckInPanel todayRecord={todayAttendance} isLoading={isLoading} />
+        </div>
+      </div>
+
       {/* ── KPI Grid ──────────────────────────────────────────────────── */}
-      <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-6">
+      <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {KPI_CONFIGS.map(k => (
           <PremiumKpi
             key={k.key}
@@ -604,16 +672,17 @@ export default function Attendance() {
                   style={{ width: 110 }}>STATUS</Th>
                 <Th style={{ width: 100 }}>IN TIME</Th>
                 <Th style={{ width: 100 }}>OUT TIME</Th>
+                <Th style={{ width: 90 }}>DISTANCE</Th>
                 <Th sortable sorted={sortKey === 'notes'} desc={sortDesc} onSort={() => sort('notes')}
                   style={{ minWidth: 140 }}>NOTES</Th>
                 <Th style={{ width: 130 }}>ACTIONS</Th>
               </Thead>
               <Tbody>
                 {isLoading ? (
-                  <SkeletonRows cols={8} rows={6} />
+                  <SkeletonRows cols={9} rows={6} />
                 ) : isError ? (
                   <tr>
-                    <td colSpan={8} className="py-14 text-center">
+                    <td colSpan={9} className="py-14 text-center">
                       <div className="flex flex-col items-center gap-2 text-[var(--color-text-disabled)]">
                         <Calendar className="h-10 w-10" />
                         <p className="text-sm text-[var(--color-text-muted)]">Failed to load attendance records.</p>
@@ -623,17 +692,11 @@ export default function Attendance() {
                   </tr>
                 ) : paginated.length === 0 ? (
                   <tr>
-                    <td colSpan={8}>
+                    <td colSpan={9}>
                       <EmptyState
                         icon={<Calendar className="h-9 w-9" />}
                         title={search || dateF || statusF || activeKpi ? 'No records match filters' : 'No attendance records yet'}
-                        description={search || dateF || statusF || activeKpi ? undefined : 'Mark your first attendance record to get started.'}
-                        action={(!search && !dateF && !statusF && !activeKpi && perms.canCreate('attendance')) ? (
-                          <Button size="sm" icon={<Plus className="h-4 w-4" />}
-                            onClick={() => { setForm({ ...ATTENDANCE_FORM_DEFAULT, date: new Date().toISOString().split('T')[0] }); setShowForm(true); }}>
-                            Mark Attendance
-                          </Button>
-                        ) : undefined}
+                        description={search || dateF || statusF || activeKpi ? undefined : 'Use Manual Attendance or Geo Attendance above to mark your first record.'}
                       />
                     </td>
                   </tr>
@@ -666,20 +729,34 @@ export default function Attendance() {
                         </div>
                       </Td>
                       <Td className="text-xs">{formatDateValue(a.date) || a.date || <EmptyCell />}</Td>
-                      <Td><span data-interactive onClick={(e) => e.stopPropagation()}>{statusBadge(a.status || 'Present')}</span></Td>
+                      <Td><span data-interactive onClick={(e) => e.stopPropagation()}>{statusBadge(effectiveAttendanceStatus(a) || 'Present')}</span></Td>
                       <Td className="text-xs">
-                        {a.inTime ? (
+                        {effectiveInTime(a) ? (
                           <span className="inline-flex items-center gap-1">
-                            <Clock className="h-3 w-3 text-[var(--color-text-muted)]" />{a.inTime}
+                            <Clock className="h-3 w-3 text-[var(--color-text-muted)]" />{effectiveInTime(a)}
                           </span>
                         ) : <EmptyCell />}
                       </Td>
                       <Td className="text-xs">
-                        {a.outTime ? (
+                        {effectiveOutTime(a) ? (
                           <span className="inline-flex items-center gap-1">
-                            <Clock className="h-3 w-3 text-[var(--color-text-muted)]" />{a.outTime}
+                            <Clock className="h-3 w-3 text-[var(--color-text-muted)]" />{effectiveOutTime(a)}
                           </span>
                         ) : <EmptyCell />}
+                      </Td>
+                      <Td className="text-xs">
+                        {(() => {
+                          // Prefer checkout's distance (the day's final GPS
+                          // evidence); fall back to check-in's. Manual-only
+                          // records (no checkIn/checkOut at all) have neither
+                          // — never fabricate a distance for those.
+                          const label = formatDistanceMeters(
+                            a.checkOut?.distanceFromLocationMeters ?? a.checkIn?.distanceFromLocationMeters,
+                          );
+                          return label
+                            ? <span className="text-[var(--color-text-muted)]">{label}</span>
+                            : <EmptyCell />;
+                        })()}
                       </Td>
                       <Td className="text-xs text-[var(--color-text-muted)] max-w-[160px] truncate">{a.notes || <EmptyCell />}</Td>
                       <Td>
@@ -728,7 +805,7 @@ export default function Attendance() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <h2 className="truncate text-2xl font-bold text-[var(--color-text)]">{viewItem.employee || 'Untitled'}</h2>
-                      {statusBadge(viewItem.status || 'Present')}
+                      {statusBadge(effectiveAttendanceStatus(viewItem) || 'Present')}
                     </div>
                     <div className="mt-2 text-xs text-[var(--color-text-muted)]">
                       <span className="inline-flex items-center gap-1.5">
@@ -769,12 +846,12 @@ export default function Attendance() {
                       <DetailCard title="Attendance Details">
                         <div className="grid gap-3 sm:grid-cols-2">
                           <LeadField label="Date" value={formatDateValue(viewItem.date) || viewItem.date || <MutedValue />} />
-                          <LeadField label="Status">{statusBadge(viewItem.status || 'Present')}</LeadField>
+                          <LeadField label="Status">{statusBadge(effectiveAttendanceStatus(viewItem) || 'Present')}</LeadField>
                           <LeadField label="In Time">
-                            {viewItem.inTime ? <span className="inline-flex items-center gap-1.5"><Clock className="h-4 w-4 text-[var(--color-primary-text)]" />{viewItem.inTime}</span> : <MutedValue />}
+                            {effectiveInTime(viewItem) ? <span className="inline-flex items-center gap-1.5"><Clock className="h-4 w-4 text-[var(--color-primary-text)]" />{effectiveInTime(viewItem)}</span> : <MutedValue />}
                           </LeadField>
                           <LeadField label="Out Time">
-                            {viewItem.outTime ? <span className="inline-flex items-center gap-1.5"><Clock className="h-4 w-4 text-[var(--color-primary-text)]" />{viewItem.outTime}</span> : <MutedValue />}
+                            {effectiveOutTime(viewItem) ? <span className="inline-flex items-center gap-1.5"><Clock className="h-4 w-4 text-[var(--color-primary-text)]" />{effectiveOutTime(viewItem)}</span> : <MutedValue />}
                           </LeadField>
                           <LeadField label="Warehouse" value={viewItemWarehouseName || <MutedValue>Not assigned</MutedValue>} />
                         </div>
@@ -788,11 +865,13 @@ export default function Attendance() {
                     <aside className="space-y-4">
                       <DetailCard title="Quick Actions">
                         <div className="space-y-2">
-                          <Button variant="outline" size="sm" className="w-full justify-start"
-                            icon={<Calendar className="h-3.5 w-3.5" />}
-                            onClick={() => { closeDetail(); setForm({ ...ATTENDANCE_FORM_DEFAULT, employeeId: viewItem.employeeId, employee: viewItem.employee, date: viewItem.date }); setShowForm(true); }}>
-                            Edit Record
-                          </Button>
+                          {(viewItem.checkIn || viewItem.checkOut) && perms.canEdit('attendance') && (
+                            <Button variant="outline" size="sm" className="w-full justify-start"
+                              icon={<AlertTriangle className="h-3.5 w-3.5" />}
+                              onClick={() => { setShowCorrectionForm(true); }}>
+                              Correct GPS Record
+                            </Button>
+                          )}
                           <div className="border-t border-[var(--color-border-subtle)] pt-3">
                             <Button variant="danger" size="sm" className="w-full justify-start"
                               icon={<Trash2 className="h-3.5 w-3.5" />}
@@ -819,30 +898,6 @@ export default function Attendance() {
         })()}
       </Modal>
 
-      {/* ── Create/Edit Modal ────────────────────────────────────────────── */}
-      <Modal open={showForm} onClose={() => setShowForm(false)} title="Mark Attendance" size="md">
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <InputSelect label="Employee" required value={form.employeeId} onChange={e => {
-            const emp = (employees as any[]).find((x: any) => x.id === e.target.value);
-            setForm({ ...form, employeeId: e.target.value, employee: emp?.name || '' });
-          }} options={[{ label: 'Select Employee', value: '' }, ...(employees as any[]).map((e: any) => ({ label: e.name, value: e.id }))]} />
-          <FormRow>
-            <Input label="Date" type="date" required value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} />
-            <InputSelect label="Status" value={form.status} onChange={e => setForm({ ...form, status: e.target.value })}
-              options={ATTENDANCE_STATUSES.map(s => ({ label: s, value: s }))} />
-          </FormRow>
-          <FormRow>
-            <Input label="In Time" type="time" value={form.inTime} onChange={e => setForm({ ...form, inTime: e.target.value })} />
-            <Input label="Out Time" type="time" value={form.outTime} onChange={e => setForm({ ...form, outTime: e.target.value })} />
-          </FormRow>
-          <Input label="Notes" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" type="button" onClick={() => setShowForm(false)}>Cancel</Button>
-            <Button type="submit" loading={markMut.isPending}>Mark Attendance</Button>
-          </div>
-        </form>
-      </Modal>
-
       {/* ── Delete Confirm ──────────────────────────────────────────────── */}
       <ConfirmDialog open={!!delId} onClose={() => setDelId(null)}
         onConfirm={() => delId && deleteMut.mutate(delId, { onSuccess: () => setDelId(null) })}
@@ -864,6 +919,31 @@ export default function Attendance() {
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => { setBulkStatusOpen(false); setBulkStatus(''); }}>Cancel</Button>
             <Button onClick={confirmBulkStatus} disabled={!bulkStatus}>Update</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Phase 15: Admin GPS Correction Modal */}
+      <Modal open={showCorrectionForm} onClose={() => { setShowCorrectionForm(false); setCorrectionReason(''); }}
+        title="Correct GPS Record" size="sm">
+        <div className="space-y-4">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            This corrects the GPS-verified attendance evidence for <strong>{viewItem?.employee}</strong> on <strong>{viewItem?.date}</strong>.
+            {viewItem?.checkIn && <span className="block mt-1">Check-In: {new Date(viewItem.checkIn.timestamp).toLocaleString()}</span>}
+            {viewItem?.checkOut && <span className="block">Check-Out: {new Date(viewItem.checkOut.timestamp).toLocaleString()}</span>}
+          </p>
+          <Input
+            label="Correction Reason (required)"
+            value={correctionReason}
+            onChange={e => setCorrectionReason(e.target.value)}
+            placeholder="Explain why this correction is needed..."
+            required
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => { setShowCorrectionForm(false); setCorrectionReason(''); }}>Cancel</Button>
+            <Button onClick={handleCorrection} disabled={!correctionReason.trim() || correctionLoading}>
+              {correctionLoading ? 'Saving...' : 'Confirm Correction'}
+            </Button>
           </div>
         </div>
       </Modal>

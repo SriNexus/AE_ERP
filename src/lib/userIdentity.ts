@@ -90,7 +90,7 @@ function numericFallback(value: string): string {
   return String(hash).padStart(10, '0').slice(-10);
 }
 
-function masterUserId(companyId: string, phone: string): string {
+export function masterUserId(companyId: string, phone: string): string {
   return `MUSR-${encodeURIComponent(companyId)}-${phone}`;
 }
 

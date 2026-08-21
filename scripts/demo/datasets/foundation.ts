@@ -70,6 +70,7 @@ export function buildIdentityDocuments(authUid: string): DemoDocument[] {
       timezone: 'Asia/Kolkata', fiscalYearStart: '04-01', invoicePrefix: 'DINV', orderPrefix: 'DORD',
       quotationPrefix: 'DQT', dispatchPrefix: 'DDSP', primaryColor: '#166534', accentColor: '#15803d',
       status: 'Active', isDefault: false,
+      latitude: 18.5204, longitude: 73.8567, geofenceRadiusMeters: 500,
       // Phase 15: the real, persisted companies/{DEMO_COMPANY_ID} document
       // never actually carried businessMode — only the static UI-fallback
       // DEMO_COMPANY config object (src/config/demoCompany.ts) did, which is
@@ -159,7 +160,9 @@ export function buildAssigneeDocuments():DemoDocument[]{return assignees.map((p,
 
 const warehouseAddresses=['Plot 4, Chakan MIDC, Pune','Gala 12, Bhiwandi Warehousing Cluster, Mumbai','Plot 9, Ambad Industrial Estate, Nashik'];
 const warehouses=[['Central Distribution Warehouse','DWH-C','Pune'],['West Zone Service Depot','DWH-W','Mumbai'],['Project Staging Yard — Nashik','DWH-S','Nashik']];
-export function buildWarehouseDocuments():DemoDocument[]{return warehouses.map((w,i)=>{const id=demoDocumentId('WH',i+1);return{collection:'warehouses',id,data:{...base,...audit,id,name:w[0],code:w[1],address:warehouseAddresses[i],city:w[2],state:'Maharashtra',pincode:['411019','421302','422010'][i],managerName:assignees[Math.min(i+2,4)][0],managerPhone:`00000020${String(i+1).padStart(2,'0')}`,capacity:`${500+i*250} pallet positions`,status:'Active',notes:'Demo warehouse; no physical location.',searchName:String(w[0]).toLowerCase()}}})}
+// Geo coordinates for demo warehouses (latitude, longitude, geofence radius in meters)
+const warehouseGeo=[{latitude:18.7622,longitude:73.9144,geofenceRadiusMeters:200},{latitude:19.2965,longitude:72.8574,geofenceRadiusMeters:200},{latitude:19.9975,longitude:73.7898,geofenceRadiusMeters:200}];
+export function buildWarehouseDocuments():DemoDocument[]{return warehouses.map((w,i)=>{const id=demoDocumentId('WH',i+1);const geo=warehouseGeo[i];return{collection:'warehouses',id,data:{...base,...audit,id,name:w[0],code:w[1],address:warehouseAddresses[i],city:w[2],state:'Maharashtra',pincode:['411019','421302','422010'][i],managerName:assignees[Math.min(i+2,4)][0],managerPhone:`00000020${String(i+1).padStart(2,'0')}`,capacity:`${500+i*250} pallet positions`,status:'Active',notes:'Demo warehouse with geo-fence configured for attendance.',latitude:geo.latitude,longitude:geo.longitude,geofenceRadiusMeters:geo.geofenceRadiusMeters,searchName:String(w[0]).toLowerCase()}}})}
 
 // Exported so businessGraph.ts's B2B dispatch/PO fixtures can reference the
 // SAME real warehouse/vendor names instead of maintaining a second,

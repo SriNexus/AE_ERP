@@ -9,7 +9,7 @@
 import {
   LayoutDashboard, Settings2, Sparkles, Bell, Shield,
   Users, Cog, FileText, Mail, MessageCircle, MessageSquare,
-  Puzzle, HardDrive, ScrollText, Code, Info,
+  Puzzle, HardDrive, ScrollText, Code, Info, Clock,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -32,7 +32,8 @@ export type SettingsSectionId =
   | 'backup-restore'
   | 'audit-logs'
   | 'developer'
-  | 'about-erp';
+  | 'about-erp'
+  | 'attendance';
 
 export interface SettingsSectionConfig {
   id: SettingsSectionId;
@@ -59,6 +60,7 @@ export const SETTINGS_SECTIONS: SettingsSectionConfig[] = [
   { id: 'documents',         label: 'Documents',           description: 'Templates, prefixes & signatures',                  icon: FileText },
   { id: 'email',             label: 'Email',               description: 'Gmail compose templates & defaults',                icon: Mail, adminOnly: true },
   { id: 'about-erp',         label: 'About ERP',           description: 'Version, license & system info',                    icon: Info },
+  { id: 'attendance',        label: 'Attendance',          description: 'GPS check-in policy, shift timing & rules',        icon: Clock, adminOnly: true, showInNavigation: false },
 
   // Retained as route/persistence compatibility IDs; omitted from navigation.
   { id: 'overview',          label: 'Overview',            description: 'ERP system at a glance',                            icon: LayoutDashboard, showInNavigation: false },

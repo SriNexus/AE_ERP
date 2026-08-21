@@ -16,6 +16,7 @@ import { logCreate, logUpdate, logDelete } from '../lib/auditLogger';
 import { COLLECTIONS } from '../lib/firebase';
 import { createCompanyInGroup, updateCompanyInGroup } from '../lib/groupAdmin';
 import { INDIAN_STATES, type CompanyConfig } from '../config/company';
+import { warehouseGeoToForm, parseWarehouseGeo } from '../features/warehouses/types';
 import { COMPANY_BUSINESS_MODES, DEFAULT_BUSINESS_MODE, resolveBusinessMode, type CompanyBusinessMode } from '../lib/companyBusinessMode';
 import { statusBadge } from '../components/ui/Badge';
 import { Button, Card, CardHeader, ConfirmDialog, EmptyState, Pagination,
@@ -31,7 +32,7 @@ import { compressImageBase64 } from '../lib/imageUtils';
 import { DocumentTemplateResolver } from '../templates/documents/resolver';
 
 const STATE_OPTS = [{label:'Select State',value:''},...INDIAN_STATES.map(s=>({label:s,value:s}))];
-const FORM0: any = { name:'', shortName:'', companyCode:'', tagline:'', address:'', city:'', state:'', pincode:'', phone:'', email:'', website:'', gst:'', pan:'', cin:'', bankName:'', bankAccount:'', bankIfsc:'', bankBranch:'', currency:'INR', currencySymbol:'₹', status:'Active', primaryColor:'#4f46e5', accentColor:'#10b981', logo:'', iconLogo:'', qrCode:'', signature:'', isDefault: false, businessMode: DEFAULT_BUSINESS_MODE };
+const FORM0: any = { name:'', shortName:'', companyCode:'', tagline:'', address:'', city:'', state:'', pincode:'', phone:'', email:'', website:'', gst:'', pan:'', cin:'', bankName:'', bankAccount:'', bankIfsc:'', bankBranch:'', currency:'INR', currencySymbol:'₹', status:'Active', primaryColor:'#4f46e5', accentColor:'#10b981', logo:'', iconLogo:'', qrCode:'', signature:'', isDefault: false, businessMode: DEFAULT_BUSINESS_MODE, latitude:'', longitude:'', geofenceRadiusMeters:'' };
 
 const BUSINESS_MODE_INFO: Record<CompanyBusinessMode, { label: string; hint: string }> = {
   B2B: { label: 'B2B — Material Distribution', hint: 'This company sells solar materials to business/EPC buyers, who install them at their own customer’s site. No Projects, Surveys, Engineering, Installations, or QC — only Leads, Customers, Quotations, Orders, Invoices, Payments, and Dispatch.' },
@@ -186,8 +187,13 @@ export default function Companies() {
   }, [openParam, createParam, companies, isLoading]);
 
   function closeForm() { setShowForm(false); setEditId(null); setForm({...FORM0}); setActiveTab('Info & Tax'); }
-  function openEdit(c:any) { setForm({...FORM0, ...c}); setEditId(c.id); setShowForm(true); setActiveTab('Info & Tax'); }
-  function handleSubmit(e:React.FormEvent) { e.preventDefault(); if(!form.name) return toast.error('Company name required'); save.mutate(form); }
+  function openEdit(c:any) { setForm({...FORM0, ...c, ...warehouseGeoToForm(c)}); setEditId(c.id); setShowForm(true); setActiveTab('Info & Tax'); }
+  function handleSubmit(e:React.FormEvent) {
+    e.preventDefault();
+    if(!form.name) return toast.error('Company name required');
+    const geo = parseWarehouseGeo({ latitude: form.latitude, longitude: form.longitude, geofenceRadiusMeters: form.geofenceRadiusMeters });
+    save.mutate({ ...form, ...geo });
+  }
 
   // ── KPI stats ─────────────────────────────────────────────────────
   const now = new Date();
@@ -555,6 +561,19 @@ export default function Companies() {
                   <Input label="City" value={form.city} onChange={e=>setForm({...form,city:e.target.value})}/>
                   <InputSelect label="State" value={form.state} onChange={e=>setForm({...form,state:e.target.value})} options={STATE_OPTS}/>
                   <Input label="Pincode" value={form.pincode} onChange={e=>setForm({...form,pincode:e.target.value})}/>
+                </FormRow>
+              </FormSection>
+
+              <FormSection title="Geo-Fence / Attendance Location">
+                <p className="text-xs text-[var(--color-text-muted)] mb-3">
+                  This location is used as the default attendance location when an employee's assigned warehouse does not have a configured attendance location.
+                </p>
+                <FormRow>
+                  <Input label="Latitude" value={form.latitude} onChange={e=>setForm({...form,latitude:e.target.value})} placeholder="e.g. 19.0760"/>
+                  <Input label="Longitude" value={form.longitude} onChange={e=>setForm({...form,longitude:e.target.value})} placeholder="e.g. 72.8777"/>
+                </FormRow>
+                <FormRow>
+                  <Input label="Geofence Radius (meters)" value={form.geofenceRadiusMeters} onChange={e=>setForm({...form,geofenceRadiusMeters:e.target.value})} placeholder="e.g. 500"/>
                 </FormRow>
               </FormSection>
 

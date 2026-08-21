@@ -36,12 +36,13 @@
  */
 import { useState, useCallback, useRef, useEffect } from 'react';
 import toast from 'react-hot-toast';
-import { File as FileIcon, FileImage, FileText, UploadCloud, Download, Trash2, X, Maximize2 } from 'lucide-react';
+import { File as FileIcon, FileImage, FileText, UploadCloud, Download, Trash2, X, Maximize2, MapPin } from 'lucide-react';
 import { DocumentViewer, DocumentPreviewContent, useDocumentViewer, formatFileSize, forceDownload } from './DocumentViewer';
 import { isLoadableUrl } from '../../lib/url';
 import { uploadFile } from '../../lib/storage';
 import { firebaseEnv } from '../../lib/firebase';
 import { genId } from '../../lib/firestore';
+import type { GeoEvidence } from '../../lib/geo';
 
 export interface NeozyDocument {
   /** Stable unique id for this document entry */
@@ -62,6 +63,8 @@ export interface NeozyDocument {
   uploadedBy?: string;
   /** Display name of the uploader, when known */
   uploaderName?: string;
+  /** Optional GPS/location evidence captured at upload time (Phase 3). Immutable once set — never edited by the user. */
+  location?: GeoEvidence;
 }
 
 interface DocumentManagerProps {
@@ -83,6 +86,15 @@ interface DocumentManagerProps {
   maxDocuments?: number;
   /** Current user, for uploader attribution. Omit to leave uploader fields blank. */
   currentUser?: { id: string; name: string };
+  /** Camera/gallery capture mode. When set, an additional capture-mode file input is rendered.
+   *  'camera' = live camera only (capture="environment"), 'gallery' = file picker only,
+   *  'both' = camera variant alongside the standard file picker. */
+  captureMode?: 'camera' | 'gallery' | 'both';
+  /** Called after a successful file capture when captureMode is set. The returned GeoEvidence
+   *  (if any) is attached to the new document entry as immutable location evidence.
+   *  DocumentManager does NOT call navigator.geolocation itself — this callback wires
+   *  the Geo-Location Platform. If omitted, no location is captured. */
+  onCaptureLocation?: () => Promise<GeoEvidence | undefined>;
 }
 
 /** Hard cap enforced on every upload, after any compression attempt. */
@@ -183,8 +195,11 @@ export default function DocumentManager({
   emptyText = 'No documents uploaded yet.',
   maxDocuments,
   currentUser,
+  captureMode,
+  onCaptureLocation,
 }: DocumentManagerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const captureInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const { doc: viewerDoc, open: viewerOpen, viewDocument, closeViewer } = useDocumentViewer();
@@ -247,6 +262,18 @@ export default function DocumentManager({
         downloadUrl = await uploadFile(storagePath, uploadFileObj, true);
       }
 
+      // Capture location evidence if the caller supplied the callback (Phase 3).
+      // Reverse-geocoding failure is non-fatal — the coordinates remain the source of truth.
+      let location: GeoEvidence | undefined;
+      if (onCaptureLocation) {
+        try {
+          location = await onCaptureLocation();
+        } catch {
+          // Location capture failed — proceed without location evidence.
+          // The document is still valid; location is optional.
+        }
+      }
+
       const entry: NeozyDocument = {
         id: genId.generic('DOC'),
         name: file.name,
@@ -256,6 +283,7 @@ export default function DocumentManager({
         uploadedAt: new Date().toISOString(),
         uploadedBy: currentUser?.id,
         uploaderName: currentUser?.name,
+        location,
       };
 
       // APPEND — never overwrite the previous list
@@ -329,15 +357,28 @@ export default function DocumentManager({
           </p>
         </div>
         {isEditing && (
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading || atLimit}
-            title={atLimit ? `Maximum of ${maxDocuments} documents reached` : undefined}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3.5 py-2 text-[12px] font-semibold text-white shadow-sm transition-all hover:-translate-y-0.5 hover:bg-[var(--color-primary-hover)] hover:shadow-md active:translate-y-0 active:shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:shadow-none"
-          >
-            {uploading ? <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <UploadCloud className="h-3.5 w-3.5" />}
-            {uploading ? 'Uploading...' : 'Upload Document'}
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading || atLimit}
+              title={atLimit ? `Maximum of ${maxDocuments} documents reached` : undefined}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3.5 py-2 text-[12px] font-semibold text-white shadow-sm transition-all hover:-translate-y-0.5 hover:bg-[var(--color-primary-hover)] hover:shadow-md active:translate-y-0 active:shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:shadow-none"
+            >
+              {uploading ? <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <UploadCloud className="h-3.5 w-3.5" />}
+              {uploading ? 'Uploading...' : 'Upload Document'}
+            </button>
+            {(captureMode === 'camera' || captureMode === 'both') && (
+              <button
+                onClick={() => captureInputRef.current?.click()}
+                disabled={uploading || atLimit}
+                title="Take a photo with the camera"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 py-2 text-[12px] font-semibold text-[var(--color-text)] shadow-sm transition-all hover:-translate-y-0.5 hover:bg-[var(--color-surface-hover)] hover:shadow-md active:translate-y-0 active:shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:shadow-none"
+              >
+                <MapPin className="h-3.5 w-3.5" />
+                Capture Photo
+              </button>
+            )}
+          </div>
         )}
         <input
           type="file"
@@ -346,6 +387,20 @@ export default function DocumentManager({
           onChange={handleUpload}
           className="hidden"
         />
+        {/* Camera/gallery capture input — Phase 3.
+            When captureMode is 'camera', renders a capture="environment" variant
+            to request the live camera on mobile devices. When 'both', this input
+            is rendered alongside the standard file picker above. */}
+        {(captureMode === 'camera' || captureMode === 'both') && (
+          <input
+            type="file"
+            accept="image/*"
+            capture="environment"
+            ref={captureInputRef}
+            onChange={handleUpload}
+            className="hidden"
+          />
+        )}
       </div>
 
       {/* ── Master-detail: document list + large inline preview ── */}
@@ -382,6 +437,14 @@ export default function DocumentManager({
                       {doc.size && doc.size > 0 && <span>• {formatFileSize(doc.size)}</span>}
                       {doc.uploaderName && <span>• {doc.uploaderName}</span>}
                     </div>
+                    {doc.location && (
+                      <div className="mt-0.5 flex items-center gap-1 text-[9px] text-emerald-600 dark:text-emerald-400">
+                        <MapPin className="h-2.5 w-2.5 shrink-0" />
+                        <span className="truncate" title={doc.location.address || `${doc.location.latitude.toFixed(5)}, ${doc.location.longitude.toFixed(5)}`}>
+                          {doc.location.address || `${doc.location.latitude.toFixed(5)}, ${doc.location.longitude.toFixed(5)}`}
+                        </span>
+                      </div>
+                    )}
                   </div>
                   {isEditing && (
                     <DocCircleButton
@@ -409,6 +472,14 @@ export default function DocumentManager({
                       {selectedDoc.uploadedAt && <span>• {docDateLabel(selectedDoc.uploadedAt)}</span>}
                       {selectedDoc.uploaderName && <span>• {selectedDoc.uploaderName}</span>}
                     </div>
+                    {selectedDoc.location && (
+                      <div className="mt-0.5 flex items-center gap-1 text-[9px] text-emerald-600 dark:text-emerald-400">
+                        <MapPin className="h-2.5 w-2.5 shrink-0" />
+                        <span className="truncate" title={selectedDoc.location.address || `${selectedDoc.location.latitude.toFixed(5)}, ${selectedDoc.location.longitude.toFixed(5)}`}>
+                          {selectedDoc.location.address || `${selectedDoc.location.latitude.toFixed(5)}, ${selectedDoc.location.longitude.toFixed(5)}`}
+                        </span>
+                      </div>
+                    )}
                   </div>
                   <div className="flex shrink-0 items-center gap-1.5">
                     <DocCircleButton icon={<Download className="h-3.5 w-3.5" />} title="Download document" onClick={() => handleDownload(selectedDoc)} />

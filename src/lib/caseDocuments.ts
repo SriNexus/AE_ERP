@@ -45,6 +45,7 @@ import { COLLECTIONS } from './firebase';
 import { queryKeys } from './queryKeys';
 import { useAppStore } from '../store/useAppStore';
 import type { BaseRecord } from '../types';
+import type { GeoEvidence } from './geo';
 
 export interface CaseDocument extends BaseRecord {
   name: string;
@@ -85,6 +86,8 @@ export interface CaseDocument extends BaseRecord {
   partnerId?: string;
   partnerName?: string;
   stage?: string;
+  /** Optional GPS/location evidence captured at upload time (Phase 3). Immutable once set. */
+  location?: GeoEvidence;
 }
 
 export interface CaseDocumentScope {
@@ -148,6 +151,8 @@ export interface CreateCaseDocumentInput extends CaseDocumentScope {
   uploadedBy?: string;
   uploaderName?: string;
   label?: string;
+  /** Optional GPS/location evidence captured at upload time (Phase 3). */
+  location?: GeoEvidence;
   sourceEntityType: 'lead' | 'customer' | 'project' | 'order' | 'quotation' | 'invoice' | 'dispatch' | 'payment';
   /** Explicit document id — pass this when the source record already has a
    * stable id of its own (e.g. a Survey photo's SurveyPhoto.id) so
@@ -187,6 +192,7 @@ export async function createCaseDocument(input: CreateCaseDocumentInput): Promis
     partnerId: input.partnerId || undefined,
     partnerName: input.partnerName || undefined,
     stage: input.stage || undefined,
+    location: input.location || undefined,
     sourceEntityType: input.sourceEntityType,
   };
   const created = await createDocWithId(COLLECTIONS.DOCUMENTS, id, payload as any);
@@ -208,7 +214,7 @@ export async function deleteCaseDocument(id: string): Promise<void> {
  * per-record collection sits underneath. */
 export async function applyDocumentListChange(
   previous: CaseDocument[],
-  next: Array<{ id: string; name: string; url?: string; mimeType?: string; size?: number; uploadedAt?: string; uploadedBy?: string; uploaderName?: string; label?: string }>,
+  next: Array<{ id: string; name: string; url?: string; mimeType?: string; size?: number; uploadedAt?: string; uploadedBy?: string; uploaderName?: string; label?: string; location?: GeoEvidence }>,
   scope: CaseDocumentScope,
   sourceEntityType: 'lead' | 'customer' | 'project' | 'order' | 'quotation' | 'invoice' | 'dispatch' | 'payment',
 ): Promise<void> {
@@ -229,6 +235,7 @@ export async function applyDocumentListChange(
       uploadedBy: doc.uploadedBy,
       uploaderName: doc.uploaderName,
       label: doc.label,
+      location: doc.location,
       sourceEntityType,
     })),
     ...removed.map((doc) => deleteCaseDocument(doc.id)),

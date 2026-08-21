@@ -101,3 +101,73 @@ describe('authenticated ERP identity resolution', () => {
     await expectCode(resolveAuthenticatedErpUser(authUser, api), 'inactive-user');
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stale-mapping self-heal — the actual root cause behind "Group Admin
+// permission-denied even after the write payload carries the correct
+// groupId": user_auth_maps/{authUid} is written once at first login and
+// never refreshed on ordinary logins, but firestore.rules' actorGroupId()
+// (every groupAdminCan*() check) reads groupId/companyId straight from that
+// cached document — not the live users/{id} profile a client re-syncs into
+// its own store on boot. A later promotion to Group Admin (a fresh groupId
+// stamped onto the profile) previously left the mapping permanently
+// groupId-less, so every groupAdminCanCreate()/Update() check failed no
+// matter what the client correctly stamped onto its own writes.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('stale user_auth_maps self-heal', () => {
+  it('refreshes a mapping that never had a groupId when the live profile now has one', async () => {
+    const promotedProfile = { ...profile, role: 'GroupAdmin', groupId: 'group-csgpl' };
+    const createMapping = vi.fn().mockResolvedValue(undefined);
+    const api = gateway({
+      readMapping: vi.fn().mockResolvedValue({ authUid: authUser.uid, userId: profile.id, companyId: profile.companyId }), // no groupId
+      readUser: vi.fn().mockResolvedValue(promotedProfile),
+      createMapping,
+    });
+
+    const resolved = await resolveAuthenticatedErpUser(authUser, api);
+
+    expect(resolved).toMatchObject({ id: profile.id, groupId: 'group-csgpl' });
+    expect(createMapping).toHaveBeenCalledWith(authUser.uid, expect.objectContaining({ groupId: 'group-csgpl' }));
+  });
+
+  it('does not attempt a refresh write when the mapping already matches the live profile', async () => {
+    const inSyncProfile = { ...profile, groupId: 'group-csgpl' };
+    const createMapping = vi.fn().mockResolvedValue(undefined);
+    const api = gateway({
+      readMapping: vi.fn().mockResolvedValue({ authUid: authUser.uid, userId: profile.id, companyId: profile.companyId, groupId: 'group-csgpl' }),
+      readUser: vi.fn().mockResolvedValue(inSyncProfile),
+      createMapping,
+    });
+
+    await resolveAuthenticatedErpUser(authUser, api);
+
+    expect(createMapping).not.toHaveBeenCalled();
+  });
+
+  it('still resolves successfully even when the mapping refresh write is rejected (best-effort, never blocks login)', async () => {
+    const promotedProfile = { ...profile, role: 'GroupAdmin', groupId: 'group-csgpl' };
+    const createMapping = vi.fn().mockRejectedValue(Object.assign(new Error('permission-denied'), { code: 'permission-denied' }));
+    const api = gateway({
+      readMapping: vi.fn().mockResolvedValue({ authUid: authUser.uid, userId: profile.id, companyId: profile.companyId }),
+      readUser: vi.fn().mockResolvedValue(promotedProfile),
+      createMapping,
+    });
+
+    // Must resolve (not reject) — a failed best-effort refresh must never
+    // turn into a login failure.
+    await expect(resolveAuthenticatedErpUser(authUser, api)).resolves.toMatchObject({ groupId: 'group-csgpl' });
+  });
+
+  it('a stale companyId no longer hard-locks the account out of login (previously threw mapping-conflict on every login)', async () => {
+    const reassignedProfile = { ...profile, companyId: 'company-new' };
+    const createMapping = vi.fn().mockResolvedValue(undefined);
+    const api = gateway({
+      readMapping: vi.fn().mockResolvedValue({ authUid: authUser.uid, userId: profile.id, companyId: 'company' }), // old company
+      readUser: vi.fn().mockResolvedValue(reassignedProfile),
+      createMapping,
+    });
+
+    await expect(resolveAuthenticatedErpUser(authUser, api)).resolves.toMatchObject({ companyId: 'company-new' });
+    expect(createMapping).toHaveBeenCalledWith(authUser.uid, expect.objectContaining({ companyId: 'company-new' }));
+  });
+});

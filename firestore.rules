@@ -732,7 +732,7 @@ service cloud.firestore {
     // blocks authoritative. Also adds security_logs (F-04), device_tokens
     // (F-17) and backup_metadata (F-05), which now have their own blocks.
     function isSpecialCollection(collectionId) {
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings'];
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance'];
     }
 
     match /companies/{companyId} {
@@ -1206,8 +1206,26 @@ service cloud.firestore {
       // company/group-wide visibility; owner/Super Admin bypass). The
       // warehouseId constraint must appear in the client query for list
       // provability (src/lib/firestore.ts companyScopedQuery §8.3).
-      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data))
-        && sameWarehouse(resource.data);
+      //
+      // `resource == null` guard (same established pattern as companies/
+      // roles/users/settings above): stockIn()/useSaveStockEntry() both
+      // transaction.get() the deterministic stockSummaryId(companyId,
+      // productId, warehouseId) doc BEFORE writing, to compute the new
+      // quantity from any existing summary — a read that is a routine part
+      // of every stock movement, not an optional probe. Without this guard,
+      // canReadCompanyScoped()/groupAdminCanRead()/sameWarehouse() all
+      // dereference resource.data, which is undefined when the summary
+      // doesn't exist yet (the FIRST stock movement ever recorded for a
+      // given product+warehouse pair — e.g. a brand-new tenant's very first
+      // "Add Stock"), so the rule evaluated to a hard deny regardless of
+      // role, company, or group — this was never actually a Group Admin
+      // permission gap; every actor's first stock entry for a new
+      // product/warehouse pair failed identically. A missing doc holds zero
+      // data, so `resource == null` grants nothing once it does exist.
+      allow read: if actorIsActive() && (
+        resource == null
+        || ((canReadCompanyScoped() || groupAdminCanRead(resource.data)) && sameWarehouse(resource.data))
+      );
       allow create: if actorIsActive() && warehouseActorCanCreate(request.resource.data)
         // F-08-class FK: the referenced warehouse must exist AND belong to the
         // same Company (a forged cross-company warehouseId is rejected).
@@ -1222,7 +1240,45 @@ service cloud.firestore {
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['availableQty', 'reservedQty'])
           || actorRoleMatches('.*Warehouse.*')
           || actorRoleMatches('.*Operations.*')
-          || isAdmin()
+          // Admin OR GroupAdmin, via ONE call to the same lean,
+          // authMapPath()-cached actorRoleMatches() helper already used for
+          // Warehouse/Operations above — deliberately NOT isAdmin() and NOT
+          // groupAdminCanUpdate(). Two compounding findings here, live-
+          // verified 2026-08-21 (admin@neozy.in / Ashish Enterprises), NEITHER
+          // of them actually about Group Admin scoping being wrong:
+          //
+          // 1. isAdmin() checks currentUser().role == 'Admin' literally, so
+          //    it never matched a 'GroupAdmin' actor — the originally
+          //    reported symptom ("Group Admin cannot Adjust Stock").
+          //
+          // 2. Fixing that with the logically-correct groupAdminCanUpdate()
+          //    (or even two separate actorRoleMatches() calls) still failed
+          //    — with Firestore's own "maximum of 1000 expressions...
+          //    reached" error. Reproduced directly against the emulator with
+          //    the real two-document transaction shape (stock_ledger create
+          //    + stock update, exactly as useSaveStockEntry()/stockIn()
+          //    issue it): a PLAIN 'Admin' actor (no GroupAdmin involved at
+          //    all) hit the IDENTICAL limit on the IDENTICAL transaction —
+          //    this is a PRE-EXISTING cost problem in this collection's
+          //    rules, compounded by the generic wildcard fallback's
+          //    documented (see match /{collectionId}/{documentId} below)
+          //    non-short-circuiting re-evaluation of
+          //    canUpdateCompanyScoped()/groupAdminCanUpdate() for every write
+          //    to a "special" collection, even though that fallback can
+          //    never actually grant stock/stock_ledger access. Never caught
+          //    before because no existing test exercised the real
+          //    two-document transaction (every prior stock rules test used a
+          //    single-document setDoc()).
+          //
+          // The fix that stayed under budget for BOTH roles: a single
+          // actorRoleMatches('Admin|GroupAdmin') call. isAdmin()'s only
+          // value beyond a plain role check — its isOwnerIdentity()/
+          // isSuperAdmin() bypass — is already redundant here, since
+          // warehouseActorCanUpdate() above already grants access via its
+          // OWN isOwnerIdentity()/actorIsSuperAdmin() branches before this
+          // clause is even reached; and two separate actorRoleMatches()
+          // calls cost enough extra to matter, so they're combined into one.
+          || actorRoleMatches('Admin|GroupAdmin')
         );
       allow delete: if false;
     }
@@ -1715,6 +1771,161 @@ service cloud.firestore {
         && request.resource.data.id == documentId;
       allow update: if actorIsActive() && (isOwnerIdentity() || isSuperAdmin())
         && resource.data.id == documentId && request.resource.data.id == documentId;
+      allow delete: if false;
+    }
+
+    // ── Geo Attendance Initiative — Phase 6: attendance ─────────────────
+    // Dedicated rules block for the `attendance` collection, replacing the
+    // generic wildcard's handling of this collection (audit §29.1, Risk #1).
+    // Two co-existing write paths on the same document:
+    //   1. Manual HR path (existing, unchanged): Admin/HR creates/updates
+    //      status/inTime/outTime/notes via isAdmin() or attendance:edit permission.
+    //   2. Self-service GPS path (new): employee creates their own check-in or
+    //      updates their own check-out. Only checkIn/checkOut sub-object fields
+    //      may be touched; once set, those fields are immutable (except via
+    //      Admin-correction path).
+    //   3. Admin-correction path (new): update of correction + any checkIn/checkOut
+    //      fields allowed for isAdmin(), paired with mandatory auditLogger call.
+    // audit_logs create rule is explicitly NOT changed (audit §29.2).
+    //
+    // LEAN self-service helper (Pre-Phase-11 gap closure): avoids the expensive
+    // currentUser() chain (get(authMapPath) + get(users/{userId}) = ~300 exp)
+    // by reading the auth-map doc directly (engine-cached, ~100 exp). The map's
+    // userId and companyId are validated at WRITE TIME by validOwnMapping, so
+    // the self-owned mapping is the authoritative identity anchor (same pattern
+    // as actorGroupId/actorIsGroupAdmin).
+    function isSelfServiceAttendanceWrite(data) {
+      return hasAuthMap()
+        && hasCompanyId(data)
+        && data.companyId == get(authMapPath()).data.companyId
+        && data.employeeId == get(authMapPath()).data.userId;
+    }
+    // Phase 15: Admin GPS-correction guard. When an Admin modifies checkIn or
+    // checkOut (immutable self-service evidence), a correction with a non-empty
+    // reason MUST be present in the same write. This closes the loophole that
+    // would otherwise allow an Admin to silently alter GPS evidence without
+    // documenting why. Admin updates to non-GPS fields (status, notes, etc.)
+    // remain unrestricted.
+    function requiresGPSReason(newData, oldData) {
+      // Phase 15: When an Admin modifies EXISTING GPS evidence (checkIn/
+      // checkOut that was already present with source:'gps'), a correction
+      // with a non-empty reason MUST be present in the same write. This
+      // closes the loophole that would otherwise allow an Admin to silently
+      // alter GPS evidence without documenting why.
+      //
+      // Deliberately NOT triggered by:
+      //  - a first-time add (oldData had no checkIn/checkOut yet) — this is
+      //    an original entry (self-service markAttendance() or a fresh GPS
+      //    write merged onto a manual record), not a correction of existing
+      //    evidence.
+      //  - modifying an existing sub-record whose OWN source is
+      //    'manual_admin' — there is no GPS evidence to silently alter; it
+      //    was never GPS in the first place.
+      // Logic: NOT(existingGpsEvidenceChanged) OR correctionPresent.
+      return !(
+        (
+          oldData.keys().hasAny(['checkIn']) && oldData.checkIn.source == 'gps'
+          && newData.keys().hasAny(['checkIn']) && newData.checkIn != oldData.checkIn
+        ) || (
+          oldData.keys().hasAny(['checkOut']) && oldData.checkOut.source == 'gps'
+          && newData.keys().hasAny(['checkOut']) && newData.checkOut != oldData.checkOut
+        )
+      ) || (
+        newData.keys().hasAny(['correction'])
+        && newData.correction.keys().hasAny(['reason'])
+        && newData.correction.reason is string
+        && newData.correction.reason.size() > 0
+      );
+    }
+    // LEAN GroupAdmin scope check for `attendance` create/update, purpose-built
+    // like `actorRoleMatches()` above. Live-verified 2026-08-21: the logically
+    // "correct" full groupAdminCanCreate()/groupAdminCanUpdate() calls blow
+    // Firestore's 1000-expression budget here — same fix class documented at
+    // the `stock` quantity-update clause above (isAdmin()/groupAdminCanUpdate()
+    // are each expensive multi-get() chains, and the generic wildcard
+    // fallback below independently re-evaluates groupAdminCanCreate()/
+    // groupAdminCanUpdate() for every write regardless of isSpecialCollection(),
+    // compounding the cost). This keeps the same real security property
+    // (actor is GroupAdmin AND the record's groupId equals the actor's own,
+    // AND that Group is not suspended per §9.6) at a fraction of the cost —
+    // it deliberately skips groupIdMatchesCompany()'s companyId/groupId
+    // cross-check, which is STILL strictly more scoping than the existing
+    // Admin branch below gets in this same rule (isAdmin() alone, no company
+    // check at all — a pre-existing, separate condition, not introduced here).
+    function attendanceGroupAdminScope(data) {
+      return actorRoleMatches('GroupAdmin')
+        && hasGroupId(data)
+        && data.groupId == actorGroupId()
+        && groupIsActive(data.groupId);
+    }
+    match /attendance/{id} {
+      // READ: intentionally more restrictive than canReadCompanyScoped():
+      // regular employees may ONLY read their own attendance (identity anchor),
+      // not all company attendance. Admin/super-admin/owner get full read;
+      // GroupAdmin gets §9.3 same-Group sibling-Company scope (multiTenant
+      // compliance); self-service checks the lean auth-map identity.
+      allow read: if actorIsActive() && (
+        isOwnerIdentity() || isSuperAdmin() || isAdmin()
+        || groupAdminCanRead(resource.data)
+        || isSelfServiceAttendanceWrite(resource.data)
+      );
+      // CREATE: self can create own check-in (first of the day), Admin can
+      // create any record (existing manual-entry flow preserved), and
+      // GroupAdmin can create a manual record for an employee within their
+      // own Group (§9.3 same-Group scope — isAdmin() only matches the
+      // literal 'Admin' role, so GroupAdmin needs its own explicit branch,
+      // same fix class as the Stock create rule above). Uses the lean
+      // actorRoleMatches('Admin') instead of isAdmin() — the latter's only
+      // extra value (isOwnerIdentity()/isSuperAdmin() bypass) is already
+      // covered by this clause's own first two branches.
+      // Identity guard: self-service must write their own employeeId.
+      allow create: if actorIsActive() && (
+        isOwnerIdentity()
+        || isSuperAdmin()
+        || actorRoleMatches('Admin')
+        || attendanceGroupAdminScope(request.resource.data)
+        || (
+          isSelfServiceAttendanceWrite(request.resource.data)
+          && request.resource.data.date is string && request.resource.data.date.size() > 0
+        )
+      );
+      // UPDATE: single clause covering Admin, GroupAdmin, self-service, and
+      // Admin-correction. Merged into one rule to stay within Firestore's
+      // 1000-expression budget.
+      // Four write paths:
+      //   1. Owner/SuperAdmin — unrestricted
+      //   2. Admin — unrestricted for non-GPS fields; GPS evidence changes
+      //      (checkIn/checkOut) require a correction with mandatory reason
+      //      (Phase 15 hardening — closes the silent-modification loophole)
+      //   3. GroupAdmin — same-Group scope (attendanceGroupAdminScope, plus
+      //      an explicit groupId-unchanged check since the lean helper only
+      //      takes one side), same GPS-evidence-reason guard as Admin
+      //   4. Self-service — identity-anchored, checkIn/checkOut immutable
+      allow update: if actorIsActive() && (
+        isOwnerIdentity() || isSuperAdmin()
+        || (
+          (
+            actorRoleMatches('Admin')
+            || (
+              attendanceGroupAdminScope(resource.data)
+              && (!hasGroupId(request.resource.data) || request.resource.data.groupId == resource.data.groupId)
+            )
+          )
+          && requiresGPSReason(request.resource.data, resource.data)
+        )
+        || (
+          isSelfServiceAttendanceWrite(resource.data)
+          && (
+            !resource.data.keys().hasAny(['checkIn'])
+            || request.resource.data.diff(resource.data).affectedKeys().hasAny(['checkIn']) == false
+          )
+          && (
+            !resource.data.keys().hasAny(['checkOut'])
+            || request.resource.data.diff(resource.data).affectedKeys().hasAny(['checkOut']) == false
+          )
+        )
+      );
+      // DELETE: always denied (consistent with house soft-delete convention).
       allow delete: if false;
     }
 

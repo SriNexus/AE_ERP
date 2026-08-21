@@ -57,7 +57,7 @@ import { statusBadge } from '../components/ui/Badge';
 import { WarehouseDetailsModal, WarehouseTransferModal } from '../features/warehouses/components/WarehouseModals';
 import { WarehouseFormComponent } from '../features/warehouses/components/WarehouseForm';
 import { useWarehouses, useSaveWarehouse, useDeleteWarehouse } from '../features/warehouses/hooks/useWarehouses';
-import { WAREHOUSE_FORM_DEFAULT, WAREHOUSE_STATUS_OPTIONS, type Warehouse, type WarehouseForm } from '../features/warehouses/types';
+import { WAREHOUSE_FORM_DEFAULT, WAREHOUSE_STATUS_OPTIONS, warehouseGeoToForm, parseWarehouseGeo, type Warehouse, type WarehouseForm } from '../features/warehouses/types';
 import {
   downloadWarehouseCsv,
   downloadWarehouseReport,
@@ -496,6 +496,7 @@ export default function Warehouses() {
       capacity: String(w.capacity || ''),
       status: w.status || 'Active',
       notes: w.notes || '',
+      ...warehouseGeoToForm(w),
     });
     setEditId(w.id);
     setShowForm(true);
@@ -505,7 +506,16 @@ export default function Warehouses() {
     e.preventDefault();
     if (saveMut.isPending) return;
     if (!form.name) return toast.error('Warehouse name is required');
-    saveMut.mutate(form);
+    // Parse geo fields from string form to validated numbers for Firestore
+    const geo = parseWarehouseGeo({
+      latitude: form.latitude,
+      longitude: form.longitude,
+      geofenceRadiusMeters: form.geofenceRadiusMeters,
+    });
+    saveMut.mutate({
+      ...form,
+      ...geo,
+    });
   }
 
   function exportSelected() {

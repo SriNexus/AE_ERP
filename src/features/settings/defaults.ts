@@ -26,6 +26,7 @@ import type {
   BackupSettings,
   DeveloperSettings,
 } from './types';
+import type { AttendanceSettings } from '../attendance/types';
 import { DEFAULT_EMAIL_TEMPLATES } from './emailRuntime';
 import { DEFAULT_BUILT_IN_THEME_ID } from '../../theme/presetIds';
 import { APPEARANCE_FONT_SIZE_SCHEMA } from './appearanceRuntime';
@@ -191,6 +192,19 @@ export const DEFAULT_BACKUP_SETTINGS: BackupSettings = {
 };
 
 // ── Developer ────────────────────────────────────────────────
+// ── Attendance (Phase 9) ───────────────────────────────────
+export const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettings = {
+  geofenceRadiusDefaultMeters: 200,
+  gpsAccuracyThresholdMeters: 50,
+  gracePeriodMinutes: 15,
+  shiftStartTime: '09:00',
+  shiftEndTime: '18:00',
+  halfDayThresholdHours: 4,
+  staleLocationMaxAgeSeconds: 300,
+  checkInMethod: 'gps',
+  weeklyOffDays: [0], // Sunday
+};
+
 export const DEFAULT_DEVELOPER_SETTINGS: DeveloperSettings = {
   apiKeys: [],
   webhookEndpoints: [],
@@ -221,6 +235,7 @@ export const SETTINGS_DEFAULTS: Record<SettingsSectionId, Record<string, unknown
   'audit-logs':         {},
   developer:            DEFAULT_DEVELOPER_SETTINGS as unknown as Record<string, unknown>,
   'about-erp':          {},
+  attendance:           DEFAULT_ATTENDANCE_SETTINGS as unknown as Record<string, unknown>,
 };
 
 /**

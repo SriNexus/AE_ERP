@@ -48,7 +48,7 @@ describe('Demo Mode Phase 1 readiness', () => {
     // documentation and its actual invariants: one canonical seed plan
     // (buildCompleteDemoPlan) and tenant-isolated reset scripts, with
     // company-demo-neozy as the sole isolation boundary.
-    const doc = readFileSync('docs/DEMO_MODE_BUSINESS_FLOW_REMEDIATION.md', 'utf8');
+    const doc = readFileSync('docs/operations/DEMO_MODE_BUSINESS_FLOW_REMEDIATION.md', 'utf8');
     expect(doc).toContain('buildCompleteDemoPlan()');
     expect(doc).toContain('seedDemoData.ts');
     expect(doc).toContain('resetDemoData.ts');

@@ -8,7 +8,7 @@ import { Badge, Button, Card, ConfirmDialog, Input, Modal, Pagination, Select, T
 import { INDIAN_STATES } from '../../../config/company';
 import { useProducts } from '../../../features/inventory/hooks/useInventory';
 import { useDeleteWarehouse, useSaveWarehouse, useWarehouses } from '../../../features/warehouses/hooks/useWarehouses';
-import { WAREHOUSE_FORM_DEFAULT, WAREHOUSE_STATUS_OPTIONS, type Warehouse, type WarehouseForm } from '../../../features/warehouses/types';
+import { WAREHOUSE_FORM_DEFAULT, WAREHOUSE_STATUS_OPTIONS, warehouseGeoToForm, parseWarehouseGeo, type Warehouse, type WarehouseForm } from '../../../features/warehouses/types';
 import { COLLECTIONS } from '../../../lib/firebase';
 import { fmtDate, getAll, updateDocById } from '../../../lib/firestore';
 import { getMovementsByWarehouse, summarizeMovements, type InventoryMovement } from '../../../lib/inventoryMovements';
@@ -214,6 +214,7 @@ function formFromWarehouse(warehouse: MobileWarehouse): WarehouseForm {
     capacity: warehouse.capacity || '',
     status: warehouse.status || 'Active',
     notes: warehouse.notes || '',
+    ...warehouseGeoToForm(warehouse),
   };
 }
 
@@ -420,8 +421,14 @@ export function MobileWarehouseWorkspace({ mode }: { mode: Mode }) {
   function submitForm(event: React.FormEvent) {
     event.preventDefault();
     if (!form.name.trim()) return toast.error('Warehouse name is required');
+    const geo = parseWarehouseGeo({
+      latitude: form.latitude,
+      longitude: form.longitude,
+      geofenceRadiusMeters: form.geofenceRadiusMeters,
+    });
     saveWarehouse.mutate({
       ...form,
+      ...geo,
       name: form.name.trim(),
       code: form.code.trim().toUpperCase(),
       capacity: form.capacity.trim(),
@@ -724,6 +731,16 @@ function WarehouseDialogs({ formOpen, form, dirty, saving, confirmClose, onClose
           <Section title="Manager">
             <Input label="Manager Name" value={form.managerName} onChange={(event) => onFormChange({ managerName: event.target.value })} />
             <Input label="Manager Phone" inputMode="tel" value={form.managerPhone} onChange={(event) => onFormChange({ managerPhone: event.target.value })} />
+          </Section>
+          <Section title="Geo-Fence / Attendance Location">
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Configure GPS coordinates for geo-fenced attendance check-in/check-out.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Latitude" inputMode="decimal" placeholder="e.g. 18.5204" value={form.latitude} onChange={(event) => onFormChange({ latitude: event.target.value })} />
+              <Input label="Longitude" inputMode="decimal" placeholder="e.g. 73.8567" value={form.longitude} onChange={(event) => onFormChange({ longitude: event.target.value })} />
+            </div>
+            <Input label="Geofence Radius (meters)" inputMode="decimal" placeholder="e.g. 200" value={form.geofenceRadiusMeters} onChange={(event) => onFormChange({ geofenceRadiusMeters: event.target.value })} />
           </Section>
           <Section title="Notes">
             <Textarea label="Notes" value={form.notes} onChange={(event) => onFormChange({ notes: event.target.value })} rows={4} />

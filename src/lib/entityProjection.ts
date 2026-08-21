@@ -131,6 +131,39 @@ async function attachUserId<T extends Record<string, unknown>>(col: ProjectionCo
   return { ...payload, [config.ownerField]: userId } as T & { userId: string };
 }
 
+/**
+ * Duplicate-user root cause fix.
+ *
+ * For every OTHER projection (Lead/Customer/Employee), attachUserId()'s
+ * phone-based master-identity resolution (userIdentity.ts's
+ * createOrResolveUserByPhone/resolveOrCreateMasterUser) is genuinely used:
+ * its `userId` result is written onto the projection document and is not
+ * blocked by that collection's write path.
+ *
+ * For COLLECTIONS.USERS specifically it is NOT: `userId` is unconditionally
+ * stripped by projectionUpdateWithoutIdentityOverwrite()'s blocklist below,
+ * so the result of attachUserId() was never actually persisted onto the real
+ * users/{authId} document. Its only observable effect was the side effect of
+ * createOrResolveUserByPhone()'s "no existing match" branch: it unconditionally
+ * creates a NEW users/MUSR-{companyId}-{phone} document — in the SAME
+ * `users` collection — seeded from the same name/email/role/status the real
+ * user is being created with. Because Users.tsx's list query
+ * (getAll(COLLECTIONS.USERS), no filter) renders every document in the
+ * collection, that orphaned master-identity document was indistinguishable
+ * from a second, real user account: the reported "two NITESH rows" bug.
+ *
+ * A User's identity is already anchored by the strongest possible key this
+ * architecture has — the Firebase Auth UID (`id` here) — so it never needs
+ * (and, per the above, was never actually using) phone-based resolution.
+ * Genuine cross-module identity linkage for Users is already provided by
+ * attachEntityId() below (writes `entityId`, which IS persisted) and by the
+ * explicit `employeeId` field a caller may set on the payload — neither of
+ * which this skip affects.
+ */
+function shouldResolveMasterIdentity(col: ProjectionCollection): boolean {
+  return col !== COLLECTIONS.USERS;
+}
+
 async function attachEntityId<T extends Record<string, unknown>>(col: ProjectionCollection, payload: T): Promise<T & { entityId: string }> {
   const entityInput = mapProjectionToEntity(col, payload);
   const result = await createOrResolveEntity(entityInput);
@@ -149,7 +182,7 @@ export async function createProjectionWithUserId<T extends Record<string, unknow
   payload: T
 ) {
   const hydrated = hydrateCreatePayload({ ...payload, id });
-  const withUser = await attachUserId(col, id, hydrated);
+  const withUser = shouldResolveMasterIdentity(col) ? await attachUserId(col, id, hydrated) : hydrated;
   const withEntity = await attachEntityId(col, withUser);
   if (col === COLLECTIONS.USERS) {
     // users write path bypasses the groupId-stamping write helpers (USERS is

@@ -53,7 +53,45 @@ export async function resolveAuthenticatedErpUser(authUser: Pick<User, 'uid' | '
       const profile = await gateway.readUser(text(mapping.userId));
       if (!profile) throw new AuthIdentityError('erp-profile-missing', 'The mapped ERP user profile no longer exists.');
       const validated = validateProfile(profile, text(mapping.userId), email);
-      if (text(mapping.companyId) !== validated.companyId) throw new AuthIdentityError('mapping-conflict', 'The authentication mapping company does not match the ERP profile.');
+      // Self-heal a stale mapping — the root cause behind "Group Admin
+      // permission-denied even after the write payload carries the correct
+      // groupId": user_auth_maps/{authUid} is written ONCE (createMapping(),
+      // below/at first login) and never touched again on ordinary logins,
+      // but firestore.rules' actorGroupId() and every groupAdminCan*() check
+      // read companyId/groupId straight from THIS cached document — not from
+      // the live users/{id} profile a client re-syncs into its own store on
+      // boot (useGlobalBoot.ts's profileSyncRef effect, 2026-08-19). A later
+      // reassignment (promoting an Admin to GroupAdmin and stamping a new
+      // groupId onto their profile; a GroupAdmin moving a user between
+      // sibling Companies of their own Group, §4.4) left this mapping
+      // permanently stale — previously that didn't just mis-scope writes, it
+      // hard-locked the account out of login entirely (this branch used to
+      // throw 'mapping-conflict' on every subsequent login instead of
+      // healing). `validated` is read via the SAME anchored userId this
+      // mapping already points at (never attacker-influenced: `userId` is
+      // immutable once set, guarded by firestoreAuthIdentityGateway
+      // .createMapping()'s own transaction below), so refreshing the
+      // mapping's denormalized fields to match it can never grant an actor
+      // access to an identity other than their own already-established one.
+      //
+      // The refresh write is itself best-effort: user_auth_maps' own update
+      // rule makes groupId immutable-once-set and companyId always
+      // immutable (Master Plan §3.2 — a client can never move its own
+      // mapping into a different Company/Group after the fact). This
+      // successfully heals the real, documented case — a mapping that never
+      // had a groupId getting one stamped for the first time (a promotion
+      // to Group Admin) — and is rejected by rules for any other mismatch,
+      // which then requires direct database correction. Either way, login
+      // itself must never fail merely because this best-effort refresh
+      // couldn't complete — the caller still gets a working (if, in that
+      // rarer case, mis-scoped-until-corrected) session, exactly like
+      // useGlobalBoot.ts's equivalent client-side self-heal, which is
+      // already best-effort/non-blocking for the identical reason.
+      const staleCompanyId = text(mapping.companyId) !== validated.companyId;
+      const staleGroupId = text(mapping.groupId) !== (validated.groupId || '');
+      if (staleCompanyId || staleGroupId) {
+        await gateway.createMapping(authUid, validated).catch(() => undefined);
+      }
       return validated;
     }
     // UID-keyed account doc first — the strongest identity key the architecture
@@ -116,3 +154,50 @@ export const firestoreAuthIdentityGateway: AuthIdentityGateway = {
     });
   },
 };
+
+/**
+ * Best-effort refresh of user_auth_maps/{authUid} against a freshly-loaded
+ * ERP profile — the same self-heal resolveAuthenticatedErpUser() performs
+ * inline at explicit login time, exposed standalone so an ALREADY-OPEN
+ * session can close the identical staleness gap without requiring a
+ * logout/login.
+ *
+ * Why this is needed in addition to the inline login-time heal:
+ * resolveAuthenticatedErpUser() only runs from Login.tsx's explicit
+ * sign-in submit. A resumed session (page reload with a still-valid
+ * Firebase Auth session) never calls it — useGlobalBoot.ts's own profile
+ * self-heal effect (2026-08-19) re-reads the live users/{id} profile via
+ * loadCurrentUserProfile() instead, and until this function existed, never
+ * touched user_auth_maps at all. Firestore rules' actorGroupId() /
+ * groupAdminCanCreate()/Update() read groupId/companyId straight from that
+ * mapping document, not from anything the client holds in memory — so a
+ * mapping that predates a company/group reassignment stayed stale for the
+ * lifetime of the browser tab even after the client-side identity had
+ * already self-healed, and every groupAdminCan*() write kept failing
+ * regardless of what correct groupId the write payload itself carried.
+ *
+ * Never throws — a failed read or a rejected write (e.g. rules'
+ * groupId-immutable-once-set guard rejecting a genuine cross-Group
+ * reassignment, which requires direct database correction) is swallowed;
+ * this must never block boot or app usage.
+ */
+export async function refreshAuthMappingIfStale(
+  authUid: string,
+  profile: ErpUserProfile,
+  gateway: AuthIdentityGateway = firestoreAuthIdentityGateway,
+): Promise<void> {
+  const uid = text(authUid);
+  if (!uid) return;
+  try {
+    const mapping = await gateway.readMapping(uid);
+    if (!mapping) return;
+    if (text(mapping.userId) !== profile.id) return; // not our mapping to touch
+    const staleCompanyId = text(mapping.companyId) !== profile.companyId;
+    const staleGroupId = text(mapping.groupId) !== text(profile.groupId);
+    if (staleCompanyId || staleGroupId) {
+      await gateway.createMapping(uid, profile);
+    }
+  } catch {
+    // Best-effort — never blocks the caller.
+  }
+}
