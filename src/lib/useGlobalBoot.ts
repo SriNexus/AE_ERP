@@ -2,8 +2,9 @@
 import { useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { onAuthStateChanged } from 'firebase/auth';
-import { createDocWithId, getAll, resolveWriteCompanyId, updateDocById } from './firestore';
-import { COLLECTIONS, auth, firebaseEnv } from './firebase';
+import { collection, getDocs, query as fbQuery, where } from 'firebase/firestore';
+import { createDocWithId, getAll, isRealCompanyId, resolveWriteCompanyId, updateDocById } from './firestore';
+import { COLLECTIONS, auth, db, firebaseEnv } from './firebase';
 import { useAppStore } from '../store/useAppStore';
 import { resolveSessionCompanyId } from './tenantRouting';
 import { loadCurrentUserProfile, syncCurrentUserProfile } from './userProfile';
@@ -67,6 +68,70 @@ export function shouldReconcileStaleSession(firebaseUser: unknown, isAuthenticat
  */
 export function canSelfHealSystemRoles(user: { isSuperAdmin?: boolean; isOwner?: boolean } | null | undefined): boolean {
   return user?.isSuperAdmin === true || user?.isOwner === true;
+}
+
+/**
+ * RBAC Phase 3 (RBAC-F05 closure) — pure decision function for the
+ * roles_global query's cache-key company segment. Extracted so it is
+ * directly unit-testable without mounting the hook.
+ *
+ * Before this fix, `['roles_global']` was a STATIC key: switching
+ * activeCompanyId from Company A to Company B did not change the key, so
+ * TanStack Query could keep serving Company A's still-fresh (staleTime:
+ * 30min) cached roles as if they were Company B's — canDo() then evaluated
+ * every permission against the WRONG company's role documents until the
+ * cache happened to go stale. Suffixing the key with the resolved company id
+ * gives each company its own cache entry, so a company switch is a genuine
+ * cache-key change (TanStack treats it as a different query, not a stale
+ * read of the old one).
+ *
+ * This MUST resolve to the exact same company companyScopedQuery() (in
+ * firestore.ts) actually scopes the `roles` collection read to for the
+ * SAME (activeCompanyId, user) inputs — a mismatch here would silently
+ * decouple the cache key from the data it names, defeating the whole fix.
+ * Mirrored branch-for-branch against companyScopedQuery's `roles`-specific
+ * behavior (verified by direct inspection, not assumed):
+ *
+ *  - activeCompanyId === 'group' (Group View): companyScopedQuery()
+ *    intercepts this BEFORE its roles/companies branch, for EVERY
+ *    collection, and returns a groupId constraint instead of a companyId
+ *    one. Role documents never carry a groupId field (architectural
+ *    invariant — role docs are per-company keyed only), so getAll(ROLES)
+ *    would always return zero documents here — which is exactly why the
+ *    roles_global queryFn below does NOT call getAll() for this branch; it
+ *    fetches the actor's HOME company's role documents directly instead
+ *    (mirroring Users.tsx's own pre-existing Group-View role-query
+ *    workaround). Tagging the cache key with the distinct sentinel 'group'
+ *    (never a real companyId) is still required even though the underlying
+ *    data now equals the home company's own roles: it keeps this entry from
+ *    colliding with — and, on a background refetch, silently overwriting —
+ *    the real home-company cache entry (whose OWN key is the literal
+ *    companyId, not 'group'). (Live regression, found and fixed alongside
+ *    this comment: an earlier version of this function's own reasoning
+ *    correctly predicted that leaving the roles_global fetch as a raw
+ *    getAll(ROLES) call in Group View would return empty and collapse
+ *    canDo() to false for every module, not just roles — but only used that
+ *    prediction to justify Phase 4's narrow 'roles' mutation guard, without
+ *    also fixing the empty-fetch root cause for every OTHER module. See the
+ *    RBAC Group-View-permission-collapse fix report for the full account.)
+ *  - a real company id (isRealCompanyId true): companyScopedQuery() scopes
+ *    the fetch to that exact id (for a non-owner/non-super-admin actor) —
+ *    the key uses the identical value.
+ *  - neither of the above ('all' / 'default' / unset): companyScopedQuery()
+ *    falls back to user?.companyId for a non-owner/non-super-admin actor
+ *    (owner/super-admin instead get an unscoped, cross-company read — inert
+ *    for cache-key purposes here, since canDo() short-circuits to `true`
+ *    for isSuperAdmin before ever consulting permissionCache, and this
+ *    codebase's own fixtures always pair isOwner:true with
+ *    isSuperAdmin:true — see Phase 3 report §4 for the full analysis).
+ */
+export function resolveRolesGlobalCacheCompanyId(
+  activeCompanyId: string | null | undefined,
+  userCompanyId: string | null | undefined,
+): string {
+  if (activeCompanyId === 'group') return 'group';
+  if (isRealCompanyId(activeCompanyId)) return activeCompanyId;
+  return userCompanyId || 'unresolved';
 }
 
 export function useGlobalBoot() {
@@ -182,23 +247,42 @@ export function useGlobalBoot() {
   // refreshAuthMappingIfStale() closes that gap using the exact same
   // gateway/comparison logic resolveAuthenticatedErpUser() already uses at
   // login time — no second group-resolution system.
+  // Root cause (live-verified, 2026-08-23): this effect previously used a
+  // `cancelled` flag — the standard React pattern for discarding a stale
+  // async result from a SUPERSEDED effect run — set `true` by the effect's
+  // own cleanup function. That pattern is wrong here and silently defeated
+  // the entire self-heal fix above: React 18/19 StrictMode's development-
+  // only mount -> cleanup -> remount cycle runs SYNCHRONOUSLY, so `cancelled`
+  // was already `true` long before the `await loadCurrentUserProfile(...)`
+  // Firestore read could ever resolve — every single self-heal attempt
+  // fetched the correct, corrected profile (confirmed live: the fetch
+  // returned the right groupId) and then silently discarded it via
+  // `if (!cancelled) syncCurrentUserProfile(profile);` never firing. No
+  // error, no diagnostic — `syncCurrentUserProfile` was simply never called.
+  // `profileSyncRef` (below) already provides the real protection this
+  // effect needs: it is set SYNCHRONOUSLY before the async work starts, so
+  // even StrictMode's remount correctly bails out via the ref check before
+  // starting a second fetch — there is only ever one in-flight attempt per
+  // user.id, so there is no genuine "stale superseded effect" to protect
+  // against. `syncCurrentUserProfile()` also already re-checks the CURRENT
+  // store state itself (`current.id !== profile.id`) before applying
+  // anything, so a user who logged out or switched identity mid-fetch is
+  // still safe without any cancellation flag here.
   const profileSyncRef = useRef<string | null>(null);
   useEffect(() => {
     if (!user?.id || user.isOwner || isDemo) return;
     if (profileSyncRef.current === user.id) return;
     profileSyncRef.current = user.id;
-    let cancelled = false;
     (async () => {
       try {
         const profile = await loadCurrentUserProfile(user.id);
-        if (!cancelled) syncCurrentUserProfile(profile);
+        syncCurrentUserProfile(profile);
         const authUid = auth.currentUser?.uid;
         if (authUid) await refreshAuthMappingIfStale(authUid, profile);
       } catch {
         // Best-effort self-heal — see comment above.
       }
     })();
-    return () => { cancelled = true; };
   }, [user?.id, user?.isOwner, isDemo]);
 
   useEffect(() => {
@@ -277,7 +361,38 @@ export function useGlobalBoot() {
   // bootstrap resolves the current user's role against THEIR company's role
   // documents. Owner/super-admin keep the unscoped platform-wide read (the
   // same exemption as the Phase 0 F-01 companies fix).
-  const { data: roles, isError: rolesQueryFailed, error: rolesQueryError } = useQuery({ queryKey:['roles_global'], queryFn:()=>getAll(COLLECTIONS.ROLES), staleTime:1000*60*30, enabled:!!user });
+  //
+  // RBAC Phase 3 (RBAC-F05 closure): the query KEY must carry the same
+  // company scope the FETCH above actually uses, or a company switch can
+  // silently keep serving the previous company's still-fresh cache under
+  // the old static ['roles_global'] key — see resolveRolesGlobalCacheCompanyId's
+  // own doc comment for the full, branch-by-branch justification.
+  const rolesGlobalCompanyId = resolveRolesGlobalCacheCompanyId(activeCompanyId, user?.companyId);
+  // Group-View permission collapse fix: getAll(ROLES) internally applies
+  // companyScopedQuery()'s groupId-based Group-View branch, which ALWAYS
+  // returns zero documents (role docs never carry groupId) — so a raw
+  // getAll() call here would leave permissionCache.roles empty for the
+  // entire duration of a real Group-View session, collapsing canDo() to
+  // false for every module (not just the 'roles' mutations Phase 4
+  // deliberately denies), including for actions the Firestore rules
+  // themselves already permit. Fetching the actor's HOME company's role
+  // documents directly — mirroring Users.tsx's own pre-existing Group-View
+  // role-query workaround exactly — gives canDo() real permission data to
+  // resolve against. This changes ONLY client-side UI-gating output; it
+  // grants no additional Firestore write authority (companyScopedQuery()'s
+  // actual READ/WRITE scoping for every OTHER collection is untouched, and
+  // canCreateCompanyScoped()/canUpdateCompanyScoped() never consult a role
+  // document's permissions map at all — see the Phase 8 report).
+  const rolesGlobalQueryFn = () => {
+    if (activeCompanyId === 'group') {
+      const homeCompanyId = user?.companyId;
+      if (!homeCompanyId) return Promise.resolve([]);
+      return getDocs(fbQuery(collection(db, COLLECTIONS.ROLES), where('companyId', '==', homeCompanyId)))
+        .then((snap) => snap.docs.map((d) => ({ ...d.data(), id: d.id })));
+    }
+    return getAll(COLLECTIONS.ROLES);
+  };
+  const { data: roles, isError: rolesQueryFailed, error: rolesQueryError } = useQuery({ queryKey:['roles_global', rolesGlobalCompanyId], queryFn: rolesGlobalQueryFn, staleTime:1000*60*30, enabled:!!user });
   // Blank-screen safety net: without this, a permanently failing (not merely
   // slow) roles_global query left `roles` undefined forever, the bootstrap
   // effect below's `if (!user || !roles) return;` guard never let `run()`
@@ -390,7 +505,10 @@ export function useGlobalBoot() {
             currentRoles = [...currentRoles, ...companySeeds];
           }
 
-          queryClient.setQueryData(['roles_global'], currentRoles);
+          // RBAC Phase 3: write to the SAME company-suffixed key the query
+          // above now reads from — writing the old, bare ['roles_global']
+          // shape here would populate a cache entry nothing reads anymore.
+          queryClient.setQueryData(['roles_global', rolesGlobalCompanyId], currentRoles);
           queryClient.setQueryData(['roles'], currentRoles);
         } catch (error) {
           diagnostics.push(`role-seed-failed:${error instanceof Error ? error.message : String(error)}`);
@@ -448,7 +566,8 @@ export function useGlobalBoot() {
               const migrated = migratedRoles.find((next) => String(next.id) === String(role.id));
               return migrated || role;
             });
-            queryClient.setQueryData(['roles_global'], currentRoles);
+            // RBAC Phase 3: same company-suffixed key as the query above.
+            queryClient.setQueryData(['roles_global', rolesGlobalCompanyId], currentRoles);
             queryClient.setQueryData(['roles'], currentRoles);
           } catch (error) {
             diagnostics.push(`role-migration-failed:${error instanceof Error ? error.message : String(error)}`);
@@ -482,7 +601,7 @@ export function useGlobalBoot() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id, user?.role, user?.isSuperAdmin, roles, queryClient, setPermissionCache, setRoleData]);
+  }, [user?.id, user?.role, user?.isSuperAdmin, roles, rolesGlobalCompanyId, queryClient, setPermissionCache, setRoleData]);
 
   // Phase 9B: Passive FCM device token registration
   // Only attempts to register if notification permission is already granted.

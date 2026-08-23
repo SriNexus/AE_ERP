@@ -857,14 +857,80 @@ service cloud.firestore {
       // per-company keyed copies BEFORE this rule ships (expand → backfill →
       // contract ordering, Master Plan §10.3).
       allow read: if actorIsActive() && signedIn() && (resource == null || canReadCompanyScoped() || groupAdminCanReadRole(resource.data));
-      // System roles (isSystem=true) are protected: company Admins may manage
-      // custom roles, only Super Admins may create/modify system roles. Both
-      // the existing doc (update) and the requested doc (create/update) are
-      // checked so an Admin cannot promote a custom role to a system role via
-      // an update that adds isSystem=true.
-      allow create: if actorIsActive() && isAdmin() && (roleNotSystemProtected(request.resource.data) || isSuperAdmin());
-      allow update: if actorIsActive() && isAdmin() && (roleNotSystemProtected(resource.data) || isSuperAdmin())
-        && (roleNotSystemProtected(request.resource.data) || isSuperAdmin());
+      // Phase 1 (RBAC-F01/RBAC-F16 closure, 2026-08-22): two problems fixed in
+      // the same change because both live in this one authorization boundary.
+      //
+      // RBAC-F01 — GroupAdmin had NO write path at all: isAdmin() only matches
+      // the literal role 'Admin', so a GroupAdmin (whose grants are otherwise
+      // resolved as "the target Company's own Admin permissions", exactly like
+      // every other module) was denied unconditionally. Fixed by reusing
+      // groupAdminCanReadRole() — already proven, already tested on the read
+      // rule above, and structurally the correct helper: role docs carry only
+      // companyId (never groupId, §3.2), so the GENERIC groupAdminCanCreate()/
+      // groupAdminCanUpdate() (which require hasGroupId(data)) can never match
+      // a role document — groupAdminCanReadRole()'s companies/{companyId}.
+      // groupId == actorGroupId() resolution is the only correct shape for
+      // this collection, same reason it was needed for the read rule. Reusing
+      // it here (rather than writing a second, near-duplicate helper) also
+      // keeps this change's expression cost to exactly one more call site per
+      // clause, not a new heavy helper — sizing this deliberately against the
+      // 1000-expression budget after this session's earlier Stock/Attendance
+      // overflows from "obviously correct" full helpers.
+      //
+      // RBAC-F16 — isAdmin() alone carries NO company-scoping (no sameCompany,
+      // no companyIdUnchanged), unlike every sibling collection in this file
+      // (see the `companies` block's own update rule above). As deployed
+      // before this change, any Company Admin could create or update ANY
+      // OTHER company's role document, including relocating it or silently
+      // editing another company's permission grants. Fixed by adding
+      // sameCompany()/companyIdUnchanged() to the Admin branch, mirroring the
+      // `companies` collection's own established pattern exactly (that
+      // pattern already subjects isAdmin()'s SuperAdmin/owner bypass to the
+      // same companyIdUnchanged() guard too — this is this file's own
+      // existing convention for "unrestricted WHICH company, but not free
+      // relocation", not a new restriction invented for this change).
+      //
+      // System-role protection (roleNotSystemProtected) is preserved
+      // unchanged for Admin and applied identically to GroupAdmin (AD-1,
+      // approved 2026-08-22): GroupAdmin may manage custom roles in-scope,
+      // never system roles — the same boundary an ordinary Admin already has.
+      //
+      // groupId-ban: role documents never carry a groupId field, for anyone,
+      // by design (§3.2 excludes `roles` from the groupId denormalization).
+      // A write that ever introduces a groupId key is rejected outright — the
+      // most direct way to make "GroupAdmin cannot forge/move via groupId"
+      // true, and it restricts nothing SuperAdmin legitimately does today
+      // (roleBootstrap.ts's seeds never write groupId either).
+      allow create: if actorIsActive() && (
+        (isAdmin() && sameCompany(request.resource.data) && (roleNotSystemProtected(request.resource.data) || isSuperAdmin()))
+        || (groupAdminCanReadRole(request.resource.data) && roleNotSystemProtected(request.resource.data))
+      ) && !request.resource.data.keys().hasAny(['groupId']);
+      // Expression-budget note (live-verified 2026-08-22, same class as this
+      // session's earlier Stock/Attendance overflows): the "obviously
+      // correct" first draft here — sameCompany() called on BOTH resource.data
+      // and request.resource.data, plus `|| isSuperAdmin()` repeated on both
+      // system-role guards — exceeded the 1000-expression budget specifically
+      // on a Super Admin system-role update (every heavy identity/company
+      // helper compounding with the wildcard fallback's own fixed re-
+      // evaluation tax). Both simplifications below are safe, semantics-
+      // preserving algebra, not a security reduction: (1) sameCompany(
+      // request.resource.data) is redundant once sameCompany(resource.data)
+      // and companyIdUnchanged() both hold — the two companyId values are
+      // then provably identical, so the second full re-derivation (with its
+      // own get()) is dropped; (2) `(A||C) && (B||C)` is algebraically
+      // `(A&&B)||C` — the two separate `|| isSuperAdmin()` fallbacks collapse
+      // into one, cutting a duplicated isSuperAdmin()/currentUser() re-entry.
+      allow update: if actorIsActive() && (
+        (isAdmin() && sameCompany(resource.data) && companyIdUnchanged()
+          && ((roleNotSystemProtected(resource.data) && roleNotSystemProtected(request.resource.data)) || isSuperAdmin()))
+        || (groupAdminCanReadRole(resource.data) && companyIdUnchanged()
+          && roleNotSystemProtected(resource.data) && roleNotSystemProtected(request.resource.data))
+      ) && !request.resource.data.keys().hasAny(['groupId']);
+      // DELETE: out of Phase 1 scope — RBAC-F01/RBAC-F16 are create/update-only
+      // findings. allow delete: if false is preserved unchanged for every
+      // actor, including Super Admin (soft-delete, via deleteDocById ->
+      // softDelete() -> updateDocById, is already correctly covered by the
+      // update fix above as a natural consequence, not a separate grant).
       allow delete: if false;
     }
 
@@ -1023,91 +1089,83 @@ service cloud.firestore {
       // at first login and could be missing/purged), so the owner bypasses
       // the anchor entirely. companyId stays immutable and the owner's own
       // record stays protected (same global clauses as the non-owner rule).
-      allow update: if actorIsActive() && isOwnerIdentity()
-        // companyId immutable on update
-        && request.resource.data.companyId == resource.data.companyId
-        // Phase 1: channelPartnerId immutable once established.
-        && channelPartnerLinkUnchanged()
-        // Owner-record protection (existing doc email).
-        && resource.data.email != 'shreeniwas.tripathi0@gmail.com';
-      // Non-owner update rule — flattened, mapping-anchored.
-      // Anchor: the actor must have a self-owned auth map whose userId points
-      // at their ERP identity doc (master-identity MUSR-* ids are valid) and
-      // whose email == verified token email.
-      // A) self-update: own profile fields only (selfAccessFieldsUnchanged).
-      // B) admin/super-admin: actor doc role must be Admin; super-admin may
-      //    grant/revoke isSuperAdmin cross-company, company admin may manage
-      //    same-company users without changing isSuperAdmin or companyId.
-      allow update: if actorIsActive() && signedIn()
-        && exists(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid))
-        && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId is string
-        && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.email == request.auth.token.email
-        && (
+      // Budget engineering (live-bisect, 2026-08-23): branches A/B/C below
+      // used to re-derive get(authMapPath()).data.userId and
+      // get(users/{mappedUserId}).data ~13 times across separate literal
+      // call sites. Each get() itself is engine-cached (same resolved path),
+      // but every repeated .data.field chain is still its own AST node
+      // counted toward the 1000-expression request budget. A real save from
+      // the Users workspace always recomputes `department` (+ `isManager`)
+      // alongside `role` (useUsers.ts's enrichOrgFields — every edit, not
+      // just role changes), which flips managerAssignmentUnchanged() to
+      // false and forces managerScopeMatches() to actually evaluate — a
+      // payload shape the pre-existing tests never exercised (they only
+      // ever wrote a bare { role: '...' }). That one extra evaluation was
+      // enough to exhaust a budget branches A/B/C had already nearly used
+      // up, live-reproduced as "Missing or insufficient permissions" for a
+      // Group Admin changing a user's role whenever the role change also
+      // changes department (i.e. almost always) — see
+      // groupAdminFullGroupAccess.emulator.test.ts. Consolidating the
+      // repeated get() chains into two `let` bindings, referenced afterward
+      // as cheap field lookups, cuts the evaluated-node count without
+      // changing any condition's logic.
+      function usersUpdateAllowed(userId) {
+        let authMap = get(authMapPath()).data;
+        let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
+        return (
           // A) self-update: own profile fields only (companyId immutable).
-          (get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId == userId && selfAccessFieldsUnchanged()
+          (authMap.userId == userId && selfAccessFieldsUnchanged()
             && request.resource.data.companyId == resource.data.companyId)
-          // B) admin/super-admin: actor doc role must be Admin; super-admin may
-          //    grant/revoke isSuperAdmin cross-company, company admin may
-          //    manage same-company users without changing isSuperAdmin or
-          //    companyId (companyId immutable on this path).
+          // B) admin/super-admin: actor doc role must be Admin; super-admin
+          //    may grant/revoke isSuperAdmin cross-company, company admin
+          //    may manage same-company users without changing isSuperAdmin
+          //    or companyId (companyId immutable on this path).
           || (
-            get(/databases/$(database)/documents/users/$(get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId)).data.role == 'Admin'
+            actor.role == 'Admin'
             && (
-              get(/databases/$(database)/documents/users/$(get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId)).data.isSuperAdmin == true
+              actor.isSuperAdmin == true
               || (
-                get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.companyId == resource.data.companyId
-                && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.companyId == request.resource.data.companyId
+                authMap.companyId == resource.data.companyId
+                && authMap.companyId == request.resource.data.companyId
                 && (request.resource.data.isSuperAdmin == true) == (resource.data.isSuperAdmin == true)
               )
             )
             && request.resource.data.companyId == resource.data.companyId
             // §5.1: only Super Admin creates Group Admins — folded into the
-            // Admin branch (the GroupAdmin branch and the self branch already
-            // forbid the role), so GroupAdmin actors short-circuit before it.
-            && (get(/databases/$(database)/documents/users/$(get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId)).data.isSuperAdmin == true
+            // Admin branch (the GroupAdmin branch and the self branch
+            // already forbid the role), so GroupAdmin actors short-circuit
+            // before it.
+            && (actor.isSuperAdmin == true
               || !request.resource.data.keys().hasAny(['role'])
               || request.resource.data.role != 'GroupAdmin')
           )
           // C) §4.4 (Phase 2): Group Admin manages any user inside their own
           //    Group — including same-Group Company transfer (users.companyId
           //    may change; this is the ONE deliberate companyId-immutability
-          //    relaxation in the whole plan). Never a Group escape: the target
-          //    user's groupId must equal the actor's authoritative Group and
-          //    stay unchanged. Never a promotion: the isSuperAdmin flag cannot
-          //    change and the role can only be changed to a non-GroupAdmin
-          //    value (only Super Admin creates Group Admins — §5.1). The NEW
-          //    companyId must belong to the actor's Group.
-          //    Phase 5 (§7.9): ONE deliberate promotion exception — an active
-          //    Group Admin may add a SECOND Group Admin for their own Group.
-          //    The target must (a) not be the actor (self-promotion remains
-          //    forbidden), and (b) already have its authoritative
-          //    group_members/{groupId}_{userId} record (the self-service grant
-          //    flow creates the membership FIRST, so the role-only promotion
-          //    path — updating users.role without the auditable membership —
-          //    stays closed). exists() is a path-only lookup (no data deref),
-          //    deliberately cheaper than a get() for the expression budget.
+          //    relaxation in the whole plan). Never a Group escape: the
+          //    target user's groupId must equal the actor's authoritative
+          //    Group and stay unchanged. Never a promotion: the isSuperAdmin
+          //    flag cannot change and the role can only be changed to a
+          //    non-GroupAdmin value (only Super Admin creates Group Admins —
+          //    §5.1). The NEW companyId must belong to the actor's Group.
+          //    Phase 5 (§7.9): ONE deliberate promotion exception — an
+          //    active Group Admin may add a SECOND Group Admin for their own
+          //    Group. The target must (a) not be the actor (self-promotion
+          //    remains forbidden), and (b) already have its authoritative
+          //    group_members/{groupId}_{userId} record.
           || (
-            get(/databases/$(database)/documents/users/$(get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId)).data.role == 'GroupAdmin'
+            actor.role == 'GroupAdmin'
             && hasGroupId(resource.data) && resource.data.groupId == actorGroupId()
             && groupIsActive(resource.data.groupId)
-            // request.resource.data is the MERGED post-update doc, so the
-            // request groupId is the resource groupId already validated above;
-            // the shared tail's groupIdUnchanged() then blocks any actual
-            // groupId re-point. (hasGroupId(request) would be redundant for
-            // the same reason — dropped to stay under the expression budget.)
             && (request.resource.data.isSuperAdmin == true) == (resource.data.isSuperAdmin == true)
             && (
               !request.resource.data.keys().hasAny(['role'])
               || request.resource.data.role != 'GroupAdmin'
               // §7.9 promotion exception — reached only when role IS
-              // 'GroupAdmin' (the clause above failed). LEAN (expression
-              // budget): compares against the SAME auth-map userId the rule
-              // top already read (engine-cached) instead of currentUserId()
-              // (whose isOwnerIdentity()/hasUserProfile() re-entry re-counts
-              // toward the 1000-expression budget). The self-grant case
-              // (target == actor) is the one promotion shape that must ALWAYS
-              // be denied.
-              || (userId != get(authMapPath()).data.userId
+              // 'GroupAdmin' (the clause above failed). The self-grant case
+              // (target == actor) is the one promotion shape that must
+              // ALWAYS be denied.
+              || (userId != authMap.userId
                 && exists(/databases/$(database)/documents/group_members/$(resource.data.groupId + '_' + userId)))
             )
             && groupAdminUserCompanyMatches(request.resource.data)
@@ -1116,18 +1174,37 @@ service cloud.firestore {
         // §3.2: users.groupId is immutable on update for every actor class
         // (GroupAdmin's group is set at creation; every other user's groupId
         // is derived from their companyId's Group, and same-Group Company
-        // transfers keep the groupId unchanged — the GroupAdmin branch
-        // enforces the transfer's company-in-Group coherence). Cheap
-        // diff-based check: no get()s.
+        // transfers keep the groupId unchanged).
         && groupIdUnchanged()
         // Phase 1: channelPartnerId immutable once established.
         && channelPartnerLinkUnchanged()
-        // Manager-department coherence (data-driven section model).
-        // Skipped when the assignment is unchanged (legacy-edit escape hatch);
+        // Manager-department coherence (data-driven section model). Skipped
+        // when the assignment is unchanged (legacy-edit escape hatch);
         // enforced whenever managerId/department actually change.
         && (managerAssignmentUnchanged() || managerScopeMatches())
         // Owner-record protection (existing doc email).
         && resource.data.email != 'shreeniwas.tripathi0@gmail.com';
+      }
+
+      allow update: if actorIsActive() && isOwnerIdentity()
+        // companyId immutable on update
+        && request.resource.data.companyId == resource.data.companyId
+        // Phase 1: channelPartnerId immutable once established.
+        && channelPartnerLinkUnchanged()
+        // Owner-record protection (existing doc email).
+        && resource.data.email != 'shreeniwas.tripathi0@gmail.com';
+      // Non-owner update rule — flattened, mapping-anchored, budget-
+      // engineered (see usersUpdateAllowed() above for why and how).
+      // Anchor: the actor must have a self-owned auth map whose userId points
+      // at their ERP identity doc (master-identity MUSR-* ids are valid) and
+      // whose email == verified token email. Branches A/B/C and the shared
+      // tail conditions live in usersUpdateAllowed(userId), called only once
+      // this anchor has already passed.
+      allow update: if actorIsActive() && signedIn()
+        && exists(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid))
+        && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId is string
+        && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.email == request.auth.token.email
+        && usersUpdateAllowed(userId);
       allow delete: if false;
     }
 

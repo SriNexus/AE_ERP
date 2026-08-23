@@ -213,6 +213,28 @@ export function canDo(first: Permission | Module, second: Permission | Module, r
   const module = isPermission(first) && isModule(second) ? second : first as Module;
   const state = useAppStore.getState();
 
+  // RBAC Phase 4 (RBAC-F03 closure, AD-2 — Group View has NO role-permission
+  // company context): role documents are strictly per-company (never carry a
+  // groupId — Phase 1 §3.2, Phase 3 report §4), so while activeCompanyId is
+  // the Group-view sentinel 'group' there is no single company whose role
+  // permissions a roles.create/edit/delete mutation could even target — the
+  // question "is this allowed" has no valid company context to answer it
+  // against, so it fails closed. This is a CONTEXT rule (there is no company
+  // to mutate), not an authorization downgrade — it therefore applies to
+  // every actor, including Super Admin, and is checked before, independent
+  // of, and unaffected by the Super Admin bypass and permissionCache below
+  // (whatever happens to be cached for the 'roles' key cannot override it —
+  // see the Phase 4 report §5 for why this belongs here rather than in the
+  // Phase 3 cache-key mechanism: permissionCache is a single flat map, not
+  // partitioned per company, so emptying it for Group View would fail-close
+  // EVERY module, not just roles — the explicit non-goal in this phase's
+  // spec §14). Deliberately narrow: only this one module and these three
+  // actions are special-cased — canDo() does not become a general
+  // scope-checking engine, and every other module/action is unaffected.
+  if (module === 'roles' && (action === 'create' || action === 'edit' || action === 'delete') && state.activeCompanyId === 'group') {
+    return false;
+  }
+
   if (state.user?.isSuperAdmin === true) return true;
 
   if (!isPermission(action)) {

@@ -203,6 +203,12 @@ async function seed() {
     await setDoc(doc(db, 'roles', `${COMPANY_B}_Admin`), { id: `${COMPANY_B}_Admin`, companyId: COMPANY_B, name: 'Admin', schemaVersion: 1, isSystem: true, permissions: {} });
     await setDoc(doc(db, 'roles', `${COMPANY_C}_Admin`), { id: `${COMPANY_C}_Admin`, companyId: COMPANY_C, name: 'Admin', schemaVersion: 1, isSystem: true, permissions: {} });
     await setDoc(doc(db, 'roles', 'ROL-CUSTOM-A'), { id: 'ROL-CUSTOM-A', companyId: COMPANY_A, name: 'Custom A', schemaVersion: 1, permissions: {} });
+    // RBAC Phase 1 (RBAC-F01/RBAC-F16 closure): custom roles in COMPANY_B and
+    // COMPANY_C so the write-authorization matrix has a real, non-system
+    // target document in every scope combination (own company, same-Group
+    // sibling company, different-Group company) — not just COMPANY_A.
+    await setDoc(doc(db, 'roles', 'ROL-CUSTOM-B'), { id: 'ROL-CUSTOM-B', companyId: COMPANY_B, name: 'Custom B', schemaVersion: 1, permissions: {} });
+    await setDoc(doc(db, 'roles', 'ROL-CUSTOM-C'), { id: 'ROL-CUSTOM-C', companyId: COMPANY_C, name: 'Custom C', schemaVersion: 1, permissions: {} });
 
     // ── Phase 1: groups + group_members ────────────────────────
     await setDoc(doc(db, 'groups', 'GROUP-A'), { id: 'GROUP-A', name: 'Group A', shortName: 'GA', status: 'Active', isDefault: true });
@@ -726,6 +732,179 @@ describe('Phase 2 — roles: Group-scoped resolution, F-03 isolation intact', ()
   });
   it('F-03 isolation intact: ordinary users still cannot read other companies\' roles', async () => {
     await assertFails(getDoc(doc(ctx(UID_USER_A, 'user.a@neozy.test'), 'roles', `${COMPANY_C}_Admin`)));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// RBAC Phase 1 (docs/implementation/NEOZY_ROLES_PERMISSIONS_RBAC_
+// IMPLEMENTATION.md) — roles WRITE authorization. Closes RBAC-F01
+// (GroupAdmin had no create/update path at all — isAdmin() only matches
+// the literal role 'Admin') and RBAC-F16 (isAdmin() alone carried no
+// company-scoping, so any Admin could write to any OTHER company's role
+// document) in the same change, per the implementation spec's own
+// analysis that both live in the identical authorization boundary.
+// Topology matches the spec's own mandated test structure exactly:
+//   GROUP-A: COMPANY_A (GroupAdmin A's home) + COMPANY_C (sibling)
+//   GROUP-B: COMPANY_B
+// ═══════════════════════════════════════════════════════════════════
+
+describe('RBAC Phase 1 — GroupAdmin: same company (COMPANY_A, home)', () => {
+  it('create a custom role in own home company — ALLOW', async () => {
+    await assertSucceeds(setDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-GA-NEW-A'), {
+      id: 'ROL-GA-NEW-A', companyId: COMPANY_A, name: 'New Role A', schemaVersion: 1, permissions: {},
+    }));
+  });
+  it('update an existing custom role in own home company — ALLOW', async () => {
+    await assertSucceeds(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      description: 'updated by GroupAdmin',
+    }));
+  });
+  it('update the permission map of a custom role in own home company — ALLOW', async () => {
+    await assertSucceeds(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      permissions: { leads: { view: true, create: true, edit: false, delete: false, cancel: false, approve: false, export: false, visibility: 'all' } },
+    }));
+  });
+});
+
+describe('RBAC Phase 1 — GroupAdmin: same Group, different company (COMPANY_C sibling)', () => {
+  it('create a custom role in a sibling Company — ALLOW', async () => {
+    await assertSucceeds(setDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-GA-NEW-C'), {
+      id: 'ROL-GA-NEW-C', companyId: COMPANY_C, name: 'New Role C', schemaVersion: 1, permissions: {},
+    }));
+  });
+  it('update an existing custom role in a sibling Company — ALLOW', async () => {
+    await assertSucceeds(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-C'), {
+      description: 'updated by GroupAdmin (sibling company)',
+    }));
+  });
+  it('update the permission map of a sibling Company\'s custom role — ALLOW', async () => {
+    await assertSucceeds(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-C'), {
+      permissions: { leads: { view: true, create: false, edit: false, delete: false, cancel: false, approve: false, export: false, visibility: 'team' } },
+    }));
+  });
+});
+
+describe('RBAC Phase 1 — GroupAdmin: different Group (COMPANY_B) — DENY', () => {
+  it('create a role in a different Group\'s company — DENY', async () => {
+    await assertFails(setDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-GA-HOSTILE-B'), {
+      id: 'ROL-GA-HOSTILE-B', companyId: COMPANY_B, name: 'Hostile Role', schemaVersion: 1, permissions: {},
+    }));
+  });
+  it('update an existing role in a different Group\'s company — DENY', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-B'), {
+      description: 'hijacked',
+    }));
+  });
+  it('update the permission map of a different Group\'s company role — DENY', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-B'), {
+      permissions: { leads: { view: true, create: true, edit: true, delete: true, cancel: true, approve: true, export: true, visibility: 'all' } },
+    }));
+  });
+});
+
+describe('RBAC Phase 1 — GroupAdmin: scope-forgery and privilege-escalation — DENY', () => {
+  it('cannot change companyId on update (relocate a role to a sibling company)', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      companyId: COMPANY_C,
+    }));
+  });
+  it('cannot change companyId on update to move a role into a different Group entirely', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      companyId: COMPANY_B,
+    }));
+  });
+  it('cannot introduce a groupId field on update (roles never carry groupId, §3.2)', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      groupId: 'GROUP-A',
+    }));
+  });
+  it('cannot create a new role with a groupId field', async () => {
+    await assertFails(setDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-GA-FORGE'), {
+      id: 'ROL-GA-FORGE', companyId: COMPANY_A, groupId: 'GROUP-A', name: 'Forged', schemaVersion: 1, permissions: {},
+    }));
+  });
+  it('cannot create a system role (isSystem:true) in own scope — AD-1', async () => {
+    await assertFails(setDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-GA-SYS'), {
+      id: 'ROL-GA-SYS', companyId: COMPANY_A, name: 'Fake System Role', schemaVersion: 1, isSystem: true, permissions: {},
+    }));
+  });
+  it('cannot update (modify permissions on) an existing system role — AD-1', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', `${COMPANY_A}_Admin`), {
+      permissions: { leads: { view: true, create: true, edit: true, delete: true, cancel: true, approve: true, export: true, visibility: 'all' } },
+    }));
+  });
+  it('cannot promote an existing custom role to a system role via update', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      isSystem: true,
+    }));
+  });
+});
+
+describe('RBAC Phase 1 — Company Admin: own company ALLOW, cross-company DENY (RBAC-F16 closure)', () => {
+  it('Admin can create a custom role in own company — ALLOW (preserve)', async () => {
+    await assertSucceeds(setDoc(doc(ctx(UID_ADMIN_A, 'admin.a@neozy.test'), 'roles', 'ROL-ADMIN-NEW-A'), {
+      id: 'ROL-ADMIN-NEW-A', companyId: COMPANY_A, name: 'New Admin Role', schemaVersion: 1, permissions: {},
+    }));
+  });
+  it('Admin can update a custom role in own company — ALLOW (preserve)', async () => {
+    await assertSucceeds(updateDoc(doc(ctx(UID_ADMIN_A, 'admin.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      description: 'updated by own-company Admin',
+    }));
+  });
+  it('Admin CANNOT create a role stamped with another company\'s companyId — DENY (RBAC-F16 regression guard)', async () => {
+    await assertFails(setDoc(doc(ctx(UID_ADMIN_A, 'admin.a@neozy.test'), 'roles', 'ROL-ADMIN-HOSTILE-B'), {
+      id: 'ROL-ADMIN-HOSTILE-B', companyId: COMPANY_B, name: 'Hostile', schemaVersion: 1, permissions: {},
+    }));
+  });
+  it('Admin CANNOT update another company\'s existing role — DENY (RBAC-F16 regression guard, was the actual live gap)', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_ADMIN_A, 'admin.a@neozy.test'), 'roles', 'ROL-CUSTOM-B'), {
+      description: 'hijacked by Company A Admin',
+    }));
+  });
+  it('Admin CANNOT change own role\'s companyId to relocate it to another company — DENY', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_ADMIN_A, 'admin.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      companyId: COMPANY_B,
+    }));
+  });
+  it('Admin CANNOT introduce a groupId field — DENY', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_ADMIN_A, 'admin.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      groupId: 'GROUP-A',
+    }));
+  });
+});
+
+describe('RBAC Phase 1 — Super Admin: existing platform-wide authority preserved', () => {
+  it('Super Admin can create a role in any company — ALLOW (preserve)', async () => {
+    const db = env.authenticatedContext(UID_SUPER_ADMIN, { email: 'super@neozy.test' }).firestore();
+    await assertSucceeds(setDoc(doc(db, 'roles', 'ROL-SUPER-NEW-B'), {
+      id: 'ROL-SUPER-NEW-B', companyId: COMPANY_B, name: 'Super New Role', schemaVersion: 1, permissions: {},
+    }));
+  });
+  it('Super Admin can update a role in any company — ALLOW (preserve)', async () => {
+    const db = env.authenticatedContext(UID_SUPER_ADMIN, { email: 'super@neozy.test' }).firestore();
+    await assertSucceeds(updateDoc(doc(db, 'roles', 'ROL-CUSTOM-B'), { description: 'updated by Super Admin' }));
+  });
+  it('Super Admin can create and update system roles — ALLOW (preserve)', async () => {
+    const db = env.authenticatedContext(UID_SUPER_ADMIN, { email: 'super@neozy.test' }).firestore();
+    await assertSucceeds(setDoc(doc(db, 'roles', 'ROL-SUPER-SYS-B'), {
+      id: 'ROL-SUPER-SYS-B', companyId: COMPANY_B, name: 'Super System Role', schemaVersion: 1, isSystem: true, permissions: {},
+    }));
+    await assertSucceeds(updateDoc(doc(db, 'roles', `${COMPANY_B}_Admin`), {
+      permissions: { leads: { view: true, create: true, edit: true, delete: true, cancel: true, approve: true, export: true, visibility: 'all' } },
+    }));
+  });
+});
+
+describe('RBAC Phase 1 — Other roles remain denied', () => {
+  it('Sales role cannot create a role, even in own company — DENY', async () => {
+    await assertFails(setDoc(doc(ctx(UID_SALES_A, 'sales.a@neozy.test'), 'roles', 'ROL-SALES-HOSTILE'), {
+      id: 'ROL-SALES-HOSTILE', companyId: COMPANY_A, name: 'Hostile', schemaVersion: 1, permissions: {},
+    }));
+  });
+  it('Sales role cannot update an existing role, even in own company — DENY', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_SALES_A, 'sales.a@neozy.test'), 'roles', 'ROL-CUSTOM-A'), {
+      description: 'hijacked by Sales',
+    }));
   });
 });
 

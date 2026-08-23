@@ -9,7 +9,7 @@
 import { useState, useMemo, useCallback, useEffect, useDeferredValue, useRef, type FormEvent } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { getAll, getAllPlatform, getOne, fmtDate } from '../lib/firestore';
+import { getAll, getAllPlatform, getOne, fmtDate, isWarehouseRestrictedRole } from '../lib/firestore';
 import { logCreate, logUpdate, logRoleChange, logPermissionChange, logDelete } from '../lib/auditLogger';
 import { createUserProjection, updateUserProjection, deleteUserProjection } from '../features/users/hooks/useUsers';
 import { provisionAuthenticatedUser } from '../lib/authProvisioning';
@@ -220,7 +220,6 @@ export default function UsersPage() {
   const canCreateUsers = perms.can('users', 'create');
   const canEditUsers = perms.can('users', 'edit');
   const canDeleteUsers = perms.can('users', 'delete');
-  const canEditRoles = perms.can('roles', 'edit');
   const canManageSuperAdmin = currentUser?.isSuperAdmin === true;
 
   // Mutations
@@ -342,6 +341,20 @@ export default function UsersPage() {
       if (!selectedCompany) {
         return toast.error('The selected Company does not belong to your Group');
       }
+    }
+    // Root cause (live-verified, 2026-08-23): Warehouse/Operations are
+    // warehouse-restricted roles (isWarehouseRestrictedRole(), firestore.ts
+    // §8.1) — every warehouse-scoped collection (stock, stock_ledger,
+    // dispatch, goods_receipts) requires an authoritative warehouseId on
+    // the actor's own profile, both client-side (companyScopedQuery()) and
+    // at the Firestore rules layer (sameWarehouse()). Nothing previously
+    // stopped an admin from assigning this role tier without also setting a
+    // warehouse — the account saved successfully, then failed with an
+    // unexplained "Missing or insufficient permissions" the moment that
+    // user tried to actually do warehouse work, with no indication anywhere
+    // in this form of why. Caught here, at save time, instead.
+    if (isWarehouseRestrictedRole(form.role) && !form.warehouseId) {
+      return toast.error(`${form.role} requires a Warehouse assignment — select one below before saving.`);
     }
     save.mutate(form);
   }
@@ -863,7 +876,16 @@ export default function UsersPage() {
             )}
             <FormRow>
               <Input label="Phone" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} />
-              {canEditRoles ? (
+              {/* RBAC fix: reassigning a USER's role is a `users` operation
+                  (gated by canEditUsers), not a `roles`-DOCUMENT operation —
+                  it was previously gated on canEditRoles (perms.can('roles',
+                  'edit')), which Phase 4 correctly makes false in Group View
+                  (no company context to mutate a ROLE DOCUMENT for). Since
+                  Group View is the only way this screen shows users across
+                  multiple companies in a GroupAdmin's Group, that mix-up
+                  locked the role field to read-only for exactly the
+                  cross-company management flow GroupAdmin needs it most. */}
+              {canEditUsers ? (
                 <InputSelect label="Role" value={form.role} onChange={e => setForm({ ...form, role: e.target.value })}
                   options={[
                     { label: DEFAULT_USER_ROLE, value: DEFAULT_USER_ROLE },

@@ -276,4 +276,19 @@ export async function deleteProjectionWithEntity(col: ProjectionCollection, id: 
   if (entityId) {
     await softDeleteEntity(entityId, systemUserId(current || {}, 'updatedBy'));
   }
+
+  // User -> Employee cascade: every login-capable User provisioned via
+  // Users.tsx gets a linked HR/Employee record (EmployeeDomainService
+  // .linkOrCreateForUser stamps users/{id}.employeeId at creation time).
+  // Without this, deleting the User left that Employee record behind as an
+  // orphan — still Active, still visible in the HR module, with no
+  // corresponding login. Soft-deletes the same way every other record in
+  // this app is retired (deleteDocById -> isDeleted:true), never a hard
+  // delete, so it can still be recovered/audited like any other record.
+  if (col === COLLECTIONS.USERS) {
+    const employeeId = stringValue(current?.employeeId);
+    if (employeeId) {
+      await deleteDocById(COLLECTIONS.EMPLOYEES, employeeId);
+    }
+  }
 }

@@ -81,7 +81,6 @@ export default function MobileUsersWorkspace({ mode }: { mode: Mode }) {
   const canCreate = perms.can('users', 'create');
   const canEdit = perms.can('users', 'edit');
   const canDelete = perms.can('users', 'delete');
-  const canEditRoles = perms.can('roles', 'edit');
   const canManageSuperAdmin = currentUser.isSuperAdmin === true;
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -243,7 +242,7 @@ export default function MobileUsersWorkspace({ mode }: { mode: Mode }) {
         confirmClose={confirmClose}
         roles={roles as any[]}
         users={users as any[]}
-        canEditRoles={canEditRoles}
+        canEdit={canEdit}
         canManageSuperAdmin={canManageSuperAdmin}
         onCloseForm={requestCloseForm}
         onDiscard={() => { setConfirmClose(false); closeForm(); }}
@@ -321,7 +320,7 @@ export default function MobileUsersWorkspace({ mode }: { mode: Mode }) {
         confirmClose={confirmClose}
         roles={roles as any[]}
         users={users as any[]}
-        canEditRoles={canEditRoles}
+        canEdit={canEdit}
         canManageSuperAdmin={canManageSuperAdmin}
         onCloseForm={requestCloseForm}
         onDiscard={() => { setConfirmClose(false); closeForm(); }}
@@ -413,7 +412,7 @@ function UserSkeletonCard() {
 
 /* ── User Dialogs (Create/Edit form) ──────────────────────── */
 
-function UserDialogs({ formOpen, form, editId, saving, dirty, confirmClose, roles, users: allUsers, canEditRoles, canManageSuperAdmin, onCloseForm, onDiscard, onKeepEditing, onChange, onSubmit }: {
+function UserDialogs({ formOpen, form, editId, saving, dirty, confirmClose, roles, users: allUsers, canEdit, canManageSuperAdmin, onCloseForm, onDiscard, onKeepEditing, onChange, onSubmit }: {
   formOpen: boolean;
   form: UserForm;
   editId: string | null;
@@ -422,7 +421,14 @@ function UserDialogs({ formOpen, form, editId, saving, dirty, confirmClose, role
   confirmClose: boolean;
   roles: any[];
   users: any[];
-  canEditRoles: boolean;
+  // RBAC fix: reassigning a user's role is a `users` operation (canEdit =
+  // perms.can('users','edit')), not a `roles`-DOCUMENT operation. The
+  // previous canEditRoles (perms.can('roles','edit')) is false in Group
+  // View (Phase 4's correct, deliberate denial of ROLE-document mutation
+  // there) — but Group View is how this screen shows users across a
+  // GroupAdmin's whole Group, so that mix-up locked the role field
+  // read-only for exactly the cross-company flow GroupAdmin needs most.
+  canEdit: boolean;
   canManageSuperAdmin: boolean;
   onCloseForm: () => void;
   onDiscard: () => void;
@@ -457,7 +463,7 @@ function UserDialogs({ formOpen, form, editId, saving, dirty, confirmClose, role
             </div>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <Input label="Phone" value={form.phone} onChange={(event) => onChange({ phone: event.target.value })} />
-              {canEditRoles
+              {canEdit
                 ? <Select label="Role" value={form.role} onChange={(event) => onChange({ role: event.target.value })}
                     options={[{ label: DEFAULT_USER_ROLE, value: DEFAULT_USER_ROLE }, ...roles.filter((r: any) => r.name !== DEFAULT_USER_ROLE).map((r: any) => ({ label: r.name, value: r.name }))]} />
                 : <div><p className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">Role</p><Badge variant="purple">{form.role || '—'}</Badge></div>}

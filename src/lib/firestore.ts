@@ -25,7 +25,13 @@ const NOT_CONFIGURED_MSG = 'Firebase is not configured. This application require
 //  ENTERPRISE QUERY ENGINE — Centralized Filtering
 // ═══════════════════════════════════════════════════════════
 
-function isRealCompanyId(id: string | undefined | null): id is string {
+// RBAC Phase 3 (RBAC-F05 closure): exported (previously module-private) so
+// useGlobalBoot.ts's roles_global cache-key computation can reuse this EXACT
+// predicate instead of re-implementing an equivalent check — the two must
+// stay provably identical, since the cache key is required to describe
+// precisely which company companyScopedQuery() actually scoped the roles
+// fetch to. No behavior change: the predicate itself is untouched.
+export function isRealCompanyId(id: string | undefined | null): id is string {
   // 'group' is the Group-view sentinel (activeCompanyId, Master Plan §7.2) —
   // not a real company id. Omitting it here let a Group Admin's "All
   // Companies (Group view)" selection flow straight into

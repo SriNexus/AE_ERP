@@ -26,7 +26,12 @@ import { Input } from '../components/ui/Input';
 
 const PER_PAGE = 15;
 const INITIAL_PERMS = ALL_MODULES.reduce((acc, mod) => {
-  acc[mod] = { view: false, create: false, edit: false, delete: false, cancel: false, export: false, import: false, approve: false, view_pricing: false, visibility: 'self' };
+  // RBAC Phase 6 (RBAC-F13 closure): 'disburse' was missing from this
+  // default entirely (every other Permission action, including the two the
+  // UI didn't yet expose, already had an explicit false default here) —
+  // completed so the new Disburse checkbox starts unchecked/false like every
+  // other action, instead of leaving the key undefined on an untouched role.
+  acc[mod] = { view: false, create: false, edit: false, delete: false, cancel: false, export: false, import: false, approve: false, disburse: false, view_pricing: false, visibility: 'self' };
   return acc;
 }, {} as any);
 
@@ -98,7 +103,21 @@ export default function Roles() {
       if (editId) await updateDocById(COLLECTIONS.ROLES, editId, d);
       else { const id = genId.generic('ROL'); await createDocWithId(COLLECTIONS.ROLES, id, { ...d, id }); }
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['roles'] }); toast.success(editId ? 'Role updated' : 'Role created'); closeForm(); },
+    // RBAC Phase 2 (RBAC-F04 closure): invalidating only ['roles'] left the
+    // permission-cache query (['roles_global'], consumed by useGlobalBoot.ts
+    // -> permissionCache -> canDo()) unaware of a successful save — a legit
+    // permission change would not take effect anywhere in the app (including
+    // for the person who just made it) until ['roles_global']'s 30-minute
+    // staleTime happened to lapse. Adding this second, exact-key invalidation
+    // is the entire fix; ['roles_global'] shares no prefix with ['roles', ...]
+    // (Users.tsx's differently-parameterized roles query), so this addition
+    // cannot affect that query — see the Phase 2 report's query-key audit.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['roles'] });
+      qc.invalidateQueries({ queryKey: ['roles_global'] });
+      toast.success(editId ? 'Role updated' : 'Role created');
+      closeForm();
+    },
     onError: (e: any) => toast.error(e.message),
   });
 
@@ -197,12 +216,16 @@ export default function Roles() {
 
   // Detail auto-open from URL
   useEffect(() => {
-    if (createParam === '1') {
+    // RBAC Phase 5: a direct ?create=1 link must not bypass the Group View
+    // gating applied to the two Create Role buttons below — this is the
+    // third (and only non-button) path that could otherwise open the
+    // creation modal while activeCompanyId === 'group'.
+    if (createParam === '1' && !isGroupViewMode) {
       setForm({ ...FORM0, permissions: JSON.parse(JSON.stringify(INITIAL_PERMS)) });
       setEditId(null);
       setShowForm(true);
     }
-  }, [createParam]);
+  }, [createParam, isGroupViewMode]);
 
   const lastClosedParamRef = useRef<string | null>(null);
   useEffect(() => {
@@ -312,10 +335,22 @@ export default function Roles() {
             <Button size="sm" variant="outline" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => refetch()}>
               Refresh
             </Button>
-            <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />}
-              onClick={() => { setForm({ ...FORM0, permissions: JSON.parse(JSON.stringify(INITIAL_PERMS)) }); setEditId(null); setShowForm(true); }}>
-              Create Role
-            </Button>
+            {/* RBAC Phase 5 (RBAC-F06 closure): hidden, not disabled, in Group
+                View — matches this repo's own convention for a permission-gated
+                Create affordance (see Users.tsx's canCreateUsers && <Button>).
+                Keyed on isGroupViewMode specifically (not a canDo('roles',
+                'create') check) so real-company behavior is provably unchanged
+                by this phase — Phase 4 already made canDo('roles','create')
+                false in Group View for every actor; this is that same context,
+                expressed directly, without also gating on the actor's
+                real-company create grant (a separate, out-of-scope concern the
+                page never checked before this phase either). */}
+            {!isGroupViewMode && (
+              <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />}
+                onClick={() => { setForm({ ...FORM0, permissions: JSON.parse(JSON.stringify(INITIAL_PERMS)) }); setEditId(null); setShowForm(true); }}>
+                Create Role
+              </Button>
+            )}
           </div>
         }
       />
@@ -411,7 +446,7 @@ export default function Roles() {
                     <EmptyState icon={<Shield className="h-9 w-9" />}
                       title={hasActiveFilters ? 'No roles match filters' : 'No roles yet'}
                       description={hasActiveFilters ? 'Try adjusting your search or filters.' : 'Create your first role to get started.'}
-                      action={!hasActiveFilters ? <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => { setForm({ ...FORM0, permissions: JSON.parse(JSON.stringify(INITIAL_PERMS)) }); setShowForm(true); }}>Create Your First Role</Button> : undefined} />
+                      action={!hasActiveFilters && !isGroupViewMode ? <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => { setForm({ ...FORM0, permissions: JSON.parse(JSON.stringify(INITIAL_PERMS)) }); setShowForm(true); }}>Create Your First Role</Button> : undefined} />
                   </td></tr>
                 ) : (
                   paginated.map((r: any) => (
@@ -511,6 +546,14 @@ export default function Roles() {
                     <th className="px-2 py-3 text-center">Cancel</th>
                     <th className="px-2 py-3 text-center">Export</th>
                     <th className="px-2 py-3 text-center">Approve</th>
+                    {/* RBAC Phase 6 (RBAC-F13 closure): these 3 actions already
+                        exist in Permission/ModulePermissionMap and are already
+                        understood by canDo() — this only completes their UI
+                        configuration surface. See the Phase 6 report §4 for the
+                        seed-data audit performed before adding these. */}
+                    <th className="px-2 py-3 text-center">Disburse</th>
+                    <th className="px-2 py-3 text-center">Import</th>
+                    <th className="px-2 py-3 text-center">View Pricing</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--color-border-subtle)]">
@@ -528,7 +571,7 @@ export default function Roles() {
                           <option value="all">Global (All Data)</option>
                         </select>
                       </td>
-                      {(['view', 'create', 'edit', 'delete', 'cancel', 'export', 'approve'] as Permission[]).map(action => (
+                      {(['view', 'create', 'edit', 'delete', 'cancel', 'export', 'approve', 'disburse', 'import', 'view_pricing'] as Permission[]).map(action => (
                         <td key={action} className="px-2 py-2 text-center">
                           <label className="inline-flex items-center cursor-pointer">
                             <input type="checkbox" className="sr-only peer" checked={!!form.permissions[mod]?.[action]} onChange={() => handlePermToggle(mod, action)} />
@@ -657,8 +700,8 @@ export default function Roles() {
                             <div key={mod} className="flex flex-wrap items-center gap-2 py-1.5 border-b border-[var(--color-border-subtle)] last:border-0">
                               <span className="text-xs font-bold capitalize text-[var(--color-text)] w-28 shrink-0">{mod.replace(/_/g, ' ')}</span>
                               <div className="flex flex-wrap gap-1.5">
-                                {(['view', 'create', 'edit', 'delete', 'cancel', 'export', 'approve'] as Permission[]).filter(a => perm[a]).map(a => (
-                                  <span key={a} className="px-2 py-0.5 rounded-full bg-[var(--color-primary-light)] text-[10px] font-semibold text-[var(--color-primary-text)] capitalize">{a}</span>
+                                {(['view', 'create', 'edit', 'delete', 'cancel', 'export', 'approve', 'disburse', 'import', 'view_pricing'] as Permission[]).filter(a => perm[a]).map(a => (
+                                  <span key={a} className="px-2 py-0.5 rounded-full bg-[var(--color-primary-light)] text-[10px] font-semibold text-[var(--color-primary-text)] capitalize">{a.replace(/_/g, ' ')}</span>
                                 ))}
                                 <span className="px-2 py-0.5 rounded-full bg-[var(--color-bg-sunken)] text-[10px] text-[var(--color-text-muted)] capitalize">
                                   {perm.visibility === 'all' ? 'Global' : perm.visibility === 'team' ? 'Team' : 'Self'}
