@@ -8,9 +8,21 @@
  *   - Full-screen detail modal with Section/Detail components
  *   - Shared ConfirmDialog for deletes
  *
- * Manual Attendance is a one-click self-service action (ManualAttendancePanel
- * + AttendanceService.markAttendance()), not a form — mirrors the desktop
- * Attendance page's "Attendance Actions" row (Manual + Geo, side by side).
+ * Product-integration follow-up (mobile UX + camera reliability hardening):
+ * `ManualAttendancePanel` (a no-GPS/no-biometric, one-click self-service
+ * bypass) has been REMOVED from this employee-facing workspace — an
+ * employee must always go through Face Attendance (biometric + GPS); there
+ * is no longer any manual-attendance path reachable from the normal mobile
+ * UI. `ManualAttendancePanel.tsx`/`useSelfAttendance.ts`/
+ * `AttendanceService.markAttendance()` are left in place, unused by any
+ * employee-facing UI (this was their only render site) — not deleted, per
+ * this initiative's own "preserve unrelated work, do not delete" discipline
+ * — but no longer reachable from anywhere a normal employee can navigate.
+ *
+ * The 3rd bottom-nav tab ("Create") now lands here with `?create=1` and
+ * IMMEDIATELY renders the same `FaceAttendanceFlow` camera experience
+ * `CheckInPanel` uses — no intermediate "press another button" step (see
+ * the `isCreateAttendanceRequested` branch below).
  *
  * Reuses:
  *   - useAttendance, useDeleteAttendance, exportAttendanceCSV,
@@ -24,7 +36,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
-  Calendar, Clock, Download, Mail, Phone, Trash2,
+  AlertTriangle, Calendar, Clock, Download, Loader2, Mail, Phone, Trash2,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Badge, Button, Card, ConfirmDialog, Modal, Pagination, statusBadge } from '../../ui';
@@ -38,7 +50,9 @@ import { usePermissions } from '../../../lib/permissions';
 import { cn } from '../../../utils/cn';
 import { MobileTimelinePreview } from '../shared/MobileTimelinePreview';
 import CheckInPanel from '../../../components/attendance/CheckInPanel';
-import ManualAttendancePanel from '../../../components/attendance/ManualAttendancePanel';
+import FaceAttendanceFlow from '../../../components/attendance/FaceAttendanceFlow';
+import { useFaceEnrollmentStatus } from '../../../features/attendance/hooks/useFaceEnrollmentStatus';
+import { deriveAttendanceButtonState } from '../../../features/attendance/services/attendanceButtonState';
 import { AttendanceService } from '../../../services/AttendanceService';
 import { computeDashboardKPIs } from '../../../features/attendance/services/dashboardKPIs';
 import { formatDistanceMeters } from '../../../lib/geo';
@@ -97,11 +111,25 @@ export default function MobileAttendanceWorkspace() {
   const deleteMut = useDeleteAttendance();
 
   // Phase 7: self-service check-in — today's attendance for the current user
-  const { data: todayAttendance } = useQuery({
+  const { data: todayAttendance, isLoading: isTodayAttendanceLoading } = useQuery({
     queryKey: ['attendance', 'today'],
     queryFn: () => AttendanceService.getTodayAttendanceForCurrentUser(),
     staleTime: 30_000,
   });
+
+  // Product-integration follow-up: the 3rd bottom-nav tab ("Create") routes
+  // here as `/attendance?create=1` — this flag means "immediately show the
+  // camera, skip the records view entirely," never a second button press.
+  const enrollmentStatus = useFaceEnrollmentStatus();
+  const isCreateAttendanceRequested = params.get('create') === '1';
+  const createAttendanceButtonState = deriveAttendanceButtonState(todayAttendance, enrollmentStatus.status);
+  const isEnrollmentRevoked = enrollmentStatus.status === 'revoked';
+
+  function closeCreateAttendance() {
+    const next = new URLSearchParams(params);
+    next.delete('create');
+    setParams(next, { replace: true });
+  }
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(() => Math.max(1, Number(params.get('page')) || 1));
@@ -169,21 +197,64 @@ export default function MobileAttendanceWorkspace() {
     toast.success(`Exported ${rows.length} record${rows.length > 1 ? 's' : ''}`);
   }
 
+  // Create Attendance — the 3rd bottom-nav tab lands here and the camera
+  // must open IMMEDIATELY, with no intermediate records page or extra
+  // button press. Revoked enrollment blocks the camera (never opened) with
+  // the same message CheckInPanel/Attendance.tsx show; a completed day
+  // (no action left) shows a short explanatory message instead of a blank
+  // screen; the enrollment-status query resolving is the only other wait.
+  if (isCreateAttendanceRequested) {
+    return (
+      <div className="space-y-4 pb-2 pt-2 px-1">
+        <div className="pb-1 pt-2">
+          <h1 className="text-xl font-bold text-[var(--color-text)]">Create Attendance</h1>
+        </div>
+        {isEnrollmentRevoked ? (
+          <div
+            className="rounded-lg border p-4 flex items-center gap-3"
+            style={{ background: 'var(--color-danger-bg, rgba(239,68,68,0.08))', borderColor: 'var(--color-danger-border, rgba(239,68,68,0.3))' }}
+          >
+            <AlertTriangle className="h-5 w-5 shrink-0" style={{ color: 'var(--color-danger)' }} />
+            <p className="text-xs" style={{ color: 'var(--color-text)' }}>
+              Face Attendance is unavailable — your biometric enrollment has been revoked. Contact HR or an administrator to re-enable it.
+            </p>
+          </div>
+        ) : enrollmentStatus.isLoading || isTodayAttendanceLoading ? (
+          <div className="flex items-center justify-center py-10">
+            <Loader2 className="h-6 w-6 animate-spin" style={{ color: 'var(--color-primary)' }} />
+          </div>
+        ) : !createAttendanceButtonState.action ? (
+          <div className="rounded-lg border p-4 text-center text-sm" style={{ color: 'var(--color-text-muted)' }}>
+            You've already completed attendance for today.
+          </div>
+        ) : (
+          <FaceAttendanceFlow
+            action={createAttendanceButtonState.action}
+            onCancel={closeCreateAttendance}
+            onSuccess={closeCreateAttendance}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4 pb-2 pt-2">
       <div className="px-1 pb-1 pt-2">
         <h1 data-tour="mobile-attendance-header" className="text-xl font-bold text-[var(--color-text)]">Attendance</h1>
       </div>
 
-      {/* Attendance Actions: Manual (no GPS) + Geo (self-service GPS),
-          equivalent size/hierarchy, side by side. */}
+      {/* Attendance Action — the SAME unified Face Attendance experience the
+          3rd bottom-nav tab launches directly; kept here too as a
+          convenience on the records view itself. No manual (no-GPS/no-
+          biometric) option exists anywhere in this employee-facing
+          workspace. */}
       <div className="px-1" data-tour="attendance-actions">
         <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">
           Attendance Actions
         </p>
         <div className="grid grid-cols-1 gap-2">
-          <ManualAttendancePanel todayRecord={todayAttendance} isLoading={isLoading} />
-          <CheckInPanel todayRecord={todayAttendance} isLoading={isLoading} />
+          <CheckInPanel todayRecord={todayAttendance} isLoading={isLoading || isTodayAttendanceLoading} />
         </div>
       </div>
 

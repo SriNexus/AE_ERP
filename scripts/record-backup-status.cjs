@@ -58,11 +58,18 @@ async function main() {
   }
 
   const now = new Date().toISOString();
+  // Phase 9 (DI-02 sweep): `completedAt: undefined` (rather than omitting
+  // the key entirely, matching the other optional fields' convention below)
+  // is a real, live bug — the Admin SDK throws on any undefined field value
+  // by default, and the very FIRST call every nightly backup run makes is
+  // --status Running, which hit this unconditionally. The workflow's
+  // continue-on-error masked the crash, but the "Running" status entry was
+  // never actually recorded.
   const doc = {
     id,
     startedAt: now,
-    completedAt: status === 'Running' ? undefined : now,
     status,
+    ...(status !== 'Running' ? { completedAt: now } : {}),
     ...(uri ? { exportUri: uri } : {}),
     collectionsIncluded: collections,
     ...(sizeBytes !== undefined && Number.isFinite(sizeBytes) ? { sizeBytes } : {}),

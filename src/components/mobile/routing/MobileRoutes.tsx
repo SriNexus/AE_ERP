@@ -19,6 +19,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { MobileLayout } from '../shell/MobileLayout';
 import { ProtectedRoute } from '../../auth/ProtectedRoute';
 import { RoleRoute } from '../../auth/RoleRoute';
+import { SuperAdminRoute } from '../../auth/SuperAdminRoute';
 import { useGlobalBoot } from '../../../lib/useGlobalBoot';
 import { useAppStore } from '../../../store/useAppStore';
 import { isPartnerPortalUser } from '../../../lib/permissions';
@@ -87,6 +88,7 @@ import { MobileSalesDocuments } from '../sales-documents/MobileSalesDocuments';
 import { MobilePurchaseOrderWorkspace } from '../purchase-orders/MobilePurchaseOrderWorkspace';
 import { MobileGoodsReceiptWorkspace } from '../goods-receipts/MobileGoodsReceiptWorkspace';
 import { MobileLoanApplicationWorkspace } from '../loan-applications/MobileLoanApplicationWorkspace';
+import { MobileAuditWorkspace } from '../audit/MobileAuditWorkspace';
 
 /** Lazy-loaded pages shared with desktop */
 const Login = lazy(() => import('../../../pages/Login'));
@@ -237,6 +239,10 @@ export function MobileRoutes() {
         <Route path="tasks"      element={<RoleRoute module="dashboard"><MobileTaskWorkspace mode="records" /></RoleRoute>} />
         <Route path="notifications" element={<RoleRoute module="dashboard"><MobileSuspense><NotificationsPage /></MobileSuspense></RoleRoute>} />
         <Route path="notifications/:id" element={<RoleRoute module="dashboard"><MobileSuspense><NotificationsPage /></MobileSuspense></RoleRoute>} />
+
+        {/* Audit Logs — Super Admin (owner identity) only, matches desktop's
+            SuperAdminRoute gate in app/router/routes.tsx exactly. */}
+        <Route path="audit-logs" element={<SuperAdminRoute><MobileAuditWorkspace /></SuperAdminRoute>} />
 
         {/* Settings placeholders */}
         <Route path="users"      element={<RoleRoute module="users"><MobileUsersWorkspace mode="records" /></RoleRoute>} />

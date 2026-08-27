@@ -57,7 +57,8 @@ import { statusBadge } from '../components/ui/Badge';
 import { WarehouseDetailsModal, WarehouseTransferModal } from '../features/warehouses/components/WarehouseModals';
 import { WarehouseFormComponent } from '../features/warehouses/components/WarehouseForm';
 import { useWarehouses, useSaveWarehouse, useDeleteWarehouse } from '../features/warehouses/hooks/useWarehouses';
-import { WAREHOUSE_FORM_DEFAULT, WAREHOUSE_STATUS_OPTIONS, warehouseGeoToForm, parseWarehouseGeo, type Warehouse, type WarehouseForm } from '../features/warehouses/types';
+import { WAREHOUSE_FORM_DEFAULT, WAREHOUSE_STATUS_OPTIONS, warehouseGeoToForm, parseWarehouseGeo, validateWarehouseGeoForm, getWarehouseFormDefault, type Warehouse, type WarehouseForm } from '../features/warehouses/types';
+import { useSettingsSection } from '../features/settings/hooks/useSettingsSection';
 import {
   downloadWarehouseCsv,
   downloadWarehouseReport,
@@ -124,6 +125,15 @@ export default function Warehouses() {
   const [form, setForm] = useState<WarehouseForm>({ ...WAREHOUSE_FORM_DEFAULT });
   const [delId, setDelId] = useState<string | null>(null);
   const [showTransfer, setShowTransfer] = useState<{ ids: string[]; label: string } | null>(null);
+
+  // Pre-fills a NEW warehouse's Geofence Radius from the company's
+  // Attendance Settings default — connects that setting to something real
+  // (production-fix §16/§20) without making radius a runtime fallback.
+  const { data: attendanceSettingsData } = useSettingsSection('attendance');
+  const newWarehouseFormDefault = useCallback(
+    () => getWarehouseFormDefault((attendanceSettingsData as { geofenceRadiusDefaultMeters?: number } | undefined)?.geofenceRadiusDefaultMeters),
+    [attendanceSettingsData],
+  );
 
 
   // ── Queries ──────────────────────────────────────────────────
@@ -506,6 +516,19 @@ export default function Warehouses() {
     e.preventDefault();
     if (saveMut.isPending) return;
     if (!form.name) return toast.error('Warehouse name is required');
+    // Production fix (docs/audits/GEO_ATTENDANCE_CURRENT_STATE_AUDIT.md
+    // Finding F2): block the save entirely — rather than silently dropping
+    // whichever geo field failed — when the admin has started configuring
+    // geo-attendance but left it incomplete/invalid. Defense-in-depth
+    // alongside WarehouseForm's own disabled-submit-button validation.
+    const geoValidation = validateWarehouseGeoForm({
+      latitude: form.latitude,
+      longitude: form.longitude,
+      geofenceRadiusMeters: form.geofenceRadiusMeters,
+    });
+    if (!geoValidation.valid) {
+      return toast.error('Geo-fence configuration is incomplete — Latitude, Longitude, and Geofence Radius are all required together.');
+    }
     // Parse geo fields from string form to validated numbers for Firestore
     const geo = parseWarehouseGeo({
       latitude: form.latitude,
@@ -611,7 +634,7 @@ export default function Warehouses() {
             <Button
               size="sm"
               icon={<Plus className="h-4 w-4" />}
-              onClick={() => { setForm({ ...WAREHOUSE_FORM_DEFAULT }); setEditId(null); setShowForm(true); }}
+              onClick={() => { setForm(newWarehouseFormDefault()); setEditId(null); setShowForm(true); }}
             >
               Add Warehouse
             </Button>
@@ -899,7 +922,7 @@ export default function Warehouses() {
                                 size="sm"
                                 icon={<Plus className="h-4 w-4" />}
                                 onClick={() => {
-                                  setForm({ ...WAREHOUSE_FORM_DEFAULT });
+                                  setForm(newWarehouseFormDefault());
                                   setEditId(null);
                                   setShowForm(true);
                                 }}

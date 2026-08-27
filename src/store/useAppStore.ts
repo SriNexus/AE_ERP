@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { clearDemoSession } from '../lib/demoSession';
 import { queryClient } from '../lib/queryClient';
 import { DEFAULT_COMPANY, type CompanyConfig } from '../config/company';
 
@@ -75,7 +74,6 @@ export const useAppStore = create<AppStore>()(
         return {companyGroupIds};
       }),
       logout:()=>{
-    clearDemoSession();
     set({user:null,isAuthenticated:false,roleData:null,teamMemberIds:[],permissionCache:EMPTY_PERMISSION_CACHE,
       companyGroupIds:{},
       // Root-cause fix (homepage demo-data isolation): company context must NOT

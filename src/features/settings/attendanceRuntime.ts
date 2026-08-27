@@ -12,21 +12,14 @@
  * - preserves documented units (hours, meters, minutes, seconds)
  */
 
-import type { AttendanceSettings } from '../attendance/types';
+import { DEFAULT_ATTENDANCE_SETTINGS, type AttendanceSettings } from '../attendance/types';
 
 // ── Defaults ─────────────────────────────────────────────────
 
-export const ATTENDANCE_SETTINGS_DEFAULTS: AttendanceSettings = {
-  geofenceRadiusDefaultMeters: 200,
-  gpsAccuracyThresholdMeters: 50,
-  gracePeriodMinutes: 15,
-  shiftStartTime: '09:00',
-  shiftEndTime: '18:00',
-  halfDayThresholdHours: 4,
-  staleLocationMaxAgeSeconds: 300,
-  checkInMethod: 'gps',
-  weeklyOffDays: [0],
-};
+// Production fix (docs/audits/GEO_ATTENDANCE_CURRENT_STATE_AUDIT.md
+// Finding F3): reuse the one canonical default object instead of a third
+// manually-kept-in-sync copy.
+export const ATTENDANCE_SETTINGS_DEFAULTS: AttendanceSettings = DEFAULT_ATTENDANCE_SETTINGS;
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -74,6 +67,18 @@ export function normalizeAttendanceSettings(
     gpsAccuracyThresholdMeters: toNumber(
       raw.gpsAccuracyThresholdMeters,
       ATTENDANCE_SETTINGS_DEFAULTS.gpsAccuracyThresholdMeters,
+    ),
+    // Defensive clamp: a ceiling below the "good" target would be a
+    // nonsensical, self-contradicting policy (nothing could ever be both
+    // "usable" and "worse than good"). Never let a bad Settings save make
+    // the ceiling stricter than the target.
+    gpsAccuracyCeilingMeters: Math.max(
+      toNumber(raw.gpsAccuracyCeilingMeters, ATTENDANCE_SETTINGS_DEFAULTS.gpsAccuracyCeilingMeters),
+      toNumber(raw.gpsAccuracyThresholdMeters, ATTENDANCE_SETTINGS_DEFAULTS.gpsAccuracyThresholdMeters),
+    ),
+    locationConsistencyMaxSpreadMeters: toNumber(
+      raw.locationConsistencyMaxSpreadMeters,
+      ATTENDANCE_SETTINGS_DEFAULTS.locationConsistencyMaxSpreadMeters,
     ),
     gracePeriodMinutes: toNumber(
       raw.gracePeriodMinutes,

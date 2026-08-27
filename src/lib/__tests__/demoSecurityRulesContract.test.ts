@@ -22,8 +22,17 @@ describe('Demo tenant security rules contract',()=>{
    expect(rules).toContain('getAfter(/databases/$(database)/documents/users/$(data.userId)).data.email == request.auth.token.email');
    // D2 guard: isSuperAdmin may only be granted OR revoked by a super-admin
    // (value-equality over the merged doc — no-op writes and legacy docs that
-   // lack the field stay allowed; grant and revoke are denied).
-   expect(rules).toContain('(request.resource.data.isSuperAdmin == true) == (resource.data.isSuperAdmin == true)');
+   // lack the field stay allowed; grant and revoke are denied). Root-cause
+   // fix (missingIsSuperAdminFieldFix.emulator.test.ts): a legacy/migrated
+   // users doc missing the isSuperAdmin field entirely (not isSuperAdmin:
+   // false) previously errored/blew the expression budget instead of
+   // reading as false — the raw `data.isSuperAdmin == true` comparison was
+   // replaced with isSuperAdminFlag(data), which reads via the cheaper
+   // map.get(key, default) accessor; the D2 grant/revoke equality guarantee
+   // itself is unchanged, just expressed through that safe accessor.
+   expect(rules).toContain('isSuperAdminFlag(request.resource.data) == isSuperAdminFlag(resource.data)');
+   expect(rules).toContain("function isSuperAdminFlag(data)");
+   expect(rules).toContain("data.get('isSuperAdmin', false) == true");
    // Owner statement must be independent of the auth-map anchor (owner keeps
    // user-management even if the lazy mapping is missing/purged).
    // F-13 (Phase 0): every clause is gated on actorIsActive() — deactivated

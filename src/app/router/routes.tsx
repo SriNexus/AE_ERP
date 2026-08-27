@@ -13,7 +13,6 @@ import { SuperAdminRoute } from '../../components/auth/SuperAdminRoute';
 import { useGlobalBoot }  from '../../lib/useGlobalBoot';
 import { ErrorBoundary }  from '../../components/shared/ErrorBoundary';
 import { useAppStore }    from '../../store/useAppStore';
-import { useDemoSession } from '../../lib/demoSession';
 import { isPartnerPortalUser } from '../../lib/permissions';
 import PartnerLayout      from '../../components/partner/PartnerLayout';
 
@@ -188,7 +187,6 @@ function LegacyLeadRedirect() {
 // ── Protected layout wrapper ──────────────────────────────────
 function ProtectedLayout() {
   useGlobalBoot();
-  useDemoSession();
   return (
     <ProtectedRoute>
       <Layout />

@@ -165,7 +165,7 @@ describe('Source code verification — fix present', () => {
     expect(source).toContain('currentGlobal?.id !== defaultCo.id');
     expect(source).toContain('currentCompany?.id !== co.id');
     // The unconditional setGlobalCompany call is gone
-    const companyEffect = source.match(/const defaultCo = companies\.find\([^]*?\n  \}, \[companies, activeCompanyId, isDemo\]\)/s);
+    const companyEffect = source.match(/const defaultCo = companies\.find\([^]*?\n  \}, \[companies, activeCompanyId\]\)/s);
     expect(companyEffect).not.toBeNull();
     if (companyEffect) {
       // Verify the effect body contains the guards

@@ -229,6 +229,8 @@ export function generatePolicyVersion(settings: AttendanceSettings): string {
     settings.gracePeriodMinutes,
     settings.halfDayThresholdHours,
     settings.gpsAccuracyThresholdMeters,
+    settings.gpsAccuracyCeilingMeters,
+    settings.locationConsistencyMaxSpreadMeters,
     settings.geofenceRadiusDefaultMeters,
   ].join(':');
 

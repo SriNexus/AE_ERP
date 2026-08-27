@@ -20,7 +20,7 @@ async function main() {
     const email = normalized(item.data().email);
     if (email) byEmail.set(email, [...(byEmail.get(email) || []), item]);
   }
-  let examined = 0, planned = 0, ambiguous = 0, conflicts = 0;
+  let examined = 0, planned = 0, ambiguous = 0, conflicts = 0, missingCompanyId = 0;
   let pageToken: string | undefined;
   do {
     const page = await auth.listUsers(1000, pageToken);
@@ -34,12 +34,19 @@ async function main() {
       const existing = await ref.get();
       if (existing.exists && existing.data()?.userId !== erp.id) { conflicts++; continue; }
       if (existing.exists) continue;
+      // Phase 9 (DI-02 sweep): a users doc missing companyId is a genuine
+      // data-integrity problem worth surfacing loudly (per the "don't
+      // blindly sanitize" carve-out) rather than either silently omitting
+      // the field or crashing opaquely mid-migration — the Admin SDK
+      // .create() throws on any undefined field value by default.
+      const companyId = erp.data().companyId;
+      if (!companyId) { missingCompanyId++; console.warn(`[migrate-user-auth-maps] users/${erp.id} has no companyId — skipping mapping for auth uid ${account.uid}`); continue; }
       planned++;
-      if (apply) await ref.create({ authUid: account.uid, userId: erp.id, companyId: erp.data().companyId, email, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+      if (apply) await ref.create({ authUid: account.uid, userId: erp.id, companyId, email, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
     }
     pageToken = page.pageToken;
   } while (pageToken);
-  console.log(JSON.stringify({ mode: apply ? 'apply' : 'dry-run', authUsersExamined: examined, mappingsPlannedOrCreated: planned, ambiguousEmails: ambiguous, conflictingMappings: conflicts }));
+  console.log(JSON.stringify({ mode: apply ? 'apply' : 'dry-run', authUsersExamined: examined, mappingsPlannedOrCreated: planned, ambiguousEmails: ambiguous, conflictingMappings: conflicts, skippedMissingCompanyId: missingCompanyId }));
   if (!apply) console.log('No writes performed. Re-run with --apply after reviewing counts.');
 }
 main().catch((error) => { console.error('Auth mapping migration failed:', error instanceof Error ? error.message : String(error)); process.exitCode = 1; });

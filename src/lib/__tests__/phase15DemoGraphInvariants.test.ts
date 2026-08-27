@@ -212,23 +212,18 @@ describe('Phase 15 — no artificial Demo record-count ceiling (source-verified;
     expect(apiEntitySrc).not.toContain('Demo limit reached');
   });
 
-  it('enforceDemoRecordLimit() still enforces the legitimate business-crud capability gate, but no longer counts existing documents or throws a "limit reached" error', () => {
-    const fnBody = firestoreSrc.slice(
-      firestoreSrc.indexOf('async function enforceDemoRecordLimit'),
-      firestoreSrc.indexOf('\n}', firestoreSrc.indexOf('async function enforceDemoRecordLimit')),
-    );
-    expect(fnBody).toContain("isDemoCapabilityAllowed(companyId, 'business-crud')");
-    expect(fnBody).not.toContain('getDocs');
-    expect(fnBody).not.toContain('Demo limit reached');
+  it('enforceDemoRecordLimit() no longer exists at all — Demo-to-Group conversion removed the capability-gate mechanism entirely, not just its numeric cap, since it could never actually block anything once external-side-effect was the only real restriction (docs/reports/NEOZY_DEMO_GROUP_CONVERSION_REPORT.md)', () => {
+    expect(firestoreSrc).not.toContain('enforceDemoRecordLimit');
+    expect(firestoreSrc).not.toContain('isDemoCapabilityAllowed');
   });
 
-  it('createDoc/createDocWithId/batchCreate all still call enforceDemoRecordLimit (the capability gate itself is preserved, only the numeric cap was removed)', () => {
+  it('createDoc/createDocWithId/batchCreate have no demo-specific branching at all — Neozy Demo creates documents through the exact same code path as every other Group', () => {
     const createDocBody = firestoreSrc.slice(firestoreSrc.indexOf('export async function createDoc<'), firestoreSrc.indexOf('export async function createDocWithId'));
     const createDocWithIdBody = firestoreSrc.slice(firestoreSrc.indexOf('export async function createDocWithId'), firestoreSrc.indexOf('export async function updateDocById'));
     const batchCreateBody = firestoreSrc.slice(firestoreSrc.indexOf('export async function batchCreate'), firestoreSrc.indexOf('export async function batchCreate') + 800);
-    expect(createDocBody).toContain('enforceDemoRecordLimit(col)');
-    expect(createDocWithIdBody).toContain('enforceDemoRecordLimit(col)');
-    expect(batchCreateBody).toContain('enforceDemoRecordLimit(col)');
+    for (const body of [createDocBody, createDocWithIdBody, batchCreateBody]) {
+      expect(body.toLowerCase()).not.toContain('demo');
+    }
   });
 });
 

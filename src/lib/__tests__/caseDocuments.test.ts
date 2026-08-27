@@ -23,7 +23,11 @@ const read = (p: string) => readFileSync(resolve(__dirname, p), 'utf-8');
 
 const caseDocumentsSrc = read('../caseDocuments.ts');
 const firestoreSrc = read('../firestore.ts');
-const firebaseSrc = read('../firebase.ts');
+// COLLECTIONS itself now lives in collections.ts (extracted to a
+// zero-dependency module so server-side/Node code can import it without
+// pulling in firebase.ts's client-SDK initialization) — firebase.ts merely
+// re-exports it. Read the actual definition's real location.
+const firebaseSrc = read('../collections.ts');
 const queryKeysSrc = read('../queryKeys.ts');
 const projectDocsSection = read('../../features/projects/components/workspace/ProjectWorkspaceDocumentsSection.tsx');
 const customerDocsSection = read('../../features/customers/components/workspace/CustomerWorkspaceDocumentsSection.tsx');

@@ -9,7 +9,6 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'react-hot-toast';
 import { ThemeProvider } from '../../theme/ThemeProvider';
 import { ErrorBoundary } from './ErrorBoundary';
-import { DemoExternalActionGuard } from '../../components/auth/DemoExternalActionGuard';
 import { TutorialEngine } from '../../features/tutorials';
 import { queryClient } from '../../lib/queryClient';
 
@@ -45,7 +44,6 @@ export function AppProviders({ children }: { children: ReactNode }) {
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
           <BrowserRouter>
-            <DemoExternalActionGuard />
             {/* Interactive tutorial overlay — mounted inside the Router so it
                 survives route changes; renders only while a tutorial is active. */}
             <TutorialEngine />

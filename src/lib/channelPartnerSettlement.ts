@@ -357,7 +357,11 @@ async function transitionSettlementStatus(
   };
 
   if (newStatus === 'cancelled') {
-    updates.cancelledBy = metadata?.cancelledBy || state.user?.id || 'system';
+    // Phase 11 (OWNERSHIP-001): cancelledBy is an audit identity field —
+    // never trust a caller-supplied value (see approveWithdrawal below for
+    // the full rationale). cancellationReason is plain descriptive text,
+    // not an identity claim, and stays caller-suppliable.
+    updates.cancelledBy = state.user?.id || 'system';
     updates.cancelledAt = new Date().toISOString();
     updates.cancellationReason = metadata?.cancellationReason || '';
   }
@@ -442,7 +446,19 @@ export async function approveWithdrawal(
 ): Promise<void> {
   const state = useAppStore.getState();
   const companyId = resolveCompanyId();
-  const userId = metadata?.approvedBy || state.user?.id || 'system';
+  // Phase 11 (OWNERSHIP-001, Master Plan "Record Ownership / Business
+  // Authorization Audit"): approvedBy/rejectedBy/processedBy/paidBy/
+  // cancelledBy across this file are audit-identity anchors — a caller-
+  // supplied `metadata.X` used to win, and since these are exported,
+  // client-side (browser) functions reachable directly (not only through
+  // the UI, which never actually passes this argument today), any
+  // authenticated user with edit access could forge who approved/
+  // processed/paid a partner withdrawal — corrupting both the wallet
+  // transaction's own attribution field and the activity log. `metadata`
+  // is intentionally NOT removed as a parameter (still used for genuine,
+  // non-identity fields like paymentReference/paymentMethod); the identity
+  // sub-field is simply no longer trusted from it.
+  const userId = state.user?.id || 'system';
 
   const txn = await getOne<PartnerWalletTransaction>(COLLECTIONS.PARTNER_WALLET_TXNS, withdrawalId);
   if (!txn) throw new Error(`Withdrawal transaction ${withdrawalId} not found`);
@@ -491,7 +507,9 @@ export async function rejectWithdrawal(
 ): Promise<void> {
   const state = useAppStore.getState();
   const companyId = resolveCompanyId();
-  const userId = metadata?.rejectedBy || state.user?.id || 'system';
+  // Phase 11 (OWNERSHIP-001): see approveWithdrawal above — audit-identity
+  // fields are never trusted from a caller-supplied metadata value.
+  const userId = state.user?.id || 'system';
 
   const txn = await getOne<PartnerWalletTransaction>(COLLECTIONS.PARTNER_WALLET_TXNS, withdrawalId);
   if (!txn) throw new Error(`Withdrawal transaction ${withdrawalId} not found`);
@@ -549,7 +567,8 @@ export async function processWithdrawal(
   metadata?: { processedBy?: string },
 ): Promise<void> {
   const state = useAppStore.getState();
-  const userId = metadata?.processedBy || state.user?.id || 'system';
+  // Phase 11 (OWNERSHIP-001): see approveWithdrawal above.
+  const userId = state.user?.id || 'system';
 
   const txn = await getOne<PartnerWalletTransaction>(COLLECTIONS.PARTNER_WALLET_TXNS, withdrawalId);
   if (!txn) throw new Error(`Withdrawal transaction ${withdrawalId} not found`);
@@ -585,7 +604,10 @@ export async function completeWithdrawal(
 ): Promise<void> {
   const state = useAppStore.getState();
   const companyId = resolveCompanyId();
-  const userId = metadata?.paidBy || state.user?.id || 'system';
+  // Phase 11 (OWNERSHIP-001): see approveWithdrawal above — paymentReference/
+  // paymentMethod are plain descriptive data, not identity claims, and stay
+  // caller-suppliable; paidBy is an audit-identity field and is not.
+  const userId = state.user?.id || 'system';
 
   const txn = await getOne<PartnerWalletTransaction>(COLLECTIONS.PARTNER_WALLET_TXNS, withdrawalId);
   if (!txn) throw new Error(`Withdrawal transaction ${withdrawalId} not found`);

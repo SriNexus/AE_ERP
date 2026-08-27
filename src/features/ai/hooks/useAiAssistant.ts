@@ -11,7 +11,6 @@
  * Architecture:
  *   - Uses aiService.ts for provider-agnostic AI queries
  *   - Combines loaded Firestore data as context with LLM queries
- *   - Fall back to mock responses in demo mode
  *   - No Firestore writes ever
  */
 
@@ -22,7 +21,6 @@ import { COLLECTIONS } from '../../../lib/firebase';
 import { useAppStore } from '../../../store/useAppStore';
 import { queryKeys } from '../../../lib/queryKeys';
 import { queryAi, isAiMockMode, isAiAvailable } from '../../../services/aiService';
-import { isOfficialDemoCompany } from '../../../config/demo';
 import { isOwnerEmail } from '../../../lib/ownerAccess';
 
 // ── Types ─────────────────────────────────────────────────
@@ -181,7 +179,6 @@ export function useAiAssistant(initialDomain: AssistantDomain = 'universal') {
   const isAuthorized = isOwnerEmail(currentUser?.email);
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const keys = queryKeys.forCompany(activeCompanyId);
-  const isDemo = isOfficialDemoCompany(useAppStore((s) => s.user?.companyId));
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Phase 9E: Load audit logs for the audit domain
@@ -333,7 +330,7 @@ export function useAiAssistant(initialDomain: AssistantDomain = 'universal') {
     clearMessages,
     messagesEndRef,
     isAvailable: isAiAvailable(),
-    isMockMode: isAiMockMode() || isDemo,
+    isMockMode: isAiMockMode(),
   };
 }
 

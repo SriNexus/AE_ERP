@@ -1,16 +1,22 @@
 /**
  * projectWorkspaceQuotationIntegration.test.ts — Quotation Workspace
- * Migration (Stage 3 — Quotation card gets a real operational workspace; the
- * standalone Quotation popup is retired; project-linked quotations are now
- * viewed/edited/converted inside the Project Workspace).
+ * Migration (Stage 3 — Quotation card gets a real operational workspace;
+ * project-linked quotations are viewed/edited/converted inside the Project
+ * Workspace) PLUS the 2026-08-25 list-page popup reinstatement (Quotations.tsx's
+ * row click now opens a QuotationDetailModal preview popup, matching the
+ * existing Invoice list UX, instead of navigating away — see the first
+ * describe block below).
  *
  * Source-text analysis, matching this codebase's established convention (no
  * @testing-library/react). Covers: STAGE_WORKSPACES registers the quotation
  * workspace, the workspace reuses the EXISTING quotation hooks/services/
  * components verbatim (no parallel system), the post-Order lock is enforced
  * at the service layer (updateQuotation) AND surfaced in the UI
- * (isQuotationLocked), and the retired popup's invocation paths are gone or
- * rewired.
+ * (isQuotationLocked), the list page's preview popup reuses existing
+ * infrastructure (no parallel document-preview system), and every OTHER
+ * quotation-viewing entry point (the /quotations/:id detail page's own
+ * ?edit= deep link, B2B Customer Workspace's "View Latest", quotation
+ * notifications) is unchanged.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
@@ -93,20 +99,52 @@ describe('Post-Order lock — enforced at the service layer and surfaced in the 
   });
 });
 
-describe('Old standalone quotation popup — retired, invocation paths rewired', () => {
-  it('Quotations.tsx no longer has the view popup (no VIEW MODAL, no viewItem, no ?open= machinery)', () => {
-    expect(quotationsPage).not.toContain('VIEW MODAL');
-    expect(quotationsPage).not.toContain('viewItem');
-    expect(quotationsPage).not.toContain('openParam');
-    expect(quotationsPage).not.toContain('closeQuotationDetails');
+describe('Quotation list preview popup — reinstated to match the Invoice list UX (2026-08-25)', () => {
+  // The original "retired popup" migration (this file's remaining describe
+  // blocks below) intentionally moved quotation viewing off a popup and onto
+  // navigation (Project Workspace / /quotations/:id). That decision has since
+  // been explicitly reversed for the LIST PAGE's click behavior only, by
+  // direct product request: "clicking a quotation should open a preview
+  // popup, the same way Invoice already works" — not a regression, a
+  // deliberate UX parity fix. QuotationDetailModal.tsx mirrors
+  // InvoiceDetailModal.tsx's structure (same Modal size, header, tabs,
+  // footer button row, DetailCard/Field building blocks) rather than
+  // inventing a new popup design. Project Workspace access is preserved as
+  // an explicit in-popup action (onOpenProject), not the default click
+  // target. The OTHER entry points this file protects below — the
+  // /quotations/:id detail page's own ?edit= deep link, the B2B pipeline's
+  // "View Latest", and quotation notifications — were NOT touched and still
+  // route exactly as before.
+  it('Quotations.tsx has the QuotationDetailModal preview popup, wired through viewItem/?open= (mirrors InvoicesWorkspace.tsx\'s viewItem/openInvoice/closeInvoiceDetails pattern)', () => {
+    expect(quotationsPage).toContain('import { QuotationDetailModal }');
+    expect(quotationsPage).toContain('const [viewItem, setViewItem] = useState<any>(null)');
+    expect(quotationsPage).toContain("const openParam = searchParams.get('open') || ''");
+    expect(quotationsPage).toContain('function closeQuotationDetails()');
+    expect(quotationsPage).toContain('<QuotationDetailModal');
   });
 
-  it('row click / View navigates: project-linked quotations → Project Workspace; unlinked → /quotations/:id detail page', () => {
+  it('row click / View opens the preview popup (openQuotationPreview) — no automatic navigation to Project Workspace or /quotations/:id', () => {
+    expect(quotationsPage).toContain('function openQuotationPreview(q: any)');
+    expect(quotationsPage).toContain('onClick={(e) => handleRowClick(e, q)}');
+    expect(quotationsPage).toContain('openQuotationPreview(quotation)');
+    expect(quotationsPage).toContain('<QuotationActionStrip onView={() => openQuotationPreview(q)} />');
+  });
+
+  it('Project Workspace remains reachable — openQuotationDetails() is now an explicit in-popup action (onOpenProject), not the row-click target', () => {
     expect(quotationsPage).toContain('function openQuotationDetails(q: any)');
     expect(quotationsPage).toContain("navigate(`/projects/${encodeURIComponent(q.projectId)}`)");
-    expect(quotationsPage).toContain("navigate(`/quotations/${encodeURIComponent(q.id)}`)");
+    expect(quotationsPage).toContain('onOpenProject={viewItem?.projectId ? () => { closeQuotationDetails(); openQuotationDetails(viewItem); } : undefined}');
   });
 
+  it('the popup reuses existing infrastructure — no duplicated business logic (doPrint mirrors InvoicesWorkspace.tsx\'s doPrint via DocumentTemplateResolver, sendQuotationEmail is the existing shared utility, Delete reuses the existing del mutation)', () => {
+    expect(quotationsPage).toContain("const { DocumentTemplateResolver, triggerPrint } = await import('../templates/documents/resolver')");
+    expect(quotationsPage).toContain("DocumentTemplateResolver(fullCompany as any, 'QUOTATION', quotation)");
+    expect(quotationsPage).toContain('sendQuotationEmail(viewItem, customers, { company, emailSettings })');
+    expect(quotationsPage).toContain('setDelId(viewItem.id)');
+  });
+});
+
+describe('Old standalone quotation popup — retired for every entry point EXCEPT the list page\'s own row click (see above)', () => {
   it('the /quotations/:id detail page deep-links unlinked edits via ?edit= instead of the popup', () => {
     expect(quotationsPage).toContain("const editParam = searchParams.get('edit') || ''");
     expect(quotationsWorkspacePage).toContain("navigate(`/quotations?edit=${encodeURIComponent(id || '')}`)");

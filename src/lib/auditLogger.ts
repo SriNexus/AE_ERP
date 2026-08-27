@@ -40,7 +40,16 @@ export type AuditActionType =
   // persistence of blocked geofence attempts in the current architecture,
   // so no detection logic can observe this event type. Kept as a forward
   // placeholder only.
-  | 'geofence_violation';
+  | 'geofence_violation'
+  // Face Attendance + DeepFace Master Plan, Phase 4: enrollment/re-enrollment
+  // of a biometric_face_references document, and a verification attempt
+  // (pass or fail) against one. Written from the Node orchestration layer
+  // (api/_lib/biometrics/audit.ts) via a direct Admin-SDK write matching
+  // this file's own AuditLogEntry shape — see that module's doc comment for
+  // why it does not call this file's own logActivity()/writeLog() functions
+  // directly (they depend on the browser-only useAppStore Zustand state).
+  | 'biometric_enrollment'
+  | 'biometric_verification';
 
 export type AuditSeverity = 'info' | 'success' | 'warning' | 'danger' | 'critical';
 

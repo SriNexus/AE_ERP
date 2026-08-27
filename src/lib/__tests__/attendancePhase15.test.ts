@@ -222,4 +222,49 @@ describe('Phase 15 — correctAttendance() validation', () => {
     expect(result.success).toBe(true);
     expect(result.record!.checkIn!.timestamp).toBe('2026-08-20T09:05:00Z');
   });
+
+  // Phase 9 (DI-02 sweep): updateData.checkIn/checkOut are spread from an
+  // ADMIN-SUPPLIED partial correction object — if a correction form field is
+  // left blank (mapping to `undefined` in JS, a real, common pattern), the
+  // merged `{ ...existing.checkIn, ...correction.checkIn }` object carries
+  // that undefined value into the raw updateDoc() call. Prove the actual
+  // write payload never contains an undefined-valued key.
+  it('an admin correction with an explicitly-undefined field (blanked form input) never reaches Firestore with that key present', async () => {
+    const { getOne } = await import('../../lib/firestore');
+    (getOne as any).mockResolvedValue({
+      id: 'ATT-001',
+      employeeId: 'EMP-01',
+      companyId: 'COMPANY-A',
+      date: '2026-08-20',
+      checkIn: {
+        timestamp: '2026-08-20T09:00:00Z',
+        withinGeofence: true,
+        accuracyAccepted: true,
+        source: 'gps',
+        location: { latitude: 28.6139, longitude: 77.2090, accuracy: 10, capturedAt: '2026-08-20T09:00:00Z' },
+      },
+    });
+
+    const { AttendanceService } = await import('../../services/AttendanceService');
+    const result = await AttendanceService.correctAttendance('ATT-001', {
+      reason: 'Clearing a stray approvedLocationId the admin form left blank',
+      checkIn: { timestamp: '2026-08-20T09:05:00Z', approvedLocationId: undefined },
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockUpdateDoc).toHaveBeenCalledTimes(1);
+    const [, writtenPayload] = mockUpdateDoc.mock.calls[0];
+    // Recurse the whole payload — undefined must not survive anywhere,
+    // including nested under `checkIn`/`correction`.
+    const assertNoUndefined = (obj: unknown, path: string) => {
+      if (obj === null || typeof obj !== 'object') return;
+      for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+        expect(value, `${path}.${key} must not be undefined`).not.toBeUndefined();
+        assertNoUndefined(value, `${path}.${key}`);
+      }
+    };
+    assertNoUndefined(writtenPayload, 'updateData');
+    expect('approvedLocationId' in writtenPayload.checkIn).toBe(false);
+    expect(writtenPayload.checkIn.timestamp).toBe('2026-08-20T09:05:00Z');
+  });
 });

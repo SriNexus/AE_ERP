@@ -1,5 +1,5 @@
 /**
- * Secure Integration Platform — shared server-side secret boundary.
+ * Secure Integration Platform ï¿½ shared server-side secret boundary.
  *
  * This module is intentionally generic: it stores provider secrets on the
  * trusted backend, writes only masked metadata back to Firestore, and never
@@ -8,6 +8,7 @@
 
 import { getAdminDb, getAdminStorageBucket } from './firebase';
 import { AuthResolutionError, resolveAuthenticatedUser, type AuthenticatedUser } from './auth';
+import { sanitizePayload } from '../../src/lib/sanitizer';
 
 export type IntegrationSectionId = 'email' | 'whatsapp' | 'sms' | 'integrations';
 export type IntegrationAction = 'status' | 'update' | 'rotate' | 'test' | 'disconnect';
@@ -154,10 +155,16 @@ export async function createDefaultIntegrationPlatformAdapter(): Promise<Integra
     },
     async appendAuditLog(entry) {
       const id = String(entry.id || `INT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-      await db.collection('audit_logs').doc(id).set({
+      // Phase 9 (DI-02 sweep): `entry` includes caller fields like
+      // `userName: auth.name`, which is optional on AuthenticatedUser â€” the
+      // Admin SDK throws on any undefined field value by default (this app
+      // never sets ignoreUndefinedProperties). appendAuditLogSafely's
+      // try/catch would otherwise turn that into a silently-missing audit
+      // entry rather than a loud failure.
+      await db.collection('audit_logs').doc(id).set(sanitizePayload({
         id,
         ...entry,
-      });
+      }));
     },
   };
 }

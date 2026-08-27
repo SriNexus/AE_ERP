@@ -26,8 +26,6 @@ import {
   Handshake, HardHat, ClipboardCheck, Zap, Landmark, CalendarCheck, Wrench, Activity,} from 'lucide-react';
 import type { Module } from '../../../lib/permissions';
 import { canDo } from '../../../lib/permissions';
-import { isDemoHiddenModule, isDemoUser } from '../../../lib/demoCapabilityPolicy';
-import { useAppStore } from '../../../store/useAppStore';
 import { ModuleCard } from './ModuleCard';
 
 // ── Module Type ───────────────────────────────────────────────
@@ -123,15 +121,15 @@ interface ModuleGridProps {
 // ── Component ─────────────────────────────────────────────────
 
 export const ModuleGrid = React.memo(function ModuleGrid({ onSelectModule }: ModuleGridProps) {
-  // Filter modules by view permission + demo hidden modules, then group them
+  // Filter modules by view permission, then group them. No demo-specific
+  // filtering — Neozy Demo's own role/permission resolution governs module
+  // visibility the same way any other Group's does (docs/reports/
+  // NEOZY_DEMO_GROUP_CONVERSION_REPORT.md).
   const groupedModules = useMemo(() => {
-    const user = useAppStore.getState().user;
-    const isDemo = isDemoUser(user);
     const groups = new Map<ModuleGroup, ModuleDef[]>();
 
     for (const mod of MODULES) {
       if (!canDo('view', mod.permissionModule)) continue;
-      if (isDemo && isDemoHiddenModule(mod.permissionModule)) continue;
 
       const existing = groups.get(mod.group) ?? [];
       existing.push(mod);

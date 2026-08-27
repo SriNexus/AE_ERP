@@ -4,7 +4,8 @@ import {
   getAll, createDocWithId, deleteDocById, genId, fmtDate,
 } from '../../../lib/firestore';
 import { COLLECTIONS } from '../../../lib/firebase';
-import { useCurrentUser } from '../../../store/useAppStore';
+import { useAppStore, useCurrentUser } from '../../../store/useAppStore';
+import { queryKeys } from '../../../lib/queryKeys';
 import toast from 'react-hot-toast';
 
 // ── Attendance ────────────────────────────────────────────────
@@ -16,15 +17,30 @@ import toast from 'react-hot-toast';
 // no employee/date/time/status input).
 export const ATTENDANCE_STATUSES = ['Present', 'Absent', 'Late', 'Half Day', 'Holiday', 'On Leave'];
 
+// Phase 10 (F-CACHE-01 sweep, Master Plan "Cache / Query Isolation
+// Verification"): useAttendance()/usePayroll() previously used raw,
+// company-unscoped queryKeys ('attendance'/'payroll') for genuinely
+// company-scoped collections — the HR module page stays mounted across a
+// Company switch, so React Query served the PRIOR company's cached records
+// during the tick the switch takes to resolve (the same transient
+// stale-tenant rendering bug Reports.tsx had). Routed through the existing,
+// already-tenant-aware queryKeys.forCompany() factory (src/lib/queryKeys.ts)
+// instead of reinventing scoping — that factory already defines both
+// `attendance` and `payroll` keys.
+
 export function useAttendance() {
-  return useQuery({ queryKey: ['attendance'], queryFn: () => getAll(COLLECTIONS.ATTENDANCE), staleTime: 30_000 });
+  const { activeCompanyId } = useAppStore();
+  const keys = queryKeys.forCompany(activeCompanyId);
+  return useQuery({ queryKey: keys.attendance, queryFn: () => getAll(COLLECTIONS.ATTENDANCE), staleTime: 30_000 });
 }
 
 export function useDeleteAttendance() {
   const qc = useQueryClient();
+  const { activeCompanyId } = useAppStore();
+  const keys = queryKeys.forCompany(activeCompanyId);
   return useMutation({
     mutationFn: (id: string) => deleteDocById(COLLECTIONS.ATTENDANCE, id),
-    onSuccess:  () => { qc.invalidateQueries({ queryKey: ['attendance'] }); toast.success('Record deleted'); },
+    onSuccess:  () => { qc.invalidateQueries({ queryKey: keys.attendance }); toast.success('Record deleted'); },
     onError:    (e: any) => toast.error(e.message),
   });
 }
@@ -116,12 +132,16 @@ export const PAYROLL_FORM_DEFAULT = {
 export type PayrollForm = typeof PAYROLL_FORM_DEFAULT;
 
 export function usePayroll() {
-  return useQuery({ queryKey: ['payroll'], queryFn: () => getAll(COLLECTIONS.PAYROLL), staleTime: 60_000 });
+  const { activeCompanyId } = useAppStore();
+  const keys = queryKeys.forCompany(activeCompanyId);
+  return useQuery({ queryKey: keys.payroll, queryFn: () => getAll(COLLECTIONS.PAYROLL), staleTime: 60_000 });
 }
 
 export function useSavePayroll(editId: string | null, onSuccess: () => void) {
   const qc   = useQueryClient();
   const user = useCurrentUser();
+  const { activeCompanyId } = useAppStore();
+  const keys = queryKeys.forCompany(activeCompanyId);
   return useMutation({
     mutationFn: async (data: PayrollForm) => {
       const nums = (v: string) => Number(v) || 0;
@@ -142,7 +162,7 @@ export function useSavePayroll(editId: string | null, onSuccess: () => void) {
       }
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['payroll'] });
+      qc.invalidateQueries({ queryKey: keys.payroll });
       toast.success(editId ? 'Payroll updated' : 'Payroll saved');
       onSuccess();
     },
@@ -152,9 +172,11 @@ export function useSavePayroll(editId: string | null, onSuccess: () => void) {
 
 export function useDeletePayroll() {
   const qc = useQueryClient();
+  const { activeCompanyId } = useAppStore();
+  const keys = queryKeys.forCompany(activeCompanyId);
   return useMutation({
     mutationFn: (id: string) => deleteDocById(COLLECTIONS.PAYROLL, id),
-    onSuccess:  () => { qc.invalidateQueries({ queryKey: ['payroll'] }); toast.success('Record deleted'); },
+    onSuccess:  () => { qc.invalidateQueries({ queryKey: keys.payroll }); toast.success('Record deleted'); },
     onError:    (e: any) => toast.error(e.message),
   });
 }

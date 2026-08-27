@@ -2,7 +2,6 @@ import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 
 import { firebaseEnv, storage } from '../../../lib/firebase';
 import type { SurveyPhoto } from '../types';
-import { assertTenantSafeUploadPath } from '../../../lib/demoUploadPolicy';
 import { useAppStore } from '../../../store/useAppStore';
 
 export async function uploadSurveyPhotos(surveyId: string, files: File[]): Promise<SurveyPhoto[]> {
@@ -24,7 +23,6 @@ export async function uploadSurveyPhotos(surveyId: string, files: File[]): Promi
     const companyId=useAppStore.getState().user?.companyId||useAppStore.getState().activeCompanyId;
     if(!companyId)throw new Error('Your company identity is unavailable. Please sign in again.');
     const storagePath = `companies/${companyId}/surveys/${surveyId}/${Date.now()}-${index}-${safeName}`;
-    assertTenantSafeUploadPath(storagePath);
     const objectRef = ref(storage, storagePath);
     await uploadBytes(objectRef, file, { contentType: file.type || 'image/jpeg' });
     return {

@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react';
 import type React from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getDownloadURL, getStorage, ref, uploadBytes } from 'firebase/storage';
-import { assertTenantSafeUploadPath } from '../../lib/demoUploadPolicy';
 import { Camera, PackagePlus, Upload, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { COLLECTIONS } from '../../lib/firebase';
@@ -65,7 +64,6 @@ export function ProductDetailDrawer({ product, open, onClose, onEdit }: Props) {
       const companyId=product.companyId||activeCompanyId;
       if(!companyId)throw new Error('Your company identity is unavailable. Please sign in again.');
       const path = `companies/${companyId}/products/${product.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g,'-')}`;
-      assertTenantSafeUploadPath(path, product.companyId || activeCompanyId);
       const fileRef = ref(storage, path);
       await uploadBytes(fileRef, file);
       const url = await getDownloadURL(fileRef);

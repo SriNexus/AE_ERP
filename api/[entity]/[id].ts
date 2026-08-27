@@ -14,7 +14,7 @@ import { requirePermission } from '../_lib/permissions';
 import { ENTITY_REGISTRY, isGlobalCollection } from '../_lib/registry';
 import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
 import { isHiddenOwnerRecord } from '../../src/lib/ownerAccess';
-import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, IMMUTABLE_FIELDS } from '../_lib/response';
+import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, buildWritableUpdatePayload } from '../_lib/response';
 
 // ── CORS headers ───────────────────────────────────────────────
 function setCorsHeaders(res: VercelResponse) {
@@ -124,7 +124,7 @@ async function handleGetById(
   return sendSuccess(res, { id: docSnap.id, ...data });
 }
 
-async function handleUpdate(
+export async function handleUpdate(
   req: VercelRequest,
   res: VercelResponse,
   config: typeof ENTITY_REGISTRY[string],
@@ -155,16 +155,9 @@ async function handleUpdate(
     return sendNotFound(res, `Resource has been deleted.`);
   }
 
-  // Strip immutable fields from the update payload
-  const updateData: Record<string, unknown> = {
-    updatedBy: user.uid,
-    updatedAt: new Date().toISOString(),
-  };
-  for (const [key, value] of Object.entries(body)) {
-    if (!IMMUTABLE_FIELDS.has(key)) {
-      updateData[key] = value;
-    }
-  }
+  // DI-03: only the writable-field surface is admitted — see
+  // buildWritableUpdatePayload()/SECURITY_RESERVED_FIELDS in _lib/response.ts.
+  const updateData = buildWritableUpdatePayload(body, user.uid, existingSnap.data() || {});
 
   await db.collection(config.collection).doc(resourceId).update(updateData);
 

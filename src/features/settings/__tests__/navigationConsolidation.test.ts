@@ -5,9 +5,16 @@ import { canonicalSettingsSectionId, DEFAULT_SECTION, SETTINGS_SECTIONS } from '
 describe('Settings navigation consolidation', () => {
   it('exposes the required navigation order with My Profile first and no Overview', () => {
     const visible = SETTINGS_SECTIONS.filter((section) => section.showInNavigation !== false && section.visible !== false);
+    // Production fix (docs/audits/GEO_ATTENDANCE_CURRENT_STATE_AUDIT.md
+    // Finding F3): Attendance now has a real settings UI (previously fell
+    // through to SettingsPlaceholder with no way to change it), so it is
+    // no longer hidden from navigation — an admin needs to be able to
+    // find it, unlike 'overview'/'theme-ui'/'appearance', which stay
+    // hidden because they're reached via other established entry points.
     expect(visible.map((section) => section.label)).toEqual([
       'My Profile', 'General', 'Theme & Appearance', 'Notifications',
       'Users & Permissions', 'Automation', 'Documents', 'Email', 'About ERP',
+      'Attendance',
     ]);
     expect(DEFAULT_SECTION).toBe('my-profile');
   });

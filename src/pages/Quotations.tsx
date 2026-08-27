@@ -44,8 +44,11 @@ import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useProjects } from '../features/projects/hooks/useProjects';
 import { useEngineeringDesigns } from '../features/engineering/hooks/useEngineeringDesigns';
 import { quotationItemsFromEngineering, synchronizeQuotationProjectLink, createQuotation, updateQuotation } from '../lib/quotationWorkflow';
-import { quotationDisplayNumber } from '../features/quotations/utils/quotationEmail';
+import { quotationDisplayNumber, sendQuotationEmail } from '../features/quotations/utils/quotationEmail';
 import { QuotationItemsEditor } from '../features/quotations/components/QuotationItemsEditor';
+import { QuotationDetailModal } from '../features/quotations/components/QuotationDetailModal';
+import { useSettingsSection } from '../features/settings/hooks/useSettingsSection';
+import { normalizeEmailSettings } from '../features/settings/emailRuntime';
 
 const PER_PAGE = 10;
 const CONVERTED_STATUS = 'Converted to Order';
@@ -96,6 +99,23 @@ function isRowOpenIgnored(target: EventTarget | null) {
   return Boolean(target.closest('button,a,input,select,textarea,[data-action],[data-dropdown],[data-interactive]'));
 }
 
+// Mirrors InvoicesWorkspace.tsx's doPrint() exactly — the same
+// DocumentTemplateResolver + triggerPrint mechanism already used for
+// Invoice's "Download PDF" and for the mobile Quotation preview's "Print"
+// action, reused here rather than duplicated.
+async function doPrint(quotation: any, fallbackCompany: any) {
+  const toastId = toast.loading('Generating Document...');
+  try {
+    const fullCompany = await getOne(COLLECTIONS.COMPANIES, quotation.companyId || fallbackCompany.id) || fallbackCompany;
+    const { DocumentTemplateResolver, triggerPrint } = await import('../templates/documents/resolver');
+    const html = DocumentTemplateResolver(fullCompany as any, 'QUOTATION', quotation);
+    triggerPrint(html);
+    toast.success('Document ready', { id: toastId });
+  } catch (e: any) {
+    toast.error('Failed to generate document: ' + e.message, { id: toastId });
+  }
+}
+
 function QuotationActionStrip({ onView }: { onView: () => void; }) {
   return (
     <div className="flex items-center justify-end gap-1.5 opacity-90 transition-opacity duration-150 group-hover:opacity-100" data-action>
@@ -129,6 +149,7 @@ export default function Quotations() {
   const projectScope = searchParams.get('projectId') || '';
   const designScope = searchParams.get('designId') || '';
   const createParam = searchParams.get('create') || '';
+  const openParam = searchParams.get('open') || '';
   const { company } = useAppStore();
   const activeCompanyId = useAppStore(s => s.activeCompanyId);
   const qkeys = queryKeys.forCompany(activeCompanyId);
@@ -150,6 +171,14 @@ export default function Quotations() {
   const [delId, setDelId] = useState<string | null>(null);
   const [showBulkStatus, setShowBulkStatus] = useState(false);
   const [bulkStatus, setBulkStatus] = useState('');
+  // Preview popup — mirrors InvoicesWorkspace.tsx's viewItem/openInvoice/
+  // closeInvoiceDetails pattern exactly. Row click / View now opens this
+  // popup instead of navigating away (see openQuotationDetails() below,
+  // which is kept as the explicit "Open Project Workspace" escape hatch).
+  const [viewItem, setViewItem] = useState<any>(null);
+  const userClosedRef = useRef(false);
+  const emailSettingsQuery = useSettingsSection('email');
+  const emailSettings = useMemo(() => normalizeEmailSettings(emailSettingsQuery.data as Record<string, unknown> | undefined), [emailSettingsQuery.data]);
 
   function syncQueueParams(nextState: { q?: string; status?: string; kpi?: string; page?: number; perPage?: number }) {
     const next = new URLSearchParams(searchParams);
@@ -164,8 +193,8 @@ export default function Quotations() {
     if (kpi) next.set('kpi', kpi); else next.delete('kpi');
     if (nextPage > 1) next.set('page', String(nextPage)); else next.delete('page');
     if (nextPerPage !== PER_PAGE) next.set('perPage', String(nextPerPage)); else next.delete('perPage');
-    // Note: the retired popup's 'open' param is gone — row click / View now
-    // navigates (openQuotationDetails) instead of opening a popup.
+    // Note: 'open' param is NOT touched here — only openQuotationPreview()/
+    // closeQuotationDetails() manage it directly (mirrors InvoicesWorkspace.tsx).
     setSearchParams(next, { replace: true });
   }
   const { data: quotations = [], isLoading, refetch, loadMore, hasMore, loadingMore } = useQuotations();
@@ -475,26 +504,50 @@ export default function Quotations() {
   const toggleAll = () =>
     setSelected((s) => s.size === paginated.length ? new Set() : new Set(paginated.map((q: any) => q.id)));
   const allSel = selected.size === paginated.length && paginated.length > 0;
-  /** Row click / View — the retired popup's replacement: project-linked
-   * quotations open their Project Workspace (Stage 3 — Quotation workspace,
-   * the migration target); unlinked quotations open the /quotations/:id
-   * detail page. Same pattern Surveys.tsx's openSurveyWorkspace() uses. */
+  /** Explicit "Open Project Workspace" escape hatch (used from inside the
+   * preview popup, not from the row click anymore) — a project-linked
+   * quotation's dedicated workspace remains one click away. */
   function openQuotationDetails(q: any) {
     if (q?.projectId) {
       navigate(`/projects/${encodeURIComponent(q.projectId)}`);
-      return;
     }
-    if (q?.id) navigate(`/quotations/${encodeURIComponent(q.id)}`);
   }
+  /** Row click / View — matches Invoices.tsx's openInvoice()/closeInvoiceDetails()
+   * pattern exactly: opens the QuotationDetailModal preview popup instead of
+   * navigating away. No automatic navigation to Project Workspace happens
+   * here anymore — that is now an explicit action inside the popup. */
+  function openQuotationPreview(q: any) {
+    userClosedRef.current = false;
+    setViewItem(q);
+    if (!q?.id) return;
+    const next = new URLSearchParams(searchParams);
+    next.set('open', q.id);
+    setSearchParams(next, { replace: true });
+  }
+  function closeQuotationDetails() {
+    userClosedRef.current = true;
+    const next = new URLSearchParams(searchParams);
+    next.delete('open');
+    setSearchParams(next, { replace: true });
+    setViewItem(null);
+  }
+  useEffect(() => {
+    if (userClosedRef.current) return;
+    if (!openParam || isLoading) return;
+    const target = (quotations as any[]).find((q: any) => q.id === openParam);
+    if (!target) return;
+    setViewItem(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openParam, isLoading, quotations]);
   function handleRowClick(e: React.MouseEvent<HTMLTableRowElement>, quotation: any) {
     if (isRowOpenIgnored(e.target)) return;
-    openQuotationDetails(quotation);
+    openQuotationPreview(quotation);
   }
   function handleRowKeyDown(e: React.KeyboardEvent<HTMLTableRowElement>, quotation: any) {
     if (isRowOpenIgnored(e.target)) return;
     if (e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
-    openQuotationDetails(quotation);
+    openQuotationPreview(quotation);
   }
   function exportSelected() {
     const rows = (quotations as any[]).filter((q) => selected.has(q.id));
@@ -760,7 +813,7 @@ export default function Quotations() {
                         <Td className="py-3"><span data-interactive onClick={(e) => e.stopPropagation()}>{statusBadge(q.status || 'Draft')}</span></Td>
 
                         {/* Actions */}
-                        <Td className="py-3" align="right"><QuotationActionStrip onView={() => openQuotationDetails(q)} /></Td>
+                        <Td className="py-3" align="right"><QuotationActionStrip onView={() => openQuotationPreview(q)} /></Td>
                       </Tr>
                     ))
                 }
@@ -902,6 +955,22 @@ export default function Quotations() {
           
         </form>
       </Modal>
+
+      <QuotationDetailModal
+        open={!!viewItem}
+        quotation={viewItem}
+        currencySymbol={company.currencySymbol}
+        orderNumberById={orderNumberById}
+        canDelete={canDo('delete', 'quotations')}
+        canConvert={canDo('create', 'orders') && !viewItem?.projectId}
+        onClose={closeQuotationDetails}
+        onEdit={() => { closeQuotationDetails(); openEdit(viewItem); }}
+        onSend={() => { if (viewItem) sendQuotationEmail(viewItem, customers, { company, emailSettings }); }}
+        onDownload={() => viewItem && doPrint(viewItem, company)}
+        onConvert={() => { if (viewItem?.id) navigate(`/orders?create=1&quotationId=${encodeURIComponent(viewItem.id)}`); }}
+        onOpenProject={viewItem?.projectId ? () => { closeQuotationDetails(); openQuotationDetails(viewItem); } : undefined}
+        onDelete={() => { if (viewItem?.id) { setDelId(viewItem.id); closeQuotationDetails(); } }}
+      />
 
       <Modal open={showBulkStatus} onClose={() => { setShowBulkStatus(false); setBulkStatus(''); }} title="Change Status" size="sm">
         <div className="space-y-4">

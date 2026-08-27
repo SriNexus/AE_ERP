@@ -247,6 +247,28 @@ export default function UsersPage() {
           if ((existing.status || 'Active') !== (rest.status || 'Active')) {
             await logUpdate('user', editId, { status: existing.status || 'Active' }, { status: rest.status || 'Active' }, 'users');
           }
+          // A Group Admin must be a complete ERP identity (Auth -> User ->
+          // Employee -> Company/Group scope), not merely an authentication-
+          // only account — a role edit that promotes someone TO GroupAdmin
+          // must not leave them without the Employee/HR record every other
+          // operational login gets. Idempotent (linkOrCreateForUser reuses
+          // an existing link/Employee first) and best-effort — the role
+          // change itself must not be rolled back if HR-side linking fails.
+          if (rest.role === 'GroupAdmin' && !existing.employeeId) {
+            try {
+              const employeeId = await EmployeeDomainService.linkOrCreateForUser(editId, {
+                name: rest.name ?? existing.name,
+                phone: rest.phone ?? existing.phone,
+                email: rest.email ?? existing.email,
+                role: 'GroupAdmin',
+                companyId: String(existing.companyId || ''),
+                createdBy: currentUser?.id,
+              });
+              await updateUserProjection(editId, { employeeId });
+            } catch (employeeError: any) {
+              toast.error(`Role updated, but the linked Employee/HR record could not be provisioned: ${employeeError?.message || 'unknown error'}`);
+            }
+          }
         }
       } else {
         const { password: _, ...rest } = d;

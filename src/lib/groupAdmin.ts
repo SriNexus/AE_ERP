@@ -24,8 +24,10 @@
 import { doc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { db, COLLECTIONS, firebaseEnv } from './firebase';
 import { useAppStore } from '../store/useAppStore';
-import { genId } from './firestore';
+import { genId, getOne } from './firestore';
 import { logRoleChange, logSecurityEvent, logCreate, logUpdate } from './auditLogger';
+import { sanitizePayload } from './sanitizer';
+import { EmployeeDomainService } from '../services/EmployeeDomainService';
 
 const NOT_CONFIGURED_MSG = 'Firebase is not configured. This application requires a valid Firebase configuration.';
 
@@ -85,6 +87,29 @@ export async function grantGroupAdminForGroup(
   }
 
   const memberId = `${groupId}_${input.userId}`;
+  // TX-01 (Phase 6): a single writeBatch() spanning group_members create +
+  // the users role promotion was ATTEMPTED and rejected by real-emulator
+  // evidence (src/lib/__tests__/groupAdminGrantBatchAtomicity.emulator.test.ts,
+  // live-verified 2026-08-26): both writes land in ONE Firestore request, so
+  // BOTH the group_members create rule AND the (already expression-heavy)
+  // users update rule's promotion branch are evaluated against a SINGLE
+  // shared 1000-expression budget for that request — compounded by the
+  // generic wildcard fallback's documented, unavoidable redundant
+  // evaluation (see match /{collectionId}/{documentId} below and `stock`'s
+  // own historical comment) happening TWICE (once per write) instead of
+  // once. The combined cost exceeds the cap ("maximum of 1000 expressions
+  // to evaluate has been reached") even on the plain happy-path grant,
+  // reproduced directly against the emulator. As two SEPARATE sequential
+  // writes (below), each pays the fallback tax once, against its own
+  // budget — safely under the limit, exactly as this code ran before this
+  // phase. Master Plan Phase 6 asks for one writeBatch(); this repo's own
+  // established, hard expression-budget constraint (Phase 2, "Respect the
+  // existing Firestore expression-budget constraints" — a non-negotiable
+  // security principle) makes that literal implementation unsafe, so the
+  // proven-atomic-attempt is reverted in favor of the pre-existing ordering
+  // guarantee (group_members created FIRST; the users update rule's own
+  // exists() check on it is what actually enforces the invariant either
+  // way — sequential writes were never actually missing that protection).
   // 1) group_members create FIRST (rules: active GroupAdmin of this group,
   //    grantedBy == actor, target != self).
   await setDoc(doc(db, COLLECTIONS.GROUP_MEMBERS, memberId), {
@@ -113,6 +138,34 @@ export async function grantGroupAdminForGroup(
     groupId,
     userId: input.userId,
   });
+
+  // A Group Admin must be a complete ERP identity — Auth -> User -> Employee
+  // -> Company/Group scope, not merely an authentication-only account.
+  // linkOrCreateForUser() is idempotent (reuses an existing Employee for
+  // this exact user, or one under this phone's master identity, before ever
+  // creating a new one) and role-preserving — it links the SAME canonical
+  // User, never a second login. Best-effort: the role grant itself has
+  // already succeeded and must not be rolled back merely because HR-side
+  // provisioning failed.
+  try {
+    const target = await getOne<Record<string, unknown>>(COLLECTIONS.USERS, input.userId);
+    if (target && !target.employeeId) {
+      const employeeId = await EmployeeDomainService.linkOrCreateForUser(input.userId, {
+        name: target.name,
+        phone: target.phone,
+        email: target.email,
+        role: 'GroupAdmin',
+        companyId: String(target.companyId || ''),
+        createdBy: actorId,
+      });
+      await updateDoc(doc(db, COLLECTIONS.USERS, input.userId), { employeeId, updatedBy: actorId, updatedAt: serverTimestamp() });
+    }
+  } catch (employeeError) {
+    await logSecurityEvent('group_admin_grant_employee_link_failed', `Group Admin granted for ${input.userEmail}, but Employee/HR linking failed: ${employeeError instanceof Error ? employeeError.message : String(employeeError)}`, {
+      groupId,
+      userId: input.userId,
+    });
+  }
 }
 
 // ── §7.3: Company creation inside the actor's own Group ─────
@@ -136,7 +189,7 @@ export async function createCompanyInGroup(input: GroupCompanyInput): Promise<{ 
 
   const id = genId.generic('CO');
   const { name, ...rest } = input;
-  const payload = {
+  const payload = sanitizePayload({
     id,
     companyId: id,
     groupId,
@@ -148,7 +201,7 @@ export async function createCompanyInGroup(input: GroupCompanyInput): Promise<{ 
     updatedBy: actorId,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
-  };
+  });
   await setDoc(doc(db, COLLECTIONS.COMPANIES, id), payload);
   await logCreate('company', id, { name: payload.name, groupId, status: payload.status }, 'companies');
   return { id };
@@ -167,11 +220,17 @@ export async function updateCompanyInGroup(id: string, input: Record<string, unk
   const { actorId, groupId } = requireGroupAdminIdentity();
 
   const { groupId: _strip, ...rest } = input as { groupId?: string; [key: string]: unknown };
-  await updateDoc(doc(db, COLLECTIONS.COMPANIES, id), {
+  // Firestore rejects a literal `undefined` field value (e.g. a blank
+  // optional geo-fence input produces `latitude: undefined`) — sanitize the
+  // same way updateDocById() already does for every other write path, so an
+  // omitted/blank optional field is left untouched rather than crashing the
+  // update. This is not a per-field allowlist: any field this form sends
+  // gets the same treatment.
+  await updateDoc(doc(db, COLLECTIONS.COMPANIES, id), sanitizePayload({
     ...rest,
     groupId,
     updatedBy: actorId,
     updatedAt: serverTimestamp(),
-  });
+  }));
   await logUpdate('company', id, {}, { ...rest, groupId }, 'companies');
 }

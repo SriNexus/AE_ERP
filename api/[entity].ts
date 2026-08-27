@@ -212,13 +212,13 @@ async function handleCreate(req: VercelRequest, res: VercelResponse, config: typ
   if (!companyId) return sendBadRequest(res, 'Authenticated identity has no company scope.');
 
   // Phase 15: this used to ALSO enforce a hard per-entity cap (max 5
-  // non-deleted records for the demo company) here — the server-side
-  // mirror of the same artificial ceiling removed from src/lib/firestore.ts
-  // (see that file's enforceDemoRecordLimit() doc comment for the full
-  // rationale). Removed for the same reason: it directly contradicted the
-  // Blueprint's "no artificial ceiling" principle and, in practice, blocked
-  // all demo creation through this API once the seed data — which every
-  // collection here already exceeds 5 records in — was in place.
+  // non-deleted records for the demo company) here. Removed — it directly
+  // contradicted the Blueprint's "no artificial ceiling" principle. The
+  // client-side mirror of this same cap (src/lib/firestore.ts's
+  // enforceDemoRecordLimit()) was later deleted outright, not just relaxed
+  // (Demo-to-Group conversion — docs/reports/NEOZY_DEMO_GROUP_CONVERSION_REPORT.md):
+  // Neozy Demo is a real Group now, so no capability-gating mechanism keyed
+  // on "is this the demo company" exists anywhere in this codebase.
 
   if (config.collection === 'users' && isOwnerEmail(body.email)) {
     return sendBadRequest(res, 'This Firebase owner identity is not a manageable ERP user.');

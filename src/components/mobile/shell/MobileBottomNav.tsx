@@ -98,7 +98,10 @@ const LIST_META: Record<string, { label: string; icon: React.ReactNode }> = {
   '/payments':            { label: 'Payments',    icon: <CreditCard className="h-5 w-5" /> },
   '/reports':             { label: 'Reports',     icon: <LayoutDashboard className="h-5 w-5" /> },
   '/employees':           { label: 'Employees',   icon: <UserCog className="h-5 w-5" /> },
-  '/attendance':          { label: 'Attendance',  icon: <Calendar className="h-5 w-5" /> },
+  // Product-integration follow-up: the 2nd nav tab in the Attendance module
+  // is specifically the attendance RECORDS view — labeled accordingly so it
+  // is never confused with the 3rd tab's "Create" (camera) action.
+  '/attendance':          { label: 'Records',     icon: <Calendar className="h-5 w-5" /> },
   '/payroll':             { label: 'Payroll',     icon: <CreditCard className="h-5 w-5" /> },
   '/tasks':               { label: 'Tasks',       icon: <ListTodo className="h-5 w-5" /> },
   '/users':               { label: 'Users',       icon: <Users className="h-5 w-5" /> },

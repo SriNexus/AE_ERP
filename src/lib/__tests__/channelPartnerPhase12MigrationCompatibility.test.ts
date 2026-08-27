@@ -256,7 +256,6 @@ describe('VL-12 — NO data migration, NO unapproved rename', () => {
     for (const rel of [
       'src/features/scheme-registration/services/schemeRegistrationWorkflow.ts',
       'src/features/loan-applications/services/loanApplicationWorkflow.ts',
-      'src/lib/sandboxReset.ts',
     ]) {
       const source = readSource(rel);
       expect(source).not.toMatch(/LOAN_APPLICATIONS\s*,[^)]{0,120}SCHEME_REGISTRATIONS/);

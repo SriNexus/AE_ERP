@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { parsePagination, parseSearch, sendSuccess, sendPaginated, sendError, sendCreated, sendNoContent, sendBadRequest, sendNotFound, sendConflict, sendInternalError } from '../_lib/response';
+import { parsePagination, parseSearch, sendSuccess, sendPaginated, sendError, sendCreated, sendNoContent, sendBadRequest, sendNotFound, sendConflict, sendInternalError, buildWritableUpdatePayload, sanitizeCreateBody } from '../_lib/response';
 import { verifyAuthToken, authError, forbiddenError } from '../_lib/auth';
 import { canDo, requirePermission } from '../_lib/permissions';
 import { ENTITY_REGISTRY, GLOBAL_COLLECTIONS, isEntityRegistered, getEntityConfig, isGlobalCollection } from '../_lib/registry';
@@ -270,6 +270,120 @@ describe('sendInternalError', () => {
     );
   });
 });
+
+// ── DI-03 (Phase 4): mass-assignment protection ───────────────
+
+describe('buildWritableUpdatePayload (DI-03)', () => {
+  // The entity's own current document — a plausible `quotations` doc.
+  const existingDoc = { id: 'doc-1', companyId: 'company-1', status: 'Draft', notes: 'initial', trackingNumber: 'TRK-0' };
+
+  it('admits a legitimate business field already present on the document', () => {
+    const payload = buildWritableUpdatePayload({ status: 'Approved', notes: 'Looks good' }, 'uid-1', existingDoc);
+    expect(payload.status).toBe('Approved');
+    expect(payload.notes).toBe('Looks good');
+  });
+
+  it('always stamps updatedBy/updatedAt server-side, ignoring any client-supplied value', () => {
+    const payload = buildWritableUpdatePayload({ updatedBy: 'attacker-uid', updatedAt: '2020-01-01' }, 'uid-real', existingDoc);
+    expect(payload.updatedBy).toBe('uid-real');
+    expect(payload.updatedAt).not.toBe('2020-01-01');
+  });
+
+  it('rejects an unknown field the document has never had (DI-03: unknown fields cannot silently persist)', () => {
+    const payload = buildWritableUpdatePayload({ someRandomAttackerField: 'x' }, 'uid-1', existingDoc);
+    expect('someRandomAttackerField' in payload).toBe(false);
+  });
+
+  it('protects companyId — cannot be reassigned via update even though the document already has it', () => {
+    const payload = buildWritableUpdatePayload({ companyId: 'OTHER-COMPANY' }, 'uid-1', existingDoc);
+    expect('companyId' in payload).toBe(false);
+  });
+
+  it('protects groupId — cannot be introduced via update even if present on the existing document', () => {
+    const payload = buildWritableUpdatePayload({ groupId: 'OTHER-GROUP' }, 'uid-1', { ...existingDoc, groupId: 'GROUP-A' });
+    expect('groupId' in payload).toBe(false);
+  });
+
+  it('protects ownership/audit fields (id, createdBy, createdAt, isDeleted, deletedAt, deletedBy) even though every one is already on the document', () => {
+    const payload = buildWritableUpdatePayload({
+      id: 'forged-id', createdBy: 'attacker', createdAt: '2020-01-01',
+      isDeleted: true, deletedAt: '2020-01-01', deletedBy: 'attacker',
+    }, 'uid-1', { ...existingDoc, createdBy: 'orig', createdAt: '2019-01-01', isDeleted: false, deletedAt: null, deletedBy: null });
+    expect(Object.keys(payload).sort()).toEqual(['updatedAt', 'updatedBy']);
+  });
+
+  it('blocks role/isSuperAdmin/permissions injection even when the (e.g. users) document already carries them', () => {
+    const payload = buildWritableUpdatePayload({
+      role: 'Admin', isSuperAdmin: true, permissions: { users: { edit: true } },
+    }, 'uid-1', { ...existingDoc, role: 'Sales', isSuperAdmin: false, permissions: {} });
+    expect('role' in payload).toBe(false);
+    expect('isSuperAdmin' in payload).toBe(false);
+    expect('permissions' in payload).toBe(false);
+  });
+
+  it('blocks a reserved field even when its value is a nested object (wrapping does not bypass the top-level key check)', () => {
+    const payload = buildWritableUpdatePayload({
+      role: { name: 'Admin', escalate: true },
+      isSuperAdmin: { value: true },
+    }, 'uid-1', { ...existingDoc, role: 'Sales', isSuperAdmin: false });
+    expect('role' in payload).toBe(false);
+    expect('isSuperAdmin' in payload).toBe(false);
+  });
+
+  it('rejects prototype-polluting key names', () => {
+    const body = JSON.parse('{"__proto__":{"polluted":true},"constructor":"x","prototype":"y","status":"ok"}');
+    const payload = buildWritableUpdatePayload(body, 'uid-1', existingDoc);
+    expect(payload.status).toBe('ok');
+    expect(({} as any).polluted).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(payload, '__proto__')).toBe(false);
+  });
+
+  it('a mix of legitimate and attacker fields: only the legitimate ones survive', () => {
+    const payload = buildWritableUpdatePayload({
+      status: 'Shipped', trackingNumber: 'TRK-1',
+      companyId: 'OTHER', role: 'Admin', groupId: 'OTHER-GROUP', unknownField: 'x',
+    }, 'uid-1', existingDoc);
+    expect(payload.status).toBe('Shipped');
+    expect(payload.trackingNumber).toBe('TRK-1');
+    expect('companyId' in payload).toBe(false);
+    expect('role' in payload).toBe(false);
+    expect('groupId' in payload).toBe(false);
+    expect('unknownField' in payload).toBe(false);
+  });
+});
+
+describe('sanitizeCreateBody (DI-03 — the create path shares the same reserved-field boundary)', () => {
+  it('admits legitimate business fields and stamps ownership/audit fields server-side', () => {
+    const sanitized = sanitizeCreateBody({ name: 'Acme Corp', status: 'Active' }, 'uid-1', 'COMPANY-A');
+    expect(sanitized.name).toBe('Acme Corp');
+    expect(sanitized.status).toBe('Active');
+    expect(sanitized.companyId).toBe('COMPANY-A');
+    expect(sanitized.createdBy).toBe('uid-1');
+    expect(sanitized.isDeleted).toBe(false);
+  });
+
+  it('blocks role/isSuperAdmin/permissions/groupId injection on create, not just update', () => {
+    const sanitized = sanitizeCreateBody({
+      name: 'x', role: 'Admin', isSuperAdmin: true, permissions: { users: { edit: true } }, groupId: 'OTHER-GROUP',
+    }, 'uid-1', 'COMPANY-A');
+    expect('role' in sanitized).toBe(false);
+    expect('isSuperAdmin' in sanitized).toBe(false);
+    expect('permissions' in sanitized).toBe(false);
+    expect('groupId' in sanitized).toBe(false);
+  });
+
+  it('rejects prototype-polluting key names on create', () => {
+    const body = JSON.parse('{"__proto__":{"polluted":true},"name":"ok"}');
+    const sanitized = sanitizeCreateBody(body, 'uid-1', 'COMPANY-A');
+    expect(sanitized.name).toBe('ok');
+    expect(Object.prototype.hasOwnProperty.call(sanitized, '__proto__')).toBe(false);
+  });
+});
+
+// (handleUpdate end-to-end tests live in apiMassAssignment.test.ts — a
+// separate file with its own top-level vi.mock('../_lib/firebase', ...),
+// so they don't collide with the getAdminDb describe block below, which
+// needs the REAL, unmocked module for its own dynamic-import tests.)
 
 // ── Test auth middleware ──────────────────────────────────────
 

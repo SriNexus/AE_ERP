@@ -18,19 +18,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Check, Save } from 'lucide-react';
 import { useSettingsSection, useSaveSettings } from '../../../features/settings/hooks/useSettingsSection';
 import { useUnsavedChangesGuard } from '../../../features/settings/hooks/useUnsavedChangesGuard';
-import { useAppStore } from '../../../store/useAppStore';
+import { canEditSection } from '../../../features/settings/permissions';
 import { normalizeBuiltInTheme, THEME_PRESETS, type ThemePresetId } from '../../../theme/presets';
 import { applyThemeOverrides } from '../../../theme/applyThemeOverrides';
 import type { ThemeSettings } from '../../../features/settings/types';
 import { SettingsSection } from '../SettingsSection';
 import { cn } from '../../../utils/cn';
-
-// ── Admin/Management check ────────────────────────────────────
-function useCanEditTheme(): boolean {
-  const role = useAppStore((s) => s.user?.role);
-  if (!role) return false;
-  return ['Super Admin', 'Admin', 'Management'].includes(role);
-}
 
 // ── Default theme state ───────────────────────────────────────
 const DEFAULT_THEME: ThemeSettings = {
@@ -62,7 +55,7 @@ function cardGradient(color: string, accent: string) {
 }
 
 export function ThemeUISection() {
-  const canEdit = useCanEditTheme();
+  const canEdit = canEditSection('theme-ui');
   const { data: savedTheme, isLoading } = useSettingsSection('theme-ui');
   const saveMutation = useSaveSettings();
 

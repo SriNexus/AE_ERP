@@ -187,84 +187,14 @@ export async function countDocumentsSafe<T>(firestoreQuery: Query<T>, cacheKey =
   }
 }
 
-export const COLLECTIONS = {
-  USERS:              'users',
-  USER_AUTH_MAPS:     'user_auth_maps',
-  COMPANIES:          'companies',
-  LEADS:              'leads',
-  FOLLOWUPS:          'followups',
-  CUSTOMERS:          'customers',
-  PROJECTS:           'projects',
-  SURVEYS:            'surveys',
-  ENGINEERING_DESIGNS:'engineering_designs',
-  DOCUMENTS:          'documents',
-  VENDORS:            'vendors',
-  PURCHASE_ORDERS:    'purchase_orders',
-  GOODS_RECEIPTS:     'goods_receipts',
-  PRODUCTS:           'products',
-  PRODUCT_CATEGORIES: 'product_categories',
-  WAREHOUSES:         'warehouses',
-  TEAMS:              'teams',
-  STOCK:              'stock',
-  STOCK_LEDGER:       'stock_ledger',
-  ORDERS:             'orders',
-  ORDER_ITEMS:        'order_items',
-  PROFORMA_INVOICES:  'proforma_invoices',
-  INVOICES:           'proforma_invoices',  // Alias: useDashboardData references INVOICES
-  TAX_INVOICES:       'tax_invoices',
-  PI_ITEMS:           'pi_items',
-  QUOTATIONS:         'quotations',
-  DISPATCH:           'dispatch',
-  DISPATCH_ITEMS:     'dispatch_items',
-  TRANSPORT:          'transport',
-  PAYMENTS:           'payments',
-  NOTIFICATIONS:      'notifications',
-  SERIAL_NUMBERS:     'serial_numbers',
-  DOCUMENT_COUNTERS:  'document_counters',
-  AUDIT_LOGS:         'audit_logs',
-  ENTITIES:           'entities',
-  ENTITY_RELATIONSHIPS: 'entity_relationships',
-  ACTIVITY:           'activity',
-  EMPLOYEES:          'employees',
-  ATTENDANCE:         'attendance',
-  PAYROLL:            'payroll',
-  ROLES:              'roles',
-  CHANNEL_PARTNERS:   'channel_partners',
-  PARTNER_WALLET_TXNS: 'partner_wallet_transactions',
-  COMMISSION_RULES:   'commission_rules',
-  COMMISSION_RECORDS: 'commission_records',
-  // Phase 10: real, Project-scoped Installation entity — was previously
-  // fields on Lead (installationChecklist/capturedSerialNumbers); see
-  // src/lib/installationEngine.ts for the dual-write migration.
-  INSTALLATIONS:      'installations',
-  QC_CHECKS:          'qc_checks',
-  COMMISSIONING_RECORDS: 'commissioning_records',
-  NET_METERING_APPLICATIONS: 'net_metering_applications',
-  SUBSIDY_APPLICATIONS:   'subsidy_applications',
-  PROJECT_HANDOVERS:  'project_handovers',
-  AMC_CONTRACTS:      'amc_contracts',
-  SERVICE_TICKETS:    'service_tickets',
-  GENERATION_READINGS:'generation_readings',
-  SETTLEMENTS:        'settlements',
-  SETTINGS:           'settings',
-  BANKS:              'banks',
-  LOAN_APPLICATIONS:      'registrations',
-  // Phase 0 (Channel Partner / Vendor Lock): the NEW Registration
-  // (Vendor Lock / Portal Registration) collection. Deliberately distinct
-  // from the loan module's retained `registrations` collection.
-  SCHEME_REGISTRATIONS:   'scheme_registrations',
-  CASES:              'cases',
-  DEVICE_TOKENS:      'device_tokens',
-  NOTIFICATION_TEMPLATES: 'notification_templates',
-  NOTIFICATION_LOGS:  'notification_logs',
-  SECURITY_LOGS:      'security_logs',
-  // Phase 1 (Multi-Tenant): Group tier — the tenant boundary above Company.
-  GROUPS:             'groups',
-  GROUP_MEMBERS:      'group_members',
-  // Phase 1: platform-level collections with no tenant scoping.
-  PLATFORM_SETTINGS:  'platform_settings',
-  DEMO_OPERATIONS:    'demo_operations',
-} as const;
-
-export type CollectionKey = keyof typeof COLLECTIONS;
-export type CollectionName = typeof COLLECTIONS[CollectionKey];
+// Collection name constants moved to `./collections.ts` — a zero-dependency
+// module safe to import from server-side (Node.js) code. This file itself
+// executes real client-SDK initialization at import time (reads
+// `import.meta.env.VITE_FIREBASE_*`, a Vite-only browser build-time
+// feature) — re-exporting here preserves every existing
+// `import { COLLECTIONS } from '../lib/firebase'` call site unchanged, but
+// server-side code must import directly from `./collections` instead (see
+// that file's own doc comment for why: importing anything from THIS file
+// server-side crashes with "Cannot read properties of undefined (reading
+// 'VITE_FIREBASE_API_KEY')" — a real bug this comment exists because of).
+export { COLLECTIONS, type CollectionKey, type CollectionName } from './collections';

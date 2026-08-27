@@ -13,13 +13,9 @@ import toast from 'react-hot-toast';
 import { AuthIdentityError, resolveAuthenticatedErpUser } from '../lib/authIdentity';
 import { profileToAppUser } from '../lib/userProfile';
 import { createOwnerAppIdentity, isOwnerEmail } from '../lib/ownerAccess';
-import { isOfficialDemoEmail } from '../config/demo';
-import { isDemoSeeded, markDemoSeeded, triggerDemoReset } from '../lib/sandboxReset';
-import { queryClient } from '../lib/queryClient';
 
 import loginBgLight from '../assets/login/login-bg-light.jpg';
 import loginBgDark from '../assets/login/login-bg-dark.jpg';
-import { startDemoSession } from '../lib/demoSession';
 import { DEMO_LOGO_URLS } from '../config/demoCompany';
 
 /* ═══════════════════════════════════════════════════════════
@@ -296,26 +292,6 @@ export default function Login() {
         setUser(createOwnerAppIdentity(firebaseUser.uid, firebaseUser.email || '', 'default'));
         navigate('/');
         return;
-      }
-
-      if (isOfficialDemoEmail(firebaseUser.email)) {
-        // Start demo session timer (handles idle timeout + 6h expiry)
-        startDemoSession();
-
-        if (!isDemoSeeded()) {
-          toast.loading('Initializing demo environment...', { duration: 30000 });
-          const success = await triggerDemoReset();
-          toast.dismiss();
-          if (success) {
-            markDemoSeeded();
-            // Any query cached before this reset (e.g. a prior demo session
-            // in the same tab) must not survive it — otherwise a component
-            // could render pre-reset data until its own staleTime/gcTime
-            // happens to expire, even though Firestore itself is now correct.
-            queryClient.clear();
-          }
-          else toast.error('Demo environment initialization failed. Some features may be unavailable.');
-        }
       }
 
       const match = await resolveAuthenticatedErpUser(firebaseUser);

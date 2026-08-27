@@ -2,7 +2,6 @@ import { Navigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { Module, usePermissions } from '../../lib/permissions';
 import { useAppStore } from '../../store/useAppStore';
-import { isDemoHiddenModule, isDemoUser } from '../../lib/demoCapabilityPolicy';
 import { isModuleAllowedForBusinessMode, resolveBusinessMode } from '../../lib/companyBusinessMode';
 import React, { useEffect, useRef } from 'react';
 
@@ -44,18 +43,6 @@ function RoleRoutePermissionLoadError() {
   );
 }
 
-function useDemoRestrictionToast(module: Module) {
-  const user = useAppStore((state) => state.user);
-  const notified = useRef(false);
-
-  useEffect(() => {
-    if (user && isDemoUser(user) && isDemoHiddenModule(module) && !notified.current) {
-      notified.current = true;
-      toast.error('Not available in Demo Mode', { duration: 3000 });
-    }
-  }, [user, module]);
-}
-
 function useBusinessModeRestrictionToast(blocked: boolean) {
   const notified = useRef(false);
 
@@ -68,13 +55,10 @@ function useBusinessModeRestrictionToast(blocked: boolean) {
 }
 
 export function RoleRoute({ module, children }: { module: Module; children: React.ReactNode }) {
-  const user = useAppStore((state) => state.user);
   const company = useAppStore((state) => state.company);
   const perms = usePermissions();
   const cacheReady = useAppStore((state) => state.permissionCache.ready);
   const cacheDiagnostics = useAppStore((state) => state.permissionCache.diagnostics);
-
-  useDemoRestrictionToast(module);
 
   const businessModeBlocked = !isModuleAllowedForBusinessMode(module, resolveBusinessMode(company));
   useBusinessModeRestrictionToast(businessModeBlocked);
@@ -85,11 +69,6 @@ export function RoleRoute({ module, children }: { module: Module; children: Reac
 
   if (cacheDiagnostics.some((entry) => entry.startsWith('roles-query-failed:'))) {
     return <RoleRoutePermissionLoadError />;
-  }
-
-  // Demo users cannot access hidden modules (users/roles/companies)
-  if (user && isDemoUser(user) && isDemoHiddenModule(module)) {
-    return <Navigate to="/" replace />;
   }
 
   if (!perms.canView(module)) {

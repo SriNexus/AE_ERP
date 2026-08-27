@@ -39,6 +39,7 @@ import { isOfficialDemoCompany } from '../src/config/demo';
 import { DEMO_COMPANY_ID, DEMO_RESETTABLE_COLLECTIONS, DEMO_SEED_ID } from '../scripts/demo/config.ts';
 import { buildCompleteDemoPlan } from '../scripts/demo/datasets/complete.ts';
 import { FieldValue } from 'firebase-admin/firestore';
+import { sanitizePayload } from '../src/lib/sanitizer';
 
 // ── Rate limiting ────────────────────────────────────────────
 const RESET_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
@@ -114,11 +115,15 @@ async function seedDemoData(db: FirebaseFirestore.Firestore, authUid: string): P
 
   for (const record of plan.documents) {
     const ref = db.collection(record.collection).doc(record.id);
-    batch.set(ref, {
+    // Phase 9 (DI-02 sweep): `...record.data` spreads the deterministic demo
+    // dataset plan (scripts/demo/datasets/*) — protects this batch write
+    // regardless of what any individual dataset-builder function produces,
+    // rather than auditing every demo-data producer individually.
+    batch.set(ref, sanitizePayload({
       ...record.data,
       updatedAt: FieldValue.serverTimestamp(),
       createdAt: record.data.createdAt || FieldValue.serverTimestamp(),
-    }, { merge: true });
+    }), { merge: true });
 
     counts[record.collection] = (counts[record.collection] || 0) + 1;
     ops++;

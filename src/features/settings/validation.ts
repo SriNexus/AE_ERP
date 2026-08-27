@@ -54,6 +54,37 @@ export function isValidCronExpression(value: string): boolean {
 
 // ── Section validators ───────────────────────────────────────
 
+/**
+ * Production fix (docs/audits/GEO_ATTENDANCE_CURRENT_STATE_AUDIT.md
+ * Finding F3): the Attendance Settings section previously had no UI at
+ * all, so nothing validated these values on save — this is the first
+ * time they are ever checked. `gpsAccuracyCeilingMeters` must be >=
+ * `gpsAccuracyThresholdMeters` (a ceiling stricter than the target is
+ * self-contradicting — nothing could ever be both "usable" and "worse
+ * than good"); `attendanceRuntime.ts`'s normalizer also defensively
+ * clamps this at read time as a second line of defense, but the Settings
+ * UI itself should not let an admin save a self-contradicting policy.
+ */
+export function validateAttendanceSettings(data: Record<string, unknown>): ValidationResult {
+  const errors: Record<string, string> = {};
+  const num = (v: unknown) => (typeof v === 'number' ? v : NaN);
+
+  if (!(num(data.geofenceRadiusDefaultMeters) > 0)) errors.geofenceRadiusDefaultMeters = 'Enter a radius greater than 0';
+  if (!(num(data.gpsAccuracyThresholdMeters) > 0)) errors.gpsAccuracyThresholdMeters = 'Enter a value greater than 0';
+  if (!(num(data.gpsAccuracyCeilingMeters) > 0)) errors.gpsAccuracyCeilingMeters = 'Enter a value greater than 0';
+  else if (num(data.gpsAccuracyCeilingMeters) < num(data.gpsAccuracyThresholdMeters)) {
+    errors.gpsAccuracyCeilingMeters = 'Must be greater than or equal to the target accuracy';
+  }
+  if (!(num(data.locationConsistencyMaxSpreadMeters) > 0)) errors.locationConsistencyMaxSpreadMeters = 'Enter a value greater than 0';
+  if (!(num(data.gracePeriodMinutes) >= 0)) errors.gracePeriodMinutes = 'Enter a value of 0 or more';
+  if (!(num(data.halfDayThresholdHours) > 0)) errors.halfDayThresholdHours = 'Enter a value greater than 0';
+  if (!(num(data.staleLocationMaxAgeSeconds) > 0)) errors.staleLocationMaxAgeSeconds = 'Enter a value greater than 0';
+  if (!/^\d{2}:\d{2}$/.test(String(data.shiftStartTime))) errors.shiftStartTime = 'Enter a valid time (HH:mm)';
+  if (!/^\d{2}:\d{2}$/.test(String(data.shiftEndTime))) errors.shiftEndTime = 'Enter a valid time (HH:mm)';
+
+  return { valid: Object.keys(errors).length === 0, errors };
+}
+
 export function validateGeneralSettings(data: Record<string, unknown>): ValidationResult {
   const errors: Record<string, string> = {};
   if (!['en', 'hi', 'gu'].includes(String(data.language))) errors.language = 'Select a supported language';

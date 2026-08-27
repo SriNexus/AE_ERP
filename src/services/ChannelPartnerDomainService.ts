@@ -20,6 +20,7 @@ import {
   updateDocById,
   getAll,
 } from '../lib/firestore';
+import { useAppStore } from '../store/useAppStore';
 import type { ChannelPartner, PartnerWalletTransaction, CommissionRule } from '../features/channel-partner/types';
 
 type UnknownRecord = Record<string, unknown>;
@@ -116,9 +117,16 @@ export class ChannelPartnerDomainService {
   ): Promise<void> {
     const partner = await getOne<ChannelPartner>(COLLECTIONS.CHANNEL_PARTNERS, partnerId);
     const currentHistory = partner?.statusHistory ?? [];
+    // Final Gap Sweep (Master Plan Phase 13/14): identity-attribution field —
+    // same forgery class Phase 11 (OWNERSHIP-001) fixed elsewhere. This is an
+    // exported static method reachable directly (not only via the UI, which
+    // always passes its own user.id today) — never trust the caller-supplied
+    // changedBy for a status-history audit entry; derive from the real
+    // session actor. Signature kept unchanged for the existing call sites.
+    void changedBy;
     const entry = {
       status: newStatus,
-      changedBy,
+      changedBy: useAppStore.getState().user?.id || 'system',
       changedAt: new Date().toISOString(),
       ...(reason ? { reason } : {}),
     };

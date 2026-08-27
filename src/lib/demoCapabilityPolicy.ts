@@ -1,7 +1,13 @@
-import {DEMO_COMPANY_ID,DEMO_ERP_USER_ID,DEMO_HIDDEN_MODULES,isOfficialDemoCompany} from '../config/demo';
+import {DEMO_ERP_USER_ID,isOfficialDemoCompany} from '../config/demo';
 
-export type DemoCapability='business-crud'|'company-admin'|'user-admin'|'role-admin'|'integration-secrets'|'external-side-effect'|'owner-ai'|'system-counter'|'audit-mutation'|'stock-ledger-mutation'|'demo-reset'|'company-scoped-upload';
-const ALLOWED=new Set<DemoCapability>(['business-crud','company-scoped-upload']);
+// Demo-to-Group conversion (docs/reports/NEOZY_DEMO_GROUP_CONVERSION_REPORT.md):
+// Neozy Demo is a real Group with demo@neozy.in as its GroupAdmin. There is
+// no capability-gating layer here anymore — business CRUD, external
+// communication (email/phone/WhatsApp), and storage uploads all run through
+// the exact same production code path and the exact same Firestore/Storage
+// rules every other Group's GroupAdmin gets. What remains is a pure identity
+// check, used only for the informational "Demo Mode" badge (TopBar/
+// PartnerLayout) that tells a human tester which Group they're viewing.
 export type DemoIdentity={companyId?:unknown;userId?:unknown;id?:unknown;isDemo?:unknown;role?:unknown};
 
 /** Check if a value matches the canonical demo identity. */
@@ -9,10 +15,3 @@ export function isCanonicalDemoIdentity(value:DemoIdentity|undefined){return Boo
 
 /** Check if the current user is the demo user (convenience for AppUser). */
 export function isDemoUser(user:{companyId?:string;id?:string;role?:string}|null|undefined):boolean{return isCanonicalDemoIdentity(user as DemoIdentity|undefined)}
-
-/** Returns true if a module is hidden for demo users. */
-export function isDemoHiddenModule(moduleName:string):boolean{return (DEMO_HIDDEN_MODULES as readonly string[]).includes(moduleName)}
-
-export function isDemoCapabilityAllowed(companyId:unknown,capability:DemoCapability){return !isOfficialDemoCompany(companyId)||ALLOWED.has(capability)}
-export function assertDemoCapability(companyId:unknown,capability:DemoCapability,message?:string){if(!isDemoCapabilityAllowed(companyId,capability))throw new Error(message||`This operation is unavailable in the public demo (${capability}).`)}
-export function demoPolicySummary(){const hiddenModules=[...DEMO_HIDDEN_MODULES];return{companyId:DEMO_COMPANY_ID,allowed:[...ALLOWED].sort(),blocked:['company-admin','user-admin','role-admin','integration-secrets','external-side-effect','owner-ai','system-counter','audit-mutation','stock-ledger-mutation','demo-reset',...hiddenModules].sort()}}

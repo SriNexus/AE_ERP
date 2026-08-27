@@ -112,7 +112,11 @@ describe('useGlobalBoot.ts — persisted identity self-heal (root cause of the "
     expect(globalBoot).toMatch(/if \(profileSyncRef\.current === user\.id\) return;/);
   });
 
-  it('skips the Owner synthetic identity and demo sessions (neither has a real users\/\{id\} Firestore doc to refresh from)', () => {
-    expect(globalBoot).toMatch(/if \(!user\?\.id \|\| user\.isOwner \|\| isDemo\) return;/);
+  // Demo-to-Group conversion: demo@neozy.in has a real users/{id} Firestore
+  // doc like any other Group's user, so it is no longer skipped here — only
+  // the Owner synthetic identity (which has no Firestore user doc) is.
+  it('skips only the Owner synthetic identity (which has no real users\/\{id\} Firestore doc to refresh from) — Neozy Demo self-heals like any other Group', () => {
+    expect(globalBoot).toMatch(/if \(!user\?\.id \|\| user\.isOwner\) return;/);
+    expect(globalBoot).not.toContain('isDemo');
   });
 });

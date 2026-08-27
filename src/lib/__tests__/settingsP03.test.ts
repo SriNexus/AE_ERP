@@ -46,9 +46,17 @@ describe('P03 Appearance settings', () => {
     expect(source).toContain('saveThemeMode');
   });
   it('has a narrow self-write rule without weakening admin-only company settings', () => {
+    // RBAC settings-ownership fix (see settingsPersonalOwnershipBackfillFix.
+    // emulator.test.ts): the personal-settings self-write check was inlined
+    // into settingsCreateAllowed()/settingsUpdateAllowed() (Firestore
+    // expression-budget engineering, same class of fix as usersUpdateAllowed())
+    // instead of a standalone isOwnPersonalSettings(data, 'appearance') call
+    // site — the underlying guarantees this test protects (narrow section
+    // allowlist; Admin+same-company still required for the admin branch) are
+    // unchanged, just relocated.
     const rules = readFileSync('firestore.rules', 'utf8');
-    expect(rules).toContain('isOwnPersonalSettings');
-    expect(rules).toContain("isOwnPersonalSettings(request.resource.data, 'appearance')");
-    expect(rules).toContain('isAdmin() && sameCompany(request.resource.data)');
+    expect(rules).toContain('function settingsCreateAllowed(data)');
+    expect(rules).toContain("data.section in ['appearance', 'notifications']");
+    expect(rules).toContain("actor.role == 'Admin' || isSuperAdminFlag(actor)) && dataSameCompany");
   });
 });

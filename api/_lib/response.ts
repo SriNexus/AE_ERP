@@ -132,7 +132,74 @@ export const IMMUTABLE_FIELDS = new Set([
 ]);
 
 /**
- * Sanitize a create request body by stripping immutable fields and ensuring required timestamps.
+ * DI-03 (Phase 4): the reserved identity/tenant/security surface no
+ * entity's legitimate schema in this generic REST API ever accepts from
+ * client input — a superset of IMMUTABLE_FIELDS, which only ever covered
+ * audit/ownership bookkeeping fields and never actually blocked `groupId`,
+ * `role`, `isSuperAdmin`, or `permissions`, leaving them fully writable
+ * through the generic PATCH route despite being exactly the fields DI-03
+ * flags as the concrete privilege-escalation risk. This route has no
+ * internal caller (the web app talks to Firestore directly, governed by
+ * firestore.rules; this REST facade is documented — api/index.ts — as the
+ * external/machine-to-machine integration surface). None of these fields is
+ * legitimate client-supplied business data on ANY entity in ENTITY_REGISTRY.
+ * Used on BOTH create (sanitizeCreateBody) and update
+ * (buildWritableUpdatePayload) — but on update it is only the second layer
+ * of the writable-field gate; see buildWritableUpdatePayload for the first
+ * (per-entity) layer.
+ */
+export const SECURITY_RESERVED_FIELDS = new Set<string>([
+  ...IMMUTABLE_FIELDS,
+  'groupId',
+  'role',
+  'isSuperAdmin',
+  'permissions',
+  'isOwner',
+  'ownerEmail',
+]);
+
+/**
+ * Build the writable-field payload for a PATCH/PUT update — the actual
+ * per-entity allowlist: a field is writable only if (a) it already exists
+ * as a key on the document being updated — i.e. the entity's OWN real,
+ * current shape, not a hand-authored guess at 28 heterogeneous entities'
+ * schemas, which would risk rejecting legitimate fields I have no ground
+ * truth for — and (b) it is not one of the universal SECURITY_RESERVED_FIELDS
+ * (checked even for a pre-existing key, in case a reserved name ever ended
+ * up on a legacy/malformed document). `updatedBy`/`updatedAt` are always
+ * server-stamped, and prototype-polluting key names (`__proto__`/
+ * `constructor`/`prototype`) are rejected outright regardless. A brand-new
+ * field the target document has never had cannot be introduced through this
+ * generic PATCH route — establishing a new field belongs to the entity's
+ * `create` path (sanitizeCreateBody), which has no such restriction.
+ */
+export function buildWritableUpdatePayload(
+  body: Record<string, unknown>,
+  userUid: string,
+  existingData: Record<string, unknown>,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    updatedBy: userUid,
+    updatedAt: new Date().toISOString(),
+  };
+  const knownFields = new Set(Object.keys(existingData));
+  for (const [key, value] of Object.entries(body)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    if (SECURITY_RESERVED_FIELDS.has(key)) continue;
+    if (!knownFields.has(key)) continue;
+    payload[key] = value;
+  }
+  return payload;
+}
+
+/**
+ * Sanitize a create request body by stripping immutable/reserved fields and
+ * ensuring required timestamps. DI-03 (Phase 4): uses SECURITY_RESERVED_FIELDS,
+ * not just IMMUTABLE_FIELDS — POST shares the exact same mass-assignment
+ * surface as PATCH (buildWritableUpdatePayload above), and leaving it on the
+ * narrower set here would make the PATCH fix trivially bypassable by
+ * creating a fresh document with `role`/`isSuperAdmin`/`groupId`/`permissions`
+ * instead of patching an existing one.
  */
 export function sanitizeCreateBody(
   body: Record<string, unknown>,
@@ -141,9 +208,9 @@ export function sanitizeCreateBody(
 ): Record<string, unknown> {
   const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {
-    if (!IMMUTABLE_FIELDS.has(key)) {
-      sanitized[key] = value;
-    }
+    if (SECURITY_RESERVED_FIELDS.has(key)) continue;
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    sanitized[key] = value;
   }
   const now = new Date().toISOString();
   sanitized.companyId = sanitized.companyId || companyId;

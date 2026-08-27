@@ -1,7 +1,13 @@
 name: Guarded Demo Reset
+# Demo-to-Group conversion (docs/reports/NEOZY_DEMO_GROUP_CONVERSION_REPORT.md):
+# Neozy Demo is now the real, persistent testing Group (replacing Ashish
+# Enterprises), not a public sandbox that resets itself. An automatic nightly
+# wipe-and-reseed would destroy real testing data, which no normal Group's
+# data is ever subject to — so the schedule trigger is removed. The
+# reset/reseed capability itself is kept available as an explicit,
+# operator-triggered maintenance action (workflow_dispatch), the same way any
+# Group's data could be reset by an administrator on purpose.
 on:
-  schedule:
-    - cron: '30 20 * * *'
   workflow_dispatch: {}
 concurrency:
   group: neozy-public-demo-reset

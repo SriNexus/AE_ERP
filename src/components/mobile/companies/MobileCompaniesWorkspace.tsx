@@ -26,6 +26,7 @@ import {
 import toast from 'react-hot-toast';
 import { Badge, Button, Card, ConfirmDialog, Input, Modal, Pagination, Select, Textarea, statusBadge } from '../../ui';
 import { getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate } from '../../../lib/firestore';
+import { createCompanyInGroup, updateCompanyInGroup } from '../../../lib/groupAdmin';
 import { COLLECTIONS } from '../../../lib/firebase';
 import { INDIAN_STATES } from '../../../config/company';
 import { warehouseGeoToForm, parseWarehouseGeo } from '../../../features/warehouses/types';
@@ -36,6 +37,44 @@ import { cn } from '../../../utils/cn';
 const PER_PAGE = 15;
 const ALL = 'All';
 const STATE_OPTS = [{ label: 'Select State', value: '' }, ...INDIAN_STATES.map(s => ({ label: s, value: s }))];
+
+/**
+ * DI-01 (Phase 8, Master Plan "GroupAdmin / Company Workflow Hardening —
+ * Mobile/Desktop Parity"): a Group Admin must create/edit companies through
+ * the group-scoped write path (src/pages/Companies.tsx's `save` mutationFn
+ * has this exact branch) — the generic write helpers strip groupId for
+ * companies, but the companies create/update rules REQUIRE the request to
+ * carry groupId == the actor's authoritative Group (never a form field, and
+ * never trusted from a client-supplied value even if present in `d` —
+ * createCompanyInGroup/updateCompanyInGroup always use the actor's own
+ * authoritative groupId, ignoring anything the caller passes). Without this
+ * branch, a GroupAdmin's mobile Company creation previously always failed
+ * closed with PERMISSION_DENIED (no groupId ever reached the write) — a
+ * functional gap, not a security hole. Other actors (Owner/Super Admin) keep
+ * the existing generic path exactly, matching desktop.
+ *
+ * Extracted as a standalone, exported function (desktop's own inline
+ * mutationFn is not extracted — this mirrors it exactly) so the
+ * authorization-routing decision is directly unit-testable without a full
+ * component-render harness, following this repo's existing convention
+ * (groupAdmin.ts's own small, directly-testable functions).
+ */
+export async function saveCompanyMobile(
+  d: { name: string; [key: string]: unknown },
+  editId: string | null,
+  user: { id?: string; role?: string } | null | undefined,
+): Promise<void> {
+  if (user?.role === 'GroupAdmin') {
+    if (editId) await updateCompanyInGroup(editId, d);
+    else await createCompanyInGroup(d);
+    return;
+  }
+  if (editId) await updateDocById(COLLECTIONS.COMPANIES, editId, d);
+  else {
+    const id = genId.generic('CO');
+    await createDocWithId(COLLECTIONS.COMPANIES, id, { ...d, id, createdBy: user?.id });
+  }
+}
 
 type CompanyRecord = Record<string, any> & { id: string };
 type Mode = 'records' | 'create';
@@ -117,10 +156,7 @@ export default function MobileCompaniesWorkspace({ mode }: { mode: Mode }) {
   });
 
   const saveMut = useMutation({
-    mutationFn: async (d: any) => {
-      if (editId) await updateDocById(COLLECTIONS.COMPANIES, editId, d);
-      else { const id = genId.generic('CO'); await createDocWithId(COLLECTIONS.COMPANIES, id, { ...d, id, createdBy: user?.id }); }
-    },
+    mutationFn: (d: any) => saveCompanyMobile(d, editId, user),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['companies'] }); toast.success(editId ? 'Updated' : 'Company added'); closeForm(); },
     onError: (e: any) => toast.error(e.message),
   });

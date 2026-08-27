@@ -7,9 +7,12 @@ import { COLLECTIONS } from '../../../lib/firebase';
 import { useCurrentUser, useAppStore } from '../../../store/useAppStore';
 import { ERP_ROLES } from '../../../config/company';
 import { EmployeeDomainService } from '../../../services/EmployeeDomainService';
+import { queryKeys } from '../../../lib/queryKeys';
 import toast from 'react-hot-toast';
 
-const QK = ['employees'] as const;
+// Phase 10 (F-CACHE-01 sweep): routed through the existing
+// queryKeys.forCompany() factory instead of the module-level, company-
+// unscoped `const QK = ['employees']` this file previously used.
 
 export const EMPLOYEE_FORM_DEFAULT = {
   name: '', phone: '', email: '', dob: '', gender: 'Male',
@@ -38,13 +41,16 @@ export function createEmployeeProjection(id: string, payload: Record<string, unk
 }
 
 export function useEmployees() {
-  return useQuery({ queryKey: QK, queryFn: () => getAll(COLLECTIONS.EMPLOYEES), staleTime: 30_000 });
+  const activeCompanyId = useAppStore(s => s.activeCompanyId);
+  const keys = queryKeys.forCompany(activeCompanyId);
+  return useQuery({ queryKey: keys.employees, queryFn: () => getAll(COLLECTIONS.EMPLOYEES), staleTime: 30_000 });
 }
 
 export function useSaveEmployee(editId: string | null, onSuccess: () => void) {
   const qc              = useQueryClient();
   const user            = useCurrentUser();
   const activeCompanyId = useAppStore(s => s.activeCompanyId);
+  const keys = queryKeys.forCompany(activeCompanyId);
   return useMutation({
     mutationFn: async (data: EmployeeForm) => {
       const payload = { ...data, salary: Number(data.salary) || 0 };
@@ -58,16 +64,18 @@ export function useSaveEmployee(editId: string | null, onSuccess: () => void) {
         });
       }
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: QK }); toast.success(editId ? 'Employee updated' : 'Employee added'); onSuccess(); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: keys.employees }); toast.success(editId ? 'Employee updated' : 'Employee added'); onSuccess(); },
     onError:   (e: any) => toast.error(e.message),
   });
 }
 
 export function useDeleteEmployee() {
   const qc = useQueryClient();
+  const activeCompanyId = useAppStore(s => s.activeCompanyId);
+  const keys = queryKeys.forCompany(activeCompanyId);
   return useMutation({
     mutationFn: (id: string) => deleteProjectionWithEntity(COLLECTIONS.EMPLOYEES, id),
-    onSuccess:  () => { qc.invalidateQueries({ queryKey: QK }); toast.success('Employee deleted'); },
+    onSuccess:  () => { qc.invalidateQueries({ queryKey: keys.employees }); toast.success('Employee deleted'); },
     onError:    (e: any) => toast.error(e.message),
   });
 }

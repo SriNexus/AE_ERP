@@ -17,12 +17,19 @@ import {
 } from '../../../lib/autoReminderWorkflow';
 import type { ReminderConfig, ReminderEvaluationResult } from '../types';
 
+// Phase 11 (OWNERSHIP-001): loadReminderConfig()/saveReminderConfig() are
+// now genuinely per-company (see autoReminderWorkflow.ts) — a raw,
+// company-unscoped queryKey here would exhibit the exact same transient
+// stale-tenant cache bug Phase 10 (F-CACHE-01) fixed elsewhere across a
+// Company switch within the same browser session.
+
 /**
  * Load the reminder configuration.
  */
 export function useReminderConfig() {
+  const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   return useQuery<ReminderConfig>({
-    queryKey: ['auto-reminder-config'],
+    queryKey: ['auto-reminder-config', activeCompanyId],
     queryFn: loadReminderConfig,
     staleTime: 60_000,
   });
@@ -33,13 +40,14 @@ export function useReminderConfig() {
  */
 export function useSaveReminderConfig() {
   const qc = useQueryClient();
+  const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   return useMutation({
     mutationFn: async (config: ReminderConfig) => {
       await saveReminderConfig(config);
       return config;
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['auto-reminder-config'] });
+      qc.invalidateQueries({ queryKey: ['auto-reminder-config', activeCompanyId] });
       toast.success('Reminder configuration saved');
     },
     onError: (err: any) => {
@@ -98,7 +106,7 @@ export function useExecuteReminders() {
       );
     },
     onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ['auto-reminder-config'] });
+      qc.invalidateQueries({ queryKey: ['auto-reminder-config', activeCompanyId] });
       qc.invalidateQueries({ queryKey: ['tasks'] });
       toast.success(
         `Reminders evaluated: ${data.results.length} triggered, ${data.tasksCreated} tasks created`,

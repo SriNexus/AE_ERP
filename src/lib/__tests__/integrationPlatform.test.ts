@@ -112,15 +112,19 @@ describe('integration platform boundary', () => {
     expect(res.json.mock.calls[0][0]).toMatchObject({ error: { code: 'FORBIDDEN' } });
   });
 
-  it('blocks integration operations for the Demo Company even with a forged admin role', async () => {
+  // Demo-to-Group conversion (docs/reports/NEOZY_DEMO_GROUP_CONVERSION_REPORT.md
+  // gap-closure pass): Neozy Demo is a real Group now, and its Admin/
+  // GroupAdmin manages integration secrets (email/SMS/WhatsApp provider
+  // config) through the exact same path as any other Group's Admin — no
+  // artificial Demo-only block remains.
+  it('allows integration operations for the Neozy Demo company for a genuine Admin, same as any other Group', async () => {
     const env = makeAdapter();
     const res = mockResponse();
     await handleIntegrationsRequest({ method: 'POST', headers: {}, query: {}, body: { section: 'email', action: 'status' } } as any, res, {
       adapter: env.adapter,
       authenticate: async () => ({ ...auth, companyId: 'company-demo-neozy', role: 'Admin' }),
     });
-    expect(res.status).toHaveBeenCalledWith(403);
-    expect(res.json.mock.calls[0][0]).toMatchObject({ error: { code: 'DEMO_CAPABILITY_BLOCKED' } });
+    expect(res.status).not.toHaveBeenCalledWith(403);
   });
   it('serves the route without leaking raw secrets', async () => {
     const env = makeAdapter();

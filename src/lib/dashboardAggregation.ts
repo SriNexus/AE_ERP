@@ -243,6 +243,19 @@ async function fetchRecentRows(collectionName: string, companyId: string, recent
   return snap.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Record<string, unknown>) })) as DashboardRow[];
 }
 
+// Phase 12 (DEFECT-002, Master Plan "Performance Hardening"): Dashboards.tsx's
+// Products stat card is the one collection on that page used ONLY for a raw
+// count (verified: no chart/breakdown anywhere else in that file reads the
+// `products` array) — unlike leads/orders/customers/etc. on the same page,
+// which feed real per-status/per-source breakdown charts and therefore still
+// require the full document set. A pure count-only usage is exactly the case
+// this module's countVisibleDocuments()/countDocumentsSafe() pattern already
+// exists for — reused here instead of adding a second aggregation approach.
+export async function getProductsCount(companyId: string): Promise<number> {
+  if (!companyId) return 0;
+  return countVisibleDocuments(COLLECTIONS.PRODUCTS, companyId, [], 'dashboards-products-count');
+}
+
 export async function getDashboardStats(companyId: string): Promise<DashboardStats> {
   if (!companyId) return EMPTY_STATS;
 

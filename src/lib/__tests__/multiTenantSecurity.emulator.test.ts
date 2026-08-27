@@ -705,6 +705,21 @@ describe('Phase 2 — business data (representative tenant-scoped collections)',
     const db = ctx(UID_GA_A, 'ga.a@neozy.test');
     await assertSucceeds(updateDoc(doc(db, 'leads', 'LEAD-C'), { id: 'LEAD-C', companyId: COMPANY_C, groupId: 'GROUP-A', name: 'Updated by GA', createdBy: ID_USER_C, isDeleted: false }));
   });
+  // Phase 11 (OWNERSHIP-001, Master Plan "Record Ownership / Business
+  // Authorization Audit"): the plan's own explicitly-required test case —
+  // "can a GroupAdmin reassign a lead from Company A to Company B within
+  // their own Group" — answered with a real test, not a guess. companyId
+  // is immutable for every generic-fallback collection (companyIdUnchanged()
+  // is enforced in BOTH the company-scoped and GroupAdmin branches of
+  // firestore.rules' match /{collectionId}/{documentId}), so even a
+  // GroupAdmin moving a document BETWEEN two Companies they both legitimately
+  // administer (LEAD-A: Company A -> Company C, same Group A) must fail —
+  // reassignment across the Company boundary is a companyId change, which no
+  // actor, not even a GroupAdmin, may ever perform on a business record.
+  it('GroupAdmin CANNOT reassign a lead\'s companyId to a sibling Company, even within their own Group (companyId is immutable for every actor)', async () => {
+    const db = ctx(UID_GA_A, 'ga.a@neozy.test');
+    await assertFails(updateDoc(doc(db, 'leads', 'LEAD-A'), { id: 'LEAD-A', companyId: COMPANY_C, groupId: 'GROUP-A', name: 'Lead A', createdBy: ID_USER_A, isDeleted: false }));
+  });
   it('project-scoped collections: GroupAdmin reads Group-wide (Admin-equivalent)', async () => {
     await assertSucceeds(getDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'projects', 'PRJ-1')));
   });
@@ -828,9 +843,23 @@ describe('RBAC Phase 1 — GroupAdmin: scope-forgery and privilege-escalation �
       id: 'ROL-GA-SYS', companyId: COMPANY_A, name: 'Fake System Role', schemaVersion: 1, isSystem: true, permissions: {},
     }));
   });
-  it('cannot update (modify permissions on) an existing system role — AD-1', async () => {
-    await assertFails(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', `${COMPANY_A}_Admin`), {
+  // AD-1 narrowed (real production report, reproduced live via Playwright
+  // against the real Group Admin account: Roles -> Edit "Operations" ->
+  // toggle a permission -> Save returned "Missing or insufficient
+  // permissions"): AD-1's own governing text scopes the restriction to
+  // "cannot create/promote system roles" — the original implementation over-
+  // applied it to block EVERY field of an update, including permissions,
+  // for every non-Super-Admin actor. That's fixed below (see
+  // rolesSystemRolePermissionEditFix.emulator.test.ts for the full matrix);
+  // a system role's IDENTITY (name, isSystem) remains immutable here.
+  it('CAN update (modify permissions on) an existing system role — AD-1 narrowed to identity protection only', async () => {
+    await assertSucceeds(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', `${COMPANY_A}_Admin`), {
       permissions: { leads: { view: true, create: true, edit: true, delete: true, cancel: true, approve: true, export: true, visibility: 'all' } },
+    }));
+  });
+  it('still cannot rename an existing system role — AD-1 identity protection preserved', async () => {
+    await assertFails(updateDoc(doc(ctx(UID_GA_A, 'ga.a@neozy.test'), 'roles', `${COMPANY_A}_Admin`), {
+      name: 'Renamed Admin',
     }));
   });
   it('cannot promote an existing custom role to a system role via update', async () => {

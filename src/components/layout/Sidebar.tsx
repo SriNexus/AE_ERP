@@ -11,10 +11,8 @@ import { ERP_NAV_ITEMS, type NavItem } from './navigationConfig';
 import { CompanySwitcher } from '../../features/company/components/CompanySwitcher';
 import React from 'react';
 import { useOwnerAccess } from '../auth/OwnerRoute';
-import { isDemoHiddenModule, isDemoUser } from '../../lib/demoCapabilityPolicy';
 import { isModuleAllowedForBusinessMode, resolveBusinessMode } from '../../lib/companyBusinessMode';
 import { useAppStore } from '../../store/useAppStore';
-import { DEMO_LOGO_URLS } from '../../config/demoCompany';
 
 // Semantic token class strings — NO raw gray/slate
 const ACTIVE_CLS   = 'bg-[var(--color-sidebar-active)] text-[var(--color-sidebar-active-text)] shadow-sm';
@@ -151,8 +149,7 @@ export function Sidebar() {
   // setting (sidebarBehavior: 'auto' | 'click'), which ThemeProvider already
   // mirrors onto document.documentElement's `data-sidebar-behavior` attribute
   // for exactly this component to read. That attribute isn't React state, so
-  // it's mirrored into real state via MutationObserver — the same pattern
-  // already used a few lines below for isDarkTheme — to make mode switches
+  // it's mirrored into real state via MutationObserver to make mode switches
   // reactive during render instead of only visible inside event callbacks.
   const [isClickMode, setIsClickMode] = useState(() =>
     typeof document !== 'undefined' && document.documentElement.getAttribute('data-sidebar-behavior') === 'click'
@@ -230,25 +227,9 @@ export function Sidebar() {
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, [isClickMode, sidebarOpen, setSidebarOpen]);
 
-  const currentUser = useAppStore((state) => state.user);
-  const isDemo = isDemoUser(currentUser);
-
-  // Theme-aware logo for demo mode
-  const [isDarkTheme, setIsDarkTheme] = useState(() =>
-    document.documentElement.classList.contains('dark')
-  );
-  useEffect(() => {
-    const sync = () => setIsDarkTheme(document.documentElement.classList.contains('dark'));
-    const observer = new MutationObserver(sync);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
-    return () => observer.disconnect();
-  }, []);
-  const demoFullLogo = isDarkTheme ? DEMO_LOGO_URLS.logoDark : DEMO_LOGO_URLS.logoLight;
-
   const visibleNav = ERP_NAV_ITEMS.reduce<NavItem[]>((acc, item) => {
     if (item.path) {
       if (item.ownerOnly && !hasOwnerAccess) return acc;
-      if (isDemo && item.module && isDemoHiddenModule(item.module)) return acc;
       if (item.module && !perms.canView(item.module)) return acc;
       if (item.module && !isModuleAllowedForBusinessMode(item.module, businessMode)) return acc;
       acc.push(item);
@@ -256,7 +237,6 @@ export function Sidebar() {
     }
     const kids = (item.children||[]).filter(c => {
       if (c.ownerOnly && !hasOwnerAccess) return false;
-      if (isDemo && c.module && isDemoHiddenModule(c.module)) return false;
       if (c.module && !isModuleAllowedForBusinessMode(c.module, businessMode)) return false;
       return !c.module || perms.canView(c.module);
     });
@@ -271,24 +251,13 @@ export function Sidebar() {
       style={{ width: expanded ? expandedWidth : collapsedWidth }}
       className="h-screen flex flex-col shrink-0 z-30 bg-[var(--color-sidebar-bg)] border-r border-[var(--color-sidebar-border)] transition-[width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[width]">
 
-      {/* Brand */}
+      {/* Brand — same CompanySwitcher-driven logo architecture for every
+          Group/Company, including Neozy Demo (docs/reports/
+          NEOZY_DEMO_GROUP_CONVERSION_REPORT.md §16: no separate demo-logo
+          implementation). */}
       <div className={cn('shrink-0 flex items-center justify-center border-b border-[var(--color-border-subtle)] transition-all duration-300 overflow-hidden', expanded?'h-[72px] px-4':'h-[64px] px-2.5')}>
         <div className={cn('flex items-center justify-center transition-all duration-300 ease-in-out', expanded?'w-full':'w-10')}>
-          {isDemo ? (
-            /* Demo mode: show static demo logo — no company switcher */
-            <img
-              src={expanded ? demoFullLogo : DEMO_LOGO_URLS.iconLogo}
-              alt="Demo"
-              className={cn(
-                'object-contain select-none',
-                expanded ? 'h-9 w-auto max-w-[140px]' : 'h-9 w-9'
-              )}
-              draggable={false}
-            />
-          ) : (
-            /* Production mode: show company switcher with logo dropdown */
-            <CompanySwitcher variant="logoOnly" sidebarExpanded={expanded} />
-          )}
+          <CompanySwitcher variant="logoOnly" sidebarExpanded={expanded} />
         </div>
       </div>
 

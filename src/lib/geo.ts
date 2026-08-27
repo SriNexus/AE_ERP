@@ -34,6 +34,16 @@ export interface GeoEvidence {
   capturedAt: string;
   /** Best-effort reverse-geocoded human-readable label — never required. */
   address?: string;
+  /**
+   * Production-fix addition: when `captureLocationWithRetry()` obtains more
+   * than one reading within its acquisition window, this is the largest
+   * pairwise distance (metres) observed between any two of those readings —
+   * a cheap "is the device's own GPS jumping around" signal, independent of
+   * `accuracy` (a device can report low accuracy while still jumping between
+   * wildly different coordinates on consecutive fixes). `undefined` when
+   * only one reading was ever obtained (nothing to compare).
+   */
+  readingSpreadMeters?: number;
 }
 
 /** Typed rejection shape for captureLocation(). */
@@ -180,6 +190,27 @@ export function captureLocation(
 // GPS Capture with Bounded Retry
 // ---------------------------------------------------------------------------
 
+/**
+ * Centralized GPS-capture tuning constants (§17 of the production-fix
+ * brief: do not scatter magic numbers across multiple call sites). These
+ * are acquisition/UX tuning values, not business/security policy — the
+ * business-relevant accuracy thresholds live in AttendanceSettings
+ * (Settings → Attendance section) instead, sourced by the caller and
+ * passed in as `targetAccuracyMeters`.
+ */
+export const DEFAULT_CAPTURE_TOTAL_TIMEOUT_MS = 20_000;
+export const DEFAULT_CAPTURE_RETRY_INTERVAL_MS = 2_000;
+export const DEFAULT_CAPTURE_ATTEMPT_TIMEOUT_MS = 10_000;
+
+export interface CaptureProgressInfo {
+  /** 1-indexed attempt number just completed (or currently in flight). */
+  attempt: number;
+  /** Accuracy (metres) of the reading just received, if any. */
+  latestAccuracyMeters?: number;
+  /** Best (lowest) accuracy seen so far across all readings this capture. */
+  bestAccuracyMeters?: number;
+}
+
 export interface CaptureLocationWithRetryOptions extends CaptureLocationOptions {
   /** Target GPS accuracy in meters. Stops retrying early when achieved. */
   targetAccuracyMeters?: number;
@@ -187,6 +218,12 @@ export interface CaptureLocationWithRetryOptions extends CaptureLocationOptions 
   totalTimeoutMs?: number;
   /** Interval between GPS attempts in ms (default 2 000). */
   retryIntervalMs?: number;
+  /**
+   * Fired after every successful reading (and once more at final settle),
+   * so the UI can show live progress ("Best accuracy so far: ±82m")
+   * instead of a silent spinner for the whole acquisition window.
+   */
+  onProgress?: (info: CaptureProgressInfo) => void;
 }
 
 /**
@@ -223,19 +260,36 @@ export function captureLocationWithRetry(
       return reject({ reason: 'unsupported' } satisfies GeoCaptureError);
     }
 
-    const totalMs = options?.totalTimeoutMs ?? 20_000;
-    const intervalMs = options?.retryIntervalMs ?? 2_000;
+    const totalMs = options?.totalTimeoutMs ?? DEFAULT_CAPTURE_TOTAL_TIMEOUT_MS;
+    const intervalMs = options?.retryIntervalMs ?? DEFAULT_CAPTURE_RETRY_INTERVAL_MS;
     const targetAccuracy = options?.targetAccuracyMeters ?? 50;
     const enableHighAcc = options?.enableHighAccuracy ?? true;
     // Individual attempt timeout — generous to allow the device to
     // acquire a satellite lock (indoor / weak signal can be slow).
-    const attemptTimeoutMs = Math.min(options?.timeoutMs ?? 10_000, totalMs);
+    const attemptTimeoutMs = Math.min(options?.timeoutMs ?? DEFAULT_CAPTURE_ATTEMPT_TIMEOUT_MS, totalMs);
 
     let bestEvidence: GeoEvidence | null = null;
+    // All valid readings collected this capture — used only to compute
+    // readingSpreadMeters (how much the device's own fixes disagree with
+    // each other). Coordinates only; small and bounded by attempt count.
+    const readings: { latitude: number; longitude: number }[] = [];
     let settled = false;
     let timer: ReturnType<typeof setInterval> | undefined;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
     let pendingAttempts = 0;
+    let attemptCount = 0;
+
+    const spreadMeters = (): number | undefined => {
+      if (readings.length < 2) return undefined;
+      let max = 0;
+      for (let i = 0; i < readings.length; i++) {
+        for (let j = i + 1; j < readings.length; j++) {
+          const d = distanceMeters(readings[i], readings[j]);
+          if (d > max) max = d;
+        }
+      }
+      return max;
+    };
 
     const finish = (result?: GeoEvidence) => {
       if (settled) return;
@@ -250,6 +304,8 @@ export function captureLocationWithRetry(
         } satisfies GeoCaptureError);
       }
 
+      evidence.readingSpreadMeters = spreadMeters();
+
       // Best-effort reverse-geocoding enrichment on the final best reading.
       void reverseGeocodeLatLng(evidence.latitude, evidence.longitude)
         .then((address) => {
@@ -262,6 +318,8 @@ export function captureLocationWithRetry(
     const attempt = () => {
       if (settled) return;
       pendingAttempts++;
+      attemptCount++;
+      const thisAttempt = attemptCount;
 
       navigator.geolocation.getCurrentPosition(
         ({ coords }) => {
@@ -274,6 +332,7 @@ export function captureLocationWithRetry(
             accuracy: coords.accuracy,
             capturedAt: new Date().toISOString(),
           };
+          readings.push({ latitude: captured.latitude, longitude: captured.longitude });
 
           // Track best reading (lowest accuracy value = most precise).
           if (
@@ -284,6 +343,12 @@ export function captureLocationWithRetry(
           ) {
             bestEvidence = captured;
           }
+
+          options?.onProgress?.({
+            attempt: thisAttempt,
+            latestAccuracyMeters: captured.accuracy,
+            bestAccuracyMeters: (bestEvidence as GeoEvidence | null)?.accuracy,
+          });
 
           // Early exit: target accuracy achieved.
           if (
@@ -472,6 +537,11 @@ export function distanceMeters(
  *   merging them here would contradict that committed design.
  *
  * Boundary convention: **<=** (exactly at radius boundary = PASS).
+ *
+ * Kept as-is (unchanged, still exported, still used directly by
+ * `evaluateGeofenceWithConfidence()`'s 'medium'/'none' distinction below)
+ * for backward compatibility with any caller that only wants the plain
+ * distance/radius comparison with no uncertainty modelling.
  */
 export function evaluateGeofence(
   point: { latitude: number; longitude: number },
@@ -480,6 +550,147 @@ export function evaluateGeofence(
 ): { withinGeofence: boolean; distanceMeters: number } {
   const dist = distanceMeters(point, center);
   return { withinGeofence: dist <= radiusMeters, distanceMeters: dist };
+}
+
+// ---------------------------------------------------------------------------
+// Uncertainty-aware geofence decision (production-fix: accuracy ≠ distance)
+// ---------------------------------------------------------------------------
+
+/** Coordinate sanity check — rejects NaN/Infinity and out-of-range lat/lng. */
+export function isValidCoordinate(latitude: number, longitude: number): boolean {
+  return (
+    Number.isFinite(latitude) && Number.isFinite(longitude) &&
+    latitude >= -90 && latitude <= 90 &&
+    longitude >= -180 && longitude <= 180
+  );
+}
+
+/**
+ * GPS quality tiers for UI display only (§7 of the production-fix brief).
+ * These are descriptive labels, not security gates — the two numbers that
+ * actually gate the attendance decision (`good`/target and `ceiling`/hard
+ * cutoff) are sourced from AttendanceSettings by the caller; EXCELLENT and
+ * ACCEPTABLE are fixed, purely cosmetic subdivisions of that same range so
+ * the UI can show more than a binary good/bad state.
+ */
+export type GpsQualityTier = 'excellent' | 'good' | 'acceptable' | 'weak' | 'unusable';
+
+/** Fixed UX-only accuracy boundary for the 'excellent' tier (metres). */
+export const GPS_QUALITY_EXCELLENT_METERS = 20;
+/** Fixed UX-only accuracy boundary for the 'acceptable' tier (metres). */
+export const GPS_QUALITY_ACCEPTABLE_METERS = 100;
+
+/**
+ * Classify a raw accuracy reading into a human-meaningful tier.
+ * `goodMeters`/`ceilingMeters` come from AttendanceSettings
+ * (`gpsAccuracyThresholdMeters`/`gpsAccuracyCeilingMeters`) — the only two
+ * accuracy numbers that are actually policy, not UX decoration.
+ */
+export function classifyGpsQuality(
+  accuracyMeters: number | undefined,
+  goodMeters: number,
+  ceilingMeters: number,
+): GpsQualityTier {
+  if (typeof accuracyMeters !== 'number' || !Number.isFinite(accuracyMeters) || accuracyMeters <= 0) {
+    return 'unusable';
+  }
+  if (accuracyMeters > ceilingMeters) return 'unusable';
+  if (accuracyMeters <= GPS_QUALITY_EXCELLENT_METERS) return 'excellent';
+  if (accuracyMeters <= goodMeters) return 'good';
+  if (accuracyMeters <= GPS_QUALITY_ACCEPTABLE_METERS) return 'acceptable';
+  return 'weak';
+}
+
+/** Confidence level of a geofence pass — see evaluateGeofenceWithConfidence(). */
+export type GeoConfidence = 'high' | 'medium' | 'low' | 'none';
+
+export interface GeofenceConfidenceResult {
+  distanceMeters: number;
+  withinGeofence: boolean;
+  /**
+   * 'high'   — even the worst case within the device's own reported
+   *            uncertainty is inside the fence (distance + accuracy <= radius).
+   * 'medium' — the best-estimate point is inside the fence, but the
+   *            uncertainty circle extends past the boundary.
+   * 'low'    — the best-estimate point is technically outside the fence,
+   *            but is still plausibly inside once the device's reported
+   *            uncertainty is accounted for (distance <= radius + accuracy).
+   * 'none'   — outside the fence even after the most generous uncertainty
+   *            allowance; also used when accuracy could not be evaluated.
+   */
+  confidence: GeoConfidence;
+  /** Whether the accuracy value was present, finite, positive, and within `accuracyCeilingMeters`. */
+  accuracyUsable: boolean;
+}
+
+/**
+ * Uncertainty-aware geofence decision — the production-fix replacement for
+ * treating "distance <= radius" and "accuracy <= threshold" as two
+ * independent pass/fail gates (which rejected legitimate check-ins purely
+ * for having a noisy GPS chip, even when the employee was genuinely close
+ * to the configured location — the reported ±116m/±50m production bug).
+ *
+ * Design rationale (documented per the explicit instruction not to adopt
+ * a formula blindly): the conservative "distance + accuracy <= radius"
+ * check alone (§6 of the production-fix brief) is too strict for real
+ * indoor/weak-signal mobile GPS — it would still reject the reported case
+ * for any geofence smaller than accuracy itself. The purely optimistic
+ * "distance <= radius + accuracy" check alone is too permissive — it lets
+ * accuracy alone, unbounded, buy arbitrary extra leash. This function
+ * grades between the two: it accepts whenever the fence and the device's
+ * own reported uncertainty circle overlap at all (`low` confidence,
+ * bounded — accuracy itself is already capped by the caller's ceiling
+ * check before this ever runs, so the leash this can grant is bounded by
+ * that ceiling, not unbounded), while still labelling *how* confident the
+ * accept was so the record and any future review can tell a rock-solid
+ * pass from a marginal one apart (see `AttendanceCheckSubRecord.geoConfidence`).
+ * Firestore rules do not re-run this (client-trusted geofence, an existing,
+ * documented, unrelated trade-off — Master Plan §3.7) — this function only
+ * changes how the already-client-trusted decision is computed, not who
+ * computes it.
+ *
+ * Still rejects (`confidence: 'none'`) when the point is outside the fence
+ * even after the full uncertainty allowance — this is not "accept from
+ * anywhere"; a genuinely distant point is still rejected regardless of
+ * how poor (but still within-ceiling) the accuracy is.
+ */
+export function evaluateGeofenceWithConfidence(
+  point: { latitude: number; longitude: number },
+  center: { latitude: number; longitude: number },
+  radiusMeters: number,
+  accuracyMeters: number | undefined,
+  accuracyCeilingMeters: number,
+): GeofenceConfidenceResult {
+  const dist = distanceMeters(point, center);
+  const accuracyUsable =
+    typeof accuracyMeters === 'number' &&
+    Number.isFinite(accuracyMeters) &&
+    accuracyMeters > 0 &&
+    accuracyMeters <= accuracyCeilingMeters;
+
+  if (!accuracyUsable) {
+    // No usable accuracy to reason about uncertainty with — fall back to
+    // the plain distance/radius comparison. Callers are expected to reject
+    // unusable accuracy as its own, distinctly-worded failure (gps_unusable)
+    // *before* reaching this function in the check-in (blocking) path; this
+    // branch exists so the function stays total for callers (e.g. checkout)
+    // that evaluate it purely as a non-blocking flag.
+    const within = dist <= radiusMeters;
+    return { distanceMeters: dist, withinGeofence: within, confidence: within ? 'medium' : 'none', accuracyUsable: false };
+  }
+
+  const acc = accuracyMeters as number;
+
+  if (dist + acc <= radiusMeters) {
+    return { distanceMeters: dist, withinGeofence: true, confidence: 'high', accuracyUsable: true };
+  }
+  if (dist <= radiusMeters) {
+    return { distanceMeters: dist, withinGeofence: true, confidence: 'medium', accuracyUsable: true };
+  }
+  if (dist <= radiusMeters + acc) {
+    return { distanceMeters: dist, withinGeofence: true, confidence: 'low', accuracyUsable: true };
+  }
+  return { distanceMeters: dist, withinGeofence: false, confidence: 'none', accuracyUsable: true };
 }
 
 /**

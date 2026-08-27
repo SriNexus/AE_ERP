@@ -10,8 +10,6 @@ import { resolveSessionCompanyId } from './tenantRouting';
 import { loadCurrentUserProfile, syncCurrentUserProfile } from './userProfile';
 import { refreshAuthMappingIfStale } from './authIdentity';
 import { registerServiceWorker, getFcmToken, persistDeviceToken, deactivateDeviceTokens } from './fcmTokenManager';
-import { isOfficialDemoCompany } from '../config/demo';
-import { DEMO_COMPANY } from '../config/demoCompany';
 import {
   buildRoleCache,
   getCompanyRoleSeedDocuments,
@@ -187,7 +185,7 @@ export function useGlobalBoot() {
     if (resolvedCompanyId !== activeCompanyId) setActiveCompanyId(resolvedCompanyId);
   }, [user?.id, user?.companyId, user?.isOwner, user?.isSuperAdmin, activeCompanyId, setActiveCompanyId]);
 
-  const { data: companies } = useQuery({ queryKey:['companies_global'], queryFn:()=>getAll(COLLECTIONS.COMPANIES,[]), staleTime:1000*60*30, enabled:!!user&&!isOfficialDemoCompany(user?.companyId) });
+  const { data: companies } = useQuery({ queryKey:['companies_global'], queryFn:()=>getAll(COLLECTIONS.COMPANIES,[]), staleTime:1000*60*30, enabled:!!user });
   // Phase 1 (Multi-Tenant): populate the companyId -> groupId lookup from the
   // companies list ALREADY loaded above — no new Firestore read. resolveWriteGroupId()
   // (src/lib/firestore.ts §3.4) stamps authoritative groupId on writes from this
@@ -200,8 +198,6 @@ export function useGlobalBoot() {
     }
     if (Object.keys(map).length > 0) setCompanyGroupIds(map);
   }, [companies, setCompanyGroupIds]);
-  // Demo user: apply the permanent Demo Company config and skip Firestore companies
-  const isDemo = isOfficialDemoCompany(user?.companyId);
 
   // Root cause (live-verified, 2026-08-19): `user` is persisted to
   // localStorage (useAppStore's `neozy-v1` persist key) so a page reload/
@@ -270,7 +266,7 @@ export function useGlobalBoot() {
   // still safe without any cancellation flag here.
   const profileSyncRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!user?.id || user.isOwner || isDemo) return;
+    if (!user?.id || user.isOwner) return;
     if (profileSyncRef.current === user.id) return;
     profileSyncRef.current = user.id;
     (async () => {
@@ -283,21 +279,14 @@ export function useGlobalBoot() {
         // Best-effort self-heal — see comment above.
       }
     })();
-  }, [user?.id, user?.isOwner, isDemo]);
+  }, [user?.id, user?.isOwner]);
 
   useEffect(() => {
-    // Demo mode: always use the permanent Demo Company configuration
-    if (isDemo) {
-      // The DEMO_COMPANY config has all required CompanyConfig fields;
-      // logo/iconLogo are omitted here because the Login page and Sidebar
-      // use DEMO_LOGO_URLS (static PNG imports) instead.
-      setGlobalCompany({ ...DEMO_COMPANY });
-      setCompany({ ...DEMO_COMPANY });
-      document.title = 'Neozy Demo';
-      return;
-    }
-
-    // Production mode: load company from Firestore
+    // Demo-to-Group conversion: Neozy Demo's company state now loads from
+    // Firestore exactly like every other Group's — no static config
+    // fallback. Company Settings changes (name, branding, GST, etc.) made
+    // through the normal UI are reflected here the same as any other Group.
+    if (!companies || companies.length === 0) return;
     if (!companies || companies.length === 0) return;
     const defaultCo = companies.find((c: any) => c.isDefault) || companies[0];
     if (defaultCo) {
@@ -352,7 +341,7 @@ export function useGlobalBoot() {
         setCompany(defaultCo as any);
       }
     }
-  }, [companies, activeCompanyId, isDemo]);
+  }, [companies, activeCompanyId]);
 
   // Phase 1 (F-03 closure, Master Plan §5.6): the roles query is now
   // Company-scoped via companyScopedQuery() — every role doc carries the
@@ -608,7 +597,6 @@ export function useGlobalBoot() {
   // Does NOT request permission — that requires user action.
   useEffect(() => {
     if (!user?.id) return;
-    if (isDemo) return; // Skip for demo users
     if (typeof window === 'undefined' || !('Notification' in window)) return;
     if (window.Notification.permission !== 'granted') return;
 
@@ -632,7 +620,7 @@ export function useGlobalBoot() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id, isDemo]);
+  }, [user?.id]);
 
   // Phase 9B: Deactivate device tokens on logout
   // Uses a ref to track previous user state to avoid premature cleanup on initial mount

@@ -24,6 +24,7 @@ import { DocumentsSection } from './sections/DocumentsSection';
 import { EmailSection } from './sections/EmailSection';
 import { ThemeAppearanceSection } from './sections/ThemeAppearanceSection';
 import { AboutErpSection } from './sections/AboutErpSection';
+import { AttendanceSettingsSection } from './sections/AttendanceSettingsSection';
 
 interface SettingsSectionRendererProps {
   sectionId: SettingsSectionId;
@@ -74,6 +75,8 @@ export function SettingsSectionRenderer({ sectionId }: SettingsSectionRendererPr
       return <AboutErpSection />;
     case 'users-permissions':
       return <UsersPermissionsSection />;
+    case 'attendance':
+      return <AttendanceSettingsSection />;
     // Placeholder sections
     default:
       return (

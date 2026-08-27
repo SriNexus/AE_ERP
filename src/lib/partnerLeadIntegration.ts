@@ -557,7 +557,12 @@ export async function markCommissionApproved(
   if (record.status !== 'pending') throw new Error('Commission record is not in pending status');
 
   const approvedAmount = metadata?.approvedAmount || record.amount || 0;
-  const approvedBy = metadata?.approvedBy || state.user?.id || 'system';
+  // Final Gap Sweep (Master Plan Phase 13/14): identity-attribution field —
+  // same forgery class Phase 11 (OWNERSHIP-001) fixed in entityProjection.ts/
+  // channelPartnerSettlement.ts. This exported, client-side function must
+  // never let a caller-supplied metadata.approvedBy win over the real
+  // session actor.
+  const approvedBy = state.user?.id || 'system';
 
   await updateDocById(COLLECTIONS.COMMISSION_RECORDS, recordId, {
     status: 'approved' as CommissionStatus,
@@ -611,7 +616,9 @@ export async function markCommissionPaid(
   if (!record) throw new Error(`Commission record ${recordId} not found`);
   if (record.status !== 'approved') throw new Error('Commission record is not in approved status');
 
-  const paidBy = metadata?.paidBy || state.user?.id || 'system';
+  // Final Gap Sweep (Master Plan Phase 13/14): same forgery class as
+  // approvedBy above — never trust a caller-supplied metadata.paidBy.
+  const paidBy = state.user?.id || 'system';
 
   await updateDocById(COLLECTIONS.COMMISSION_RECORDS, recordId, {
     status: 'paid' as CommissionStatus,

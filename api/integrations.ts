@@ -8,7 +8,6 @@ import {
   type IntegrationPlatformAdapter,
 } from './_lib/integrationPlatform';
 import { sendBadRequest, sendError, sendSuccess } from './_lib/response';
-import {isDemoCapabilityAllowed} from '../src/lib/demoCapabilityPolicy';
 
 function headerValue(value: string | string[] | undefined): string | null {
   if (Array.isArray(value)) return value[0] || null;
@@ -50,8 +49,6 @@ export async function handleIntegrationsRequest(req: VercelRequest, res: VercelR
   if (!auth.isSuperAdmin && auth.role !== 'Admin') {
     return sendError(res, 403, 'FORBIDDEN', 'Only Admin users can manage integration secrets.');
   }
-
-  if(!isDemoCapabilityAllowed(auth.companyId,'integration-secrets'))return sendError(res,403,'DEMO_CAPABILITY_BLOCKED','Integration secret operations are unavailable in the public demo.');
 
   const body = asRecord(req.body) || {};
   const section = normalizeIntegrationSection(req.method === 'GET' ? req.query.section : body.section);

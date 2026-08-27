@@ -1,4 +1,5 @@
 import { FieldValue } from 'firebase-admin/firestore';
+import { sanitizePayload } from '../../src/lib/sanitizer.ts';
 import { DEMO_BATCH_SIZE, DEMO_COMPANY_ID, DEMO_MANIFEST_COLLECTION, DEMO_MANIFEST_ID } from './config.ts';
 import { assertMutationCeiling, assertNoForeignCollision, assertNoForbiddenFields, assertSafeDeleteDocument } from './guards.ts';
 import { buildManifest, assertManifestConsistent } from './manifest.ts';
@@ -11,7 +12,7 @@ export async function validatePlanCollisions(db:any, plan:DemoSeedPlan){
 }
 export function summarizePlan(plan:DemoSeedPlan){return plan.documents.reduce<Record<string,number>>((a,d)=>{a[d.collection]=(a[d.collection]||0)+1;return a},{})}
 export async function writeDocuments(db:any,documents:DemoDocument[]){
- for(let i=0;i<documents.length;i+=DEMO_BATCH_SIZE){const batch=db.batch();for(const d of documents.slice(i,i+DEMO_BATCH_SIZE)){batch.set(db.collection(d.collection).doc(d.id),{...d.data,updatedAt:FieldValue.serverTimestamp(),createdAt:d.data.createdAt||FieldValue.serverTimestamp()},{merge:true})}await batch.commit()}
+ for(let i=0;i<documents.length;i+=DEMO_BATCH_SIZE){const batch=db.batch();for(const d of documents.slice(i,i+DEMO_BATCH_SIZE)){batch.set(db.collection(d.collection).doc(d.id),sanitizePayload({...d.data,updatedAt:FieldValue.serverTimestamp(),createdAt:d.data.createdAt||FieldValue.serverTimestamp()}),{merge:true})}await batch.commit()}
 }
 export async function applySeedPlan(db:any,plan:DemoSeedPlan){
  await validatePlanCollisions(db,plan);await writeDocuments(db,plan.documents);await verifyPersistedPlan(db,plan);

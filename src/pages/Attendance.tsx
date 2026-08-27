@@ -46,6 +46,7 @@ import { Modal } from '../components/ui/Modal';
 import { Input, Select as InputSelect } from '../components/ui/Input';
 import {
   Trash2, Calendar, RefreshCw, Download, Eye, Clock, X, User, CheckCircle2, AlertTriangle,
+  Camera, Building2, Navigation, ShieldCheck, ShieldAlert, Loader2,
 } from 'lucide-react';
 import { useEmployees } from '../features/employees/hooks/useEmployees';
 import {
@@ -54,8 +55,10 @@ import {
   effectiveAttendanceStatus, effectiveInTime, effectiveOutTime,
 } from '../features/hr/hooks/useHR';
 import toast from 'react-hot-toast';
-import CheckInPanel from '../components/attendance/CheckInPanel';
-import ManualAttendancePanel from '../components/attendance/ManualAttendancePanel';
+import FaceAttendanceFlow from '../components/attendance/FaceAttendanceFlow';
+import { useFaceEnrollmentStatus } from '../features/attendance/hooks/useFaceEnrollmentStatus';
+import { deriveAttendanceButtonState } from '../features/attendance/services/attendanceButtonState';
+import type { FaceAttendanceAction } from '../features/attendance/hooks/useFaceAttendance';
 import { AttendanceService } from '../services/AttendanceService';
 import { computeDashboardKPIs } from '../features/attendance/services/dashboardKPIs';
 import { formatDistanceMeters } from '../lib/geo';
@@ -168,11 +171,42 @@ export default function Attendance() {
   const deleteMut = useDeleteAttendance();
 
   // Phase 7: self-service check-in — today's attendance for the current user
-  const { data: todayAttendance } = useQuery({
+  const { data: todayAttendance, isLoading: isTodayAttendanceLoading } = useQuery({
     queryKey: ['attendance', 'today'],
     queryFn: () => AttendanceService.getTodayAttendanceForCurrentUser(),
     staleTime: 30_000,
   });
+
+  // ── Face Attendance (biometric + GPS) — the ONE self-service attendance
+  // action in the header, replacing the earlier separate GPS-only Check
+  // In/Check Out buttons. Tapping it opens the same in-app camera flow
+  // (`FaceAttendanceFlow`) desktop and mobile both use — front camera,
+  // verify (or register-then-verify for a first-time employee), then GPS,
+  // then the existing `AttendanceService` write. GPS capture/validation is
+  // unchanged; it simply always runs alongside biometric verification now
+  // rather than being offered as a separate, camera-free action here (the
+  // existing `ManualAttendancePanel`, unaffected by this change, remains a
+  // true no-GPS/no-biometric fallback on the mobile workspace).
+  const enrollmentStatus = useFaceEnrollmentStatus();
+  const [cameraAction, setCameraAction] = useState<FaceAttendanceAction | null>(null);
+  const isCheckedInToday = !!todayAttendance?.checkIn;
+  const isCheckedOutToday = !!todayAttendance?.checkOut;
+
+  useEffect(() => {
+    if (cameraAction === 'checkIn' && isCheckedInToday) setCameraAction(null);
+  }, [cameraAction, isCheckedInToday]);
+  useEffect(() => {
+    if (cameraAction === 'checkOut' && isCheckedOutToday) setCameraAction(null);
+  }, [cameraAction, isCheckedOutToday]);
+
+  const headerButtonState = deriveAttendanceButtonState(todayAttendance, enrollmentStatus.status);
+  // Phase 9's revocation policy — self-service must never bypass it, and
+  // (bug fix, product-integration follow-up) the employee must be told
+  // BEFORE the camera opens, not after a wasted capture attempt. Mirrors
+  // CheckInPanel.tsx's own explicit check exactly — deriveAttendanceButtonState
+  // deliberately has no concept of "revoked" (see its own test's documented
+  // contract), so this guard lives at the call site on both surfaces.
+  const isEnrollmentRevoked = enrollmentStatus.status === 'revoked';
 
   // Phase 12: real, query-backed warehouse attribution for Attendance —
   // previously no Attendance/Payroll surface could answer "which warehouse
@@ -387,14 +421,14 @@ export default function Attendance() {
     setBulkStatus('');
   }
 
-  // ── KPI Config ──────────────────────────────────────────────────
+  // ── KPI Config — exactly 6 cards, one row (Attendance page redesign) ──
   const KPI_CONFIGS = [
     {
       key: 'total',
-      label: 'TOTAL RECORDS',
+      label: 'TOTAL ATTENDANCE',
       value: allRecords.length,
       icon: <Calendar className="h-4 w-4" />,
-      description: 'All attendance records',
+      description: `${stats.attendancePct}% attendance rate`,
     },
     {
       key: 'present',
@@ -425,39 +459,10 @@ export default function Attendance() {
       description: 'On leave',
     },
     {
-      key: 'attendancePct',
-      label: 'ATTENDANCE %',
-      value: `${stats.attendancePct}%`,
-      icon: <AlertTriangle className="h-4 w-4" />,
-      description: 'Present / Total',
-    },
-    // ── Phase 13: GPS Attendance KPIs ──────────────────────
-    {
-      key: 'checkedInGPS',
-      label: 'CHECKED IN (GPS)',
-      value: gpsKPIs.checkedInGPS,
-      icon: <CheckCircle2 className="h-4 w-4" />,
-      description: 'Self-service check-in today',
-    },
-    {
-      key: 'lateGPS',
-      label: 'LATE (GPS)',
-      value: gpsKPIs.lateGPS,
-      icon: <Clock className="h-4 w-4" />,
-      description: 'Late via GPS rule engine',
-    },
-    {
-      key: 'earlyExit',
-      label: 'EARLY EXIT',
-      value: gpsKPIs.earlyExitCount,
-      icon: <AlertTriangle className="h-4 w-4" />,
-      description: 'Left before shift end',
-    },
-    {
       key: 'missingToday',
       label: 'MISSING TODAY',
       value: gpsKPIs.missingToday,
-      icon: <X className="h-4 w-4" />,
+      icon: <AlertTriangle className="h-4 w-4" />,
       description: 'No attendance record today',
     },
   ];
@@ -484,25 +489,68 @@ export default function Attendance() {
             <Button variant="outline" size="sm" icon={<Download className="h-3.5 w-3.5" />} onClick={() => exportAttendanceCSV(filtered)}>
               Export
             </Button>
+            {/* Face Attendance — the ONE self-service attendance action
+                (biometric verification + GPS, via the same in-app camera
+                flow mobile uses). Employee identity is resolved
+                automatically from the signed-in session; nothing to pick
+                here. Sized/shaped to match "Add Lead" on the Leads page
+                (same Button component, same size="sm"). Hidden once today's
+                attendance is complete (checked out) — no action left. */}
+            {headerButtonState.action && !isEnrollmentRevoked && (
+              <Button
+                size="sm"
+                data-tour="attendance-checkin"
+                icon={enrollmentStatus.isLoading || isTodayAttendanceLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
+                disabled={enrollmentStatus.isLoading || isTodayAttendanceLoading}
+                onClick={() => setCameraAction(headerButtonState.action)}
+              >
+                {headerButtonState.label}
+              </Button>
+            )}
           </>
         }
       />
 
-      {/* ── Attendance Actions: Manual (no GPS) + Geo (self-service GPS),
-           equivalent size/hierarchy, side by side — not a giant standalone
-           section above the KPIs. ──────────────────────────────────── */}
-      <div data-tour="attendance-actions">
-        <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">
-          Attendance Actions
-        </p>
-        <div className="grid gap-1.5 sm:grid-cols-2">
-          <ManualAttendancePanel todayRecord={todayAttendance} isLoading={isLoading} />
-          <CheckInPanel todayRecord={todayAttendance} isLoading={isLoading} />
-        </div>
-      </div>
+      {/* Desktop camera modal sizing: previously `size="sm"` (max-w-sm,
+          384px) — far smaller than this app's other enterprise modals and
+          too cramped for a live camera preview to be comfortably visible.
+          `size="lg"` (max-w-2xl, 672px) is a deliberate step up in the same
+          direction as Employees.tsx's own "Add Employee" modal (`size="xl"`,
+          896px, appropriate there because a multi-field form fills that
+          width) — sized for THIS content instead: `FaceCapture`'s own
+          camera-preview cap (`maxWidth: 520`, see FaceCapture.tsx) nearly
+          fills a `lg` modal's interior with minimal empty space, while still
+          being a substantially (~3x area) larger working camera area than
+          the previous `sm` modal produced. Mobile is unaffected — this
+          Modal only renders on this desktop page; the mobile bottom-nav
+          camera flow (`MobileAttendanceWorkspace.tsx`) renders
+          `FaceAttendanceFlow` inline, full-page, never inside this Modal. */}
+      <Modal
+        open={!!cameraAction}
+        onClose={() => setCameraAction(null)}
+        title={cameraAction === 'checkOut' ? 'Check Out' : headerButtonState.isFirstTimeSetup ? 'Set Up Face Attendance' : 'Check In'}
+        size="lg"
+      >
+        {cameraAction && <FaceAttendanceFlow action={cameraAction} onCancel={() => setCameraAction(null)} />}
+      </Modal>
 
-      {/* ── KPI Grid ──────────────────────────────────────────────────── */}
-      <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+      {/* Revoked biometric enrollment — same message/guidance CheckInPanel.tsx
+          shows on mobile, so a revoked employee gets a clear, immediate
+          explanation on desktop too rather than a silently-missing button. */}
+      {isEnrollmentRevoked && (
+        <div
+          className="rounded-lg border p-3 flex items-center gap-3"
+          style={{ background: 'var(--color-danger-bg, rgba(239,68,68,0.08))', borderColor: 'var(--color-danger-border, rgba(239,68,68,0.3))' }}
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0" style={{ color: 'var(--color-danger)' }} />
+          <p className="text-xs" style={{ color: 'var(--color-text)' }}>
+            Face Attendance is unavailable — your biometric enrollment has been revoked. Contact HR or an administrator to re-enable it.
+          </p>
+        </div>
+      )}
+
+      {/* ── KPI Grid — 6 cards, one row (matches Leads' KPI grid) ───────── */}
+      <div data-tour="attendance-kpi" className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-6">
         {KPI_CONFIGS.map(k => (
           <PremiumKpi
             key={k.key}
@@ -511,7 +559,9 @@ export default function Attendance() {
             icon={k.icon}
             description={k.description}
             active={k.key === 'total' ? (activeKpi === 'total' || isTotalDefault) : activeKpi === k.key}
-            onClick={k.key === 'attendancePct' ? undefined : () => {
+            // "Missing Today" counts employees with NO record — there is
+            // nothing in the table to filter down to, so it's informational only.
+            onClick={k.key === 'missingToday' ? undefined : () => {
               const next = activeKpi === k.key ? '' : k.key;
               setActiveKpi(next); setPage(1);
               syncQueueParams({ kpi: next, page: 1 });
@@ -696,7 +746,7 @@ export default function Attendance() {
                       <EmptyState
                         icon={<Calendar className="h-9 w-9" />}
                         title={search || dateF || statusF || activeKpi ? 'No records match filters' : 'No attendance records yet'}
-                        description={search || dateF || statusF || activeKpi ? undefined : 'Use Manual Attendance or Geo Attendance above to mark your first record.'}
+                        description={search || dateF || statusF || activeKpi ? undefined : 'Use Check In above to mark your first record.'}
                       />
                     </td>
                   </tr>
@@ -793,6 +843,18 @@ export default function Attendance() {
             { key: 'overview' as const, label: 'Overview' },
             { key: 'activity' as const, label: 'Activity' },
           ];
+          // GPS/geofence evidence to display — prefer checkout's (the
+          // day's final, most complete evidence), fall back to check-in's.
+          // Manual-only records (source: 'manual_admin', or none at all)
+          // have neither — the GPS/Location cards simply don't render.
+          const gpsEvidence = viewItem.checkOut?.source === 'gps' ? viewItem.checkOut
+            : viewItem.checkIn?.source === 'gps' ? viewItem.checkIn
+              : undefined;
+          const viewEmployee = employeesById.get(viewItem.employeeId);
+          const verificationLabel = !gpsEvidence ? null
+            : gpsEvidence.withinGeofence
+              ? (gpsEvidence.geoConfidence === 'low' ? 'Verified (low confidence)' : 'Verified')
+              : 'Not verified — outside geofence';
           return (
             <div className="flex h-[70vh] max-h-[700px] min-h-0 flex-col text-sm text-[var(--color-text-secondary)]">
               {/* Header */}
@@ -843,6 +905,15 @@ export default function Attendance() {
                 {detailTab === 'overview' && (
                   <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
                     <div className="space-y-5">
+                      <DetailCard title="Employee">
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <LeadField label="Employee Name" value={viewItem.employee || <MutedValue />} />
+                          <LeadField label="Employee ID" value={viewItem.employeeId || <MutedValue />} />
+                          <LeadField label="Department" value={viewEmployee?.department || <MutedValue>Not available</MutedValue>} />
+                          <LeadField label="Designation" value={viewEmployee?.designation || <MutedValue>Not available</MutedValue>} />
+                        </div>
+                      </DetailCard>
+
                       <DetailCard title="Attendance Details">
                         <div className="grid gap-3 sm:grid-cols-2">
                           <LeadField label="Date" value={formatDateValue(viewItem.date) || viewItem.date || <MutedValue />} />
@@ -853,9 +924,64 @@ export default function Attendance() {
                           <LeadField label="Out Time">
                             {effectiveOutTime(viewItem) ? <span className="inline-flex items-center gap-1.5"><Clock className="h-4 w-4 text-[var(--color-primary-text)]" />{effectiveOutTime(viewItem)}</span> : <MutedValue />}
                           </LeadField>
+                          <LeadField label="Working Duration" value={
+                            typeof viewItem.workingHours === 'number' ? `${viewItem.workingHours.toFixed(2)} hrs` : <MutedValue>Not yet checked out</MutedValue>
+                          } />
+                          <LeadField label="Late" value={viewItem.computedStatus === 'Late' ? 'Yes' : viewItem.computedStatus ? 'No' : <MutedValue>Not computed</MutedValue>} />
+                          <LeadField label="Early Exit" value={typeof viewItem.earlyExit === 'boolean' ? (viewItem.earlyExit ? 'Yes' : 'No') : <MutedValue>Not applicable</MutedValue>} />
                           <LeadField label="Warehouse" value={viewItemWarehouseName || <MutedValue>Not assigned</MutedValue>} />
                         </div>
                       </DetailCard>
+
+                      {gpsEvidence && (
+                        <DetailCard title="GPS & Geofence Verification">
+                          <div className="mb-3 flex items-center gap-2">
+                            {gpsEvidence.withinGeofence ? (
+                              <ShieldCheck className="h-4 w-4 text-[var(--color-success)]" />
+                            ) : (
+                              <ShieldAlert className="h-4 w-4 text-[var(--color-danger)]" />
+                            )}
+                            <span className={`text-sm font-semibold ${gpsEvidence.withinGeofence ? 'text-[var(--color-success)]' : 'text-[var(--color-danger)]'}`}>
+                              {verificationLabel}
+                            </span>
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <LeadField label="Recorded Latitude" value={gpsEvidence.location ? gpsEvidence.location.latitude.toFixed(6) : <MutedValue />} />
+                            <LeadField label="Recorded Longitude" value={gpsEvidence.location ? gpsEvidence.location.longitude.toFixed(6) : <MutedValue />} />
+                            <LeadField label="GPS Accuracy" value={typeof gpsEvidence.location?.accuracy === 'number' ? `±${Math.round(gpsEvidence.location.accuracy)} m` : <MutedValue>Not reported</MutedValue>} />
+                            <LeadField label="Distance from Location" value={formatDistanceMeters(gpsEvidence.distanceFromLocationMeters) || <MutedValue />} />
+                            <LeadField label="Geofence Radius Used" value={typeof gpsEvidence.geofenceRadiusMeters === 'number' ? `${gpsEvidence.geofenceRadiusMeters} m` : <MutedValue />} />
+                            <LeadField label="Verification Confidence" value={gpsEvidence.geoConfidence ? gpsEvidence.geoConfidence[0].toUpperCase() + gpsEvidence.geoConfidence.slice(1) : <MutedValue />} />
+                          </div>
+                        </DetailCard>
+                      )}
+
+                      {gpsEvidence?.approvedLocationName && (
+                        <DetailCard title={gpsEvidence.withinGeofence ? 'Verified Location' : 'Location Used for Verification'}>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <LeadField label={gpsEvidence.approvedLocationSource === 'company' ? 'Company' : 'Warehouse'} value={
+                              <span className="inline-flex items-center gap-1.5"><Building2 className="h-4 w-4 text-[var(--color-primary-text)]" />{gpsEvidence.approvedLocationName}</span>
+                            } />
+                            <LeadField label="Configured Radius" value={typeof gpsEvidence.geofenceRadiusMeters === 'number' ? `${gpsEvidence.geofenceRadiusMeters} m` : <MutedValue />} />
+                            <LeadField label="Location Address" value={gpsEvidence.approvedLocationAddress || <MutedValue>Not available</MutedValue>} />
+                            <LeadField label="Location Coordinates" value={
+                              typeof gpsEvidence.approvedLocationLatitude === 'number' && typeof gpsEvidence.approvedLocationLongitude === 'number'
+                                ? `${gpsEvidence.approvedLocationLatitude.toFixed(6)}, ${gpsEvidence.approvedLocationLongitude.toFixed(6)}`
+                                : <MutedValue />
+                            } />
+                          </div>
+                        </DetailCard>
+                      )}
+
+                      {gpsEvidence?.location?.address && (
+                        <DetailCard title="Recorded GPS Address">
+                          <p className="inline-flex items-start gap-1.5 leading-relaxed text-[var(--color-text)]">
+                            <Navigation className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
+                            {gpsEvidence.location.address}
+                          </p>
+                        </DetailCard>
+                      )}
+
                       {viewItem.notes && (
                         <DetailCard title="Notes">
                           <p className="whitespace-pre-wrap leading-relaxed text-[var(--color-text)]">{viewItem.notes}</p>

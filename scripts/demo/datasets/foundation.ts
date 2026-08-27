@@ -3,7 +3,6 @@ import {
   DEMO_COMPANY_ID,
   DEMO_ERP_USER_ID,
   DEMO_GROUP_ID,
-  DEMO_ROLE_ID,
   DEMO_SEED_ID,
   OFFICIAL_DEMO_EMAIL,
   demoDocumentId,
@@ -34,18 +33,32 @@ const moduleNames = [
   'payouts',
   'scheme_registration',
 ] as const;
-const denied = new Set(['users','roles','companies','settings']);
+// Demo-to-Group conversion: Neozy Demo is a real Group now (demo@neozy.in is
+// its GroupAdmin — see buildIdentityDocuments below), not a sandboxed tenant
+// with an artificially denied custom role. The seeded role document for
+// company-demo-neozy is therefore a genuine, full 'Admin' system role — the
+// exact shape every other company's Admin role has (createAllModulePermissions()
+// in src/lib/roleBootstrap.ts) — not a bespoke restricted "Demo Operator"
+// role. GroupAdmin capability is bounded by the real Firestore-rules
+// GroupAdmin scope (own-Group-only, see firestore.rules' actorIsGroupAdmin()/
+// sameGroup()), the same boundary every other Group's GroupAdmin has — not by
+// a fake per-field `denied` set. (This file intentionally does not import
+// src/lib/roleBootstrap.ts — this Node seed script's established convention,
+// per scripts/backfill-group-denorm.cjs, is to mirror that shape locally
+// rather than pull browser/store-coupled src/lib modules into script
+// execution.)
 const readOnly = new Set(['reports']);
 const permissions = Object.fromEntries(moduleNames.map((module) => [module, {
-  view: module === 'settings' || !denied.has(module),
-  create: !denied.has(module) && !readOnly.has(module),
-  edit: !denied.has(module) && !readOnly.has(module),
-  delete: !denied.has(module) && !readOnly.has(module),
-  cancel: !denied.has(module) && !readOnly.has(module),
-  approve: !denied.has(module) && !readOnly.has(module),
-  export: !denied.has(module),
-  import: false,
-  view_pricing: !denied.has(module),
+  view: true,
+  create: !readOnly.has(module),
+  edit: !readOnly.has(module),
+  delete: !readOnly.has(module),
+  cancel: !readOnly.has(module),
+  approve: !readOnly.has(module),
+  disburse: !readOnly.has(module),
+  export: true,
+  import: !readOnly.has(module),
+  view_pricing: true,
   visibility: 'all',
 }]));
 
@@ -56,11 +69,11 @@ export function buildIdentityDocuments(authUid: string): DemoDocument[] {
     // step 1 — the demo dataset gets a dedicated demo Group, isDemo: true,
     // never folded into a production default Group).
     { collection: 'groups', id: DEMO_GROUP_ID, preserveOnReset: true, data: {
-      ...audit, id: DEMO_GROUP_ID, name: 'Neozy Demo Group', shortName: 'Demo',
+      ...audit, id: DEMO_GROUP_ID, name: 'Neozy Demo', shortName: 'Demo',
       status: 'Active', isDefault: false, isDemo: true, settings: {},
     }},
     { collection: 'companies', id: DEMO_COMPANY_ID, preserveOnReset: true, data: {
-      ...base, ...audit, id: DEMO_COMPANY_ID, name: 'Neozy Solar EPC Demo', shortName: 'Neozy Demo',
+      ...base, ...audit, id: DEMO_COMPANY_ID, name: 'Neozy Demo', shortName: 'Neozy Demo',
       companyCode: 'DEMO', tagline: 'Fictional Solar EPC demonstration workspace',
       address: 'Demo Renewable Energy Park, Sector D', city: 'Pune', state: 'Maharashtra',
       pincode: '000000', country: 'India', phone: '+91-0000000000', email: 'company@demo.example.invalid',
@@ -83,24 +96,36 @@ export function buildIdentityDocuments(authUid: string): DemoDocument[] {
       // for why dedicated single-mode demo companies were not built.
       businessMode: 'Both',
     }},
-    // Phase 1 (F-03 closure, Master Plan §5.6): role documents are
-    // Company-scoped — the demo role doc is keyed `${companyId}_${roleName}`
-    // (roleDocumentId(DEMO_COMPANY_ID, DEMO_ROLE_ID)), matching the
-    // per-company system-role keying the app's role resolution expects.
-    { collection: 'roles', id: `${DEMO_COMPANY_ID}_${DEMO_ROLE_ID}`, preserveOnReset: true, data: {
-      ...roleBase, ...audit, id: `${DEMO_COMPANY_ID}_${DEMO_ROLE_ID}`, name: DEMO_ROLE_ID, schemaVersion: 1,
-      description: 'Public demo business access without administration, secrets, counters, or owner AI.',
+    // Demo-to-Group conversion: role documents are Company-scoped, keyed
+    // `${companyId}_${roleName}` (Master Plan §5.6) — company-demo-neozy now
+    // gets a real, full 'Admin' system role doc, the same shape/id scheme
+    // every other company's Admin role has (roleDocumentId(companyId,'Admin')
+    // in src/lib/roleBootstrap.ts), not a bespoke restricted role. The old
+    // `${DEMO_COMPANY_ID}_${DEMO_ROLE_ID}` ("Demo Operator", denied
+    // company/user/role admin) is intentionally no longer seeded — nothing
+    // resolves to that role name anymore (the demo user's role is
+    // 'GroupAdmin' below), so keeping it would just be dead, confusing data.
+    { collection: 'roles', id: `${DEMO_COMPANY_ID}_Admin`, preserveOnReset: true, data: {
+      ...roleBase, ...audit, id: `${DEMO_COMPANY_ID}_Admin`, name: 'Admin', schemaVersion: 1,
+      description: 'Full administrative access, scoped to the Neozy Demo Group like any other Group\'s Admin role.',
+      isSystem: true,
       permissions,
     }},
     { collection: 'users', id: DEMO_ERP_USER_ID, preserveOnReset: true, data: {
       ...base, ...audit, id: DEMO_ERP_USER_ID, name: 'Neozy Demo Operator', displayName: 'Demo Operator',
-      email: OFFICIAL_DEMO_EMAIL, phone: '0000000000', role: DEMO_ROLE_ID, status: 'Active',
+      email: OFFICIAL_DEMO_EMAIL, phone: '0000000000',
+      // Demo-to-Group conversion: demo@neozy.in is the real Group Admin of
+      // the real Neozy Demo Group (docs/reports/NEOZY_DEMO_GROUP_CONVERSION_REPORT.md)
+      // — the exact same role value/authorization path every other Group's
+      // Group Admin uses (firestore.rules' actorIsGroupAdmin(): a literal
+      // role === 'GroupAdmin' check), not a parallel demo-only role.
+      role: 'GroupAdmin', status: 'Active',
       // Phase 1 (Channel Partner identity): the demo operator is the linked
       // user for demo partner PART-1 — the canonical user-side link that lets
       // usePartnerSelf() resolve the partner record (users.channelPartnerId
       // → channel_partners/{id}). Partner-side mirror is set in businessGraph.
       channelPartnerId: demoDocumentId('PART', 1),
-      linkedModules: moduleNames.filter((module) => !denied.has(module)), isSuperAdmin: false,
+      linkedModules: [...moduleNames], isSuperAdmin: false,
     }},
     { collection: 'user_auth_maps', id: authUid, preserveOnReset: true, data: {
       authUid, userId: DEMO_ERP_USER_ID, companyId: DEMO_COMPANY_ID,

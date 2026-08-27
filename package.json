@@ -20,6 +20,7 @@
     "demo:reset:plan": "node --experimental-strip-types scripts/demo/planDemoReset.ts",
     "demo:cleanup": "node --experimental-strip-types scripts/demo/cleanupDemoData.ts",
     "test:rules": "firebase emulators:exec --only firestore --project neozy-demo-isolation-test \"vitest run --config vitest.emulator.config.ts\"",
+    "test:functions:emulator": "firebase emulators:exec --only firestore,auth --project neozy-functions-emulator-test \"vitest run --config vitest.functions.emulator.config.ts\"",
     "test:rules:storage": "firebase emulators:exec --only firestore,storage --project neozy-multitenant-storage-test \"vitest run --config vitest.emulator.storage.config.ts\"",
     "demo:readiness": "node --experimental-strip-types scripts/demo/readiness.ts",
     "demo:help": "node --experimental-strip-types scripts/demo/help.ts",

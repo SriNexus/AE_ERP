@@ -1,0 +1,55 @@
+name: Security Rules Tests
+
+# Phase 3 (Master Plan §Phase-3, STORAGE-RULES-TESTS-NOT-WIRED): the
+# Firestore and Storage rules emulator suites (npm run test:rules / npm run
+# test:rules:storage) existed and passed locally but were never run by any
+# CI workflow — this repo had zero automated test execution on push/PR
+# before this file. Kept as two separate jobs (not one job running both
+# scripts back-to-back) because the Storage Emulator binds to exactly one
+# Firebase project for its whole process lifetime (see
+# vitest.emulator.storage.config.ts) — the two suites already run against
+# different `--project` ids for that reason, so they get independent CI job
+# failure/status reporting too, matching the local architecture exactly.
+# Both suites run entirely against local Firebase emulators with fake
+# project ids — no GCP credentials, secrets, or production resources
+# are used or required.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: security-rules-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  firestore-rules:
+    name: Firestore rules suite (npm run test:rules)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - uses: actions/setup-java@v4
+        with: { distribution: 'temurin', java-version: '21' }
+      - run: npm ci
+      - run: npm run test:rules
+
+  storage-rules:
+    name: Storage rules suite (npm run test:rules:storage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - uses: actions/setup-java@v4
+        with: { distribution: 'temurin', java-version: '21' }
+      - run: npm ci
+      - run: npm run test:rules:storage

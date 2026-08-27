@@ -178,13 +178,34 @@ export const DEFAULT_REMINDER_CONFIG: ReminderConfig = {
 //  CONFIG STORAGE
 // ═══════════════════════════════════════════════════════════
 
-const REMINDER_CONFIG_DOC_ID = 'auto_reminder_config';
+// Phase 11 (OWNERSHIP-001, Master Plan "Record Ownership / Business
+// Authorization Audit"): this used to be a single FIXED document id shared
+// by every company — auto-reminder rules are inherently per-company
+// business configuration (which leads/projects to remind about, escalation
+// timing), never a genuinely global/platform setting. Traced the real
+// impact: firestore.rules' generic-fallback tenant check
+// (canReadCompanyScoped()/canUpdateCompanyScoped() -> sameCompany())
+// correctly denies any OTHER company from reading or overwriting whichever
+// company happened to create the doc first — so this was never a
+// cross-tenant DATA LEAK — but it meant every company except that first one
+// was permanently locked out of ever saving (or even successfully loading
+// past the DEFAULT_REMINDER_CONFIG fallback) their own configuration: the
+// create branch below only ever runs once per fixed id, and every
+// subsequent company's update attempt would hit PERMISSION_DENIED against
+// the first company's stamped companyId. Fixed by keying the document per
+// company, matching the established `${companyId}_settings_${section}`
+// convention this codebase already uses for other per-company singleton
+// config docs (src/features/settings/hooks/useSettingsSection.ts).
+function reminderConfigDocId(companyId: string): string {
+  return `auto_reminder_config_${companyId || 'default'}`;
+}
 
 /**
- * Load reminder configuration from the entities collection.
+ * Load reminder configuration from the entities collection (per-company).
  */
 export async function loadReminderConfig(): Promise<ReminderConfig> {
-  const doc = await getOne<{ config: ReminderConfig }>(COLLECTIONS.ENTITIES, REMINDER_CONFIG_DOC_ID);
+  const companyId = resolveWriteCompanyId();
+  const doc = await getOne<{ config: ReminderConfig }>(COLLECTIONS.ENTITIES, reminderConfigDocId(companyId));
   if (doc?.config) {
     return { ...DEFAULT_REMINDER_CONFIG, ...doc.config };
   }
@@ -192,23 +213,24 @@ export async function loadReminderConfig(): Promise<ReminderConfig> {
 }
 
 /**
- * Save reminder configuration.
+ * Save reminder configuration (per-company).
  */
 export async function saveReminderConfig(config: ReminderConfig): Promise<void> {
   const state = useAppStore.getState();
   // Canonical tenant resolution — never the neutral 'default' placeholder.
   const companyId = resolveWriteCompanyId();
+  const docId = reminderConfigDocId(companyId);
 
-  const existing = await getOne(COLLECTIONS.ENTITIES, REMINDER_CONFIG_DOC_ID);
+  const existing = await getOne(COLLECTIONS.ENTITIES, docId);
   if (existing) {
-    await updateDocById(COLLECTIONS.ENTITIES, REMINDER_CONFIG_DOC_ID, {
+    await updateDocById(COLLECTIONS.ENTITIES, docId, {
       config,
       updatedAt: new Date().toISOString(),
       updatedBy: state.user?.id || 'system',
     });
   } else {
-    await createDocWithId(COLLECTIONS.ENTITIES, REMINDER_CONFIG_DOC_ID, {
-      id: REMINDER_CONFIG_DOC_ID,
+    await createDocWithId(COLLECTIONS.ENTITIES, docId, {
+      id: docId,
       entityType: 'reminder_config',
       companyId,
       config,

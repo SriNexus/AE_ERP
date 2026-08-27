@@ -1,0 +1,60 @@
+name: Biometric Service Tests
+
+# Face Attendance + DeepFace Master Plan, Phase 12 (§25 Phase 12's own task:
+# "CI wiring for the Python service's own test suite if not already done in
+# Phase 1" — it was not; this repo had zero CI wiring for biometric-service/
+# before this file, matching security-rules-tests.yml's own discovery that
+# this repo had zero CI test execution at all before that file existed).
+#
+# Real, non-mocked inference: this suite (biometric-service/tests/) runs
+# the actual installed DeepFace/TensorFlow/PyTorch stack against real local
+# test-fixture images (no real employee/customer biometric data — see
+# biometric-service/tests/fixtures/, the same public DeepFace sample images
+# and synthetic fixtures Phase 1 used) — never mocked, per this initiative's
+# own "no fabricated results" discipline. First run downloads model weights
+# (a few hundred MB total across ArcFace/YuNet/FasNet) — no caching is
+# configured yet; a future optimization could cache `~/.deepface/weights`.
+#
+# `torch==2.13.0+cpu` (Phase 1 compatibility finding: required for the
+# liveness/anti-spoofing path, not a transitive dependency of `deepface`
+# itself) is installed from PyTorch's own CPU wheel index — installing the
+# rest of requirements.txt from a single `pip install -r` would otherwise
+# try (and likely fail) to resolve it from PyPI directly.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'biometric-service/**'
+      - '.github/workflows/biometric-service-tests.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'biometric-service/**'
+      - '.github/workflows/biometric-service-tests.yml'
+
+concurrency:
+  group: biometric-service-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  biometric-service:
+    name: biometric-service pytest suite (real DeepFace inference, no mocks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: biometric-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - name: Install CPU-only PyTorch (Master Plan §6 compatibility finding)
+        run: pip install torch==2.13.0+cpu --index-url https://download.pytorch.org/whl/cpu
+      - name: Install remaining dependencies
+        run: pip install -r requirements.txt
+      - name: Run real pytest suite (downloads model weights on first run)
+        run: pytest -v

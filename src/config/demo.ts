@@ -7,23 +7,17 @@ export const DEMO_ROLE_ID = 'Demo Operator' as const;
 // its own Group per Master Plan §10.3 step 1 (isDemo: true) rather than being
 // folded into the production default Group.
 export const DEMO_GROUP_ID = 'group-demo-neozy' as const;
-// Root cause of "the live Demo tenant still shows old data despite the
-// corrected generator": isDemoSeeded() (src/lib/sandboxReset.ts) compares
-// this exact value against a per-browser localStorage marker, and only
-// calls triggerDemoReset() when they DIFFER. This value had never changed
-// across every prior correction (Phase 15, 15.1, 16, 17) — meaning any
-// browser that had EVER completed a demo reset before those fixes shipped
-// had a marker that already matched, so Login.tsx's `if (!isDemoSeeded())`
-// check was false and the corrected reset never ran again for that browser,
-// no matter how many times the user logged out and back in. Bumping this
-// value invalidates every existing marker unconditionally, forcing exactly
-// one fresh reset (against the now-correct buildCompleteDemoPlan()) on each
-// browser's next login. DEMO_ID_PREFIX is deliberately NOT bumped alongside
-// this — every demo document id stays stable, so the reset remains a clean
+// Seed-version marker for the manual/operator-triggered reset tooling
+// (scripts/demo/*, api/demo-reset.ts, .github/workflows/demo-reset.yml —
+// Demo-to-Group conversion removed the old per-browser auto-reset-on-login
+// path entirely; reset is now an explicit maintenance action, same as any
+// Group's data could be reset by an administrator on purpose). Bumping this
+// value is how an operator forces a fresh reseed against a corrected
+// generator. DEMO_ID_PREFIX is deliberately independent of this — every
+// demo document id stays stable across a reseed, so it remains a clean
 // delete-then-reseed rather than leaving two id generations to reconcile.
 export const DEMO_SEED_ID = 'DEMO_V3' as const;
 export const DEMO_ID_PREFIX = 'DEMO-V1-' as const;
-export const DEMO_HIDDEN_MODULES = ['users', 'roles', 'companies'] as const;
 
 export function isOfficialDemoCompany(companyId: unknown): boolean {
   return String(companyId || '').trim() === DEMO_COMPANY_ID;

@@ -17,18 +17,26 @@ import ProjectPipelineSection from '../components/reports/ProjectPipelineSection
 const COLORS = ['#6366f1','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4'];
 
 export default function Reports() {
-  const { company } = useAppStore();
-  const { data: leads=[] }     = useQuery({ queryKey:['leads'],     queryFn:()=>getAll(COLLECTIONS.LEADS),     staleTime:60000 });
-  const { data: orders=[] }    = useQuery({ queryKey:['orders'],    queryFn:()=>getAll(COLLECTIONS.ORDERS),    staleTime:60000 });
-  const { data: customers=[] } = useQuery({ queryKey:['customers'], queryFn:()=>getAll(COLLECTIONS.CUSTOMERS), staleTime:60000 });
-  const { data: payments=[] }  = useQuery({ queryKey:['payments'],  queryFn:()=>getAll(COLLECTIONS.PAYMENTS),  staleTime:60000 });
-  const { data: products=[] }  = useQuery({ queryKey:['products'],  queryFn:()=>getAll(COLLECTIONS.PRODUCTS),  staleTime:60000 });
-  const { data: employees=[] } = useQuery({ queryKey:['employees'], queryFn:()=>getAll(COLLECTIONS.EMPLOYEES), staleTime:60000 });
-  const { data: dispatch=[] }  = useQuery({ queryKey:['dispatch'],  queryFn:()=>getAll(COLLECTIONS.DISPATCH),  staleTime:60000 });
-  const { data: partners=[] }  = useQuery({ queryKey:['channel_partners'], queryFn:()=>getAll(COLLECTIONS.CHANNEL_PARTNERS), staleTime:60000 });
-  const { data: commissionRecords=[] } = useQuery({ queryKey:['commission_records'], queryFn:()=>getAll(COLLECTIONS.COMMISSION_RECORDS), staleTime:60000 });
-  const { data: walletTxns=[] } = useQuery({ queryKey:['partner_wallet_transactions'], queryFn:()=>getAll(COLLECTIONS.PARTNER_WALLET_TXNS), staleTime:60000 });
-  const { data: commissionRules=[] } = useQuery({ queryKey:['commission_rules'], queryFn:()=>getAll(COLLECTIONS.COMMISSION_RULES), staleTime:60000 });
+  const { company, activeCompanyId } = useAppStore();
+  // Phase 10 (F-CACHE-01, Master Plan "Cache / Query Isolation
+  // Verification"): every query here previously omitted activeCompanyId
+  // from its queryKey — React Query serves the PRIOR company's cached data
+  // for these 11 queries during the tick a Company switch takes to
+  // resolve, a transient stale-tenant rendering bug (presentation-only;
+  // the underlying getAll() fetch is always correctly company-scoped
+  // server-side, so this was never an authorization gap). Matches the
+  // already-proven pattern (src/engines/useWorkspaceSearch.ts).
+  const { data: leads=[] }     = useQuery({ queryKey:['leads', activeCompanyId],     queryFn:()=>getAll(COLLECTIONS.LEADS),     staleTime:60000 });
+  const { data: orders=[] }    = useQuery({ queryKey:['orders', activeCompanyId],    queryFn:()=>getAll(COLLECTIONS.ORDERS),    staleTime:60000 });
+  const { data: customers=[] } = useQuery({ queryKey:['customers', activeCompanyId], queryFn:()=>getAll(COLLECTIONS.CUSTOMERS), staleTime:60000 });
+  const { data: payments=[] }  = useQuery({ queryKey:['payments', activeCompanyId],  queryFn:()=>getAll(COLLECTIONS.PAYMENTS),  staleTime:60000 });
+  const { data: products=[] }  = useQuery({ queryKey:['products', activeCompanyId],  queryFn:()=>getAll(COLLECTIONS.PRODUCTS),  staleTime:60000 });
+  const { data: employees=[] } = useQuery({ queryKey:['employees', activeCompanyId], queryFn:()=>getAll(COLLECTIONS.EMPLOYEES), staleTime:60000 });
+  const { data: dispatch=[] }  = useQuery({ queryKey:['dispatch', activeCompanyId],  queryFn:()=>getAll(COLLECTIONS.DISPATCH),  staleTime:60000 });
+  const { data: partners=[] }  = useQuery({ queryKey:['channel_partners', activeCompanyId], queryFn:()=>getAll(COLLECTIONS.CHANNEL_PARTNERS), staleTime:60000 });
+  const { data: commissionRecords=[] } = useQuery({ queryKey:['commission_records', activeCompanyId], queryFn:()=>getAll(COLLECTIONS.COMMISSION_RECORDS), staleTime:60000 });
+  const { data: walletTxns=[] } = useQuery({ queryKey:['partner_wallet_transactions', activeCompanyId], queryFn:()=>getAll(COLLECTIONS.PARTNER_WALLET_TXNS), staleTime:60000 });
+  const { data: commissionRules=[] } = useQuery({ queryKey:['commission_rules', activeCompanyId], queryFn:()=>getAll(COLLECTIONS.COMMISSION_RULES), staleTime:60000 });
 
   // Commission rules stats
   const rulesByType = Object.entries((commissionRules as any[]).reduce((a: Record<string,number>, r: any) => {

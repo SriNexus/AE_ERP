@@ -16,7 +16,7 @@ import { logCreate, logUpdate, logDelete } from '../lib/auditLogger';
 import { COLLECTIONS } from '../lib/firebase';
 import { createCompanyInGroup, updateCompanyInGroup } from '../lib/groupAdmin';
 import { INDIAN_STATES, type CompanyConfig } from '../config/company';
-import { warehouseGeoToForm, parseWarehouseGeo } from '../features/warehouses/types';
+import { warehouseGeoToForm, parseWarehouseGeo, validateWarehouseGeoForm, getGeoReadiness } from '../features/warehouses/types';
 import { COMPANY_BUSINESS_MODES, DEFAULT_BUSINESS_MODE, resolveBusinessMode, type CompanyBusinessMode } from '../lib/companyBusinessMode';
 import { statusBadge } from '../components/ui/Badge';
 import { Button, Card, CardHeader, ConfirmDialog, EmptyState, Pagination,
@@ -191,6 +191,14 @@ export default function Companies() {
   function handleSubmit(e:React.FormEvent) {
     e.preventDefault();
     if(!form.name) return toast.error('Company name required');
+    // Production fix (docs/audits/GEO_ATTENDANCE_CURRENT_STATE_AUDIT.md
+    // Finding F2): block, don't silently drop, an incomplete geo-fence —
+    // the Company location is the fallback attendance location, so the
+    // same atomic-three-fields rule applies as for Warehouses.
+    const geoValidation = validateWarehouseGeoForm({ latitude: form.latitude, longitude: form.longitude, geofenceRadiusMeters: form.geofenceRadiusMeters });
+    if (!geoValidation.valid) {
+      return toast.error('Geo-fence configuration is incomplete — Latitude, Longitude, and Geofence Radius are all required together.');
+    }
     const geo = parseWarehouseGeo({ latitude: form.latitude, longitude: form.longitude, geofenceRadiusMeters: form.geofenceRadiusMeters });
     save.mutate({ ...form, ...geo });
   }
@@ -567,14 +575,28 @@ export default function Companies() {
               <FormSection title="Geo-Fence / Attendance Location">
                 <p className="text-xs text-[var(--color-text-muted)] mb-3">
                   This location is used as the default attendance location when an employee's assigned warehouse does not have a configured attendance location.
+                  {validateWarehouseGeoForm(form).attempted && ' All three fields below are required together — a partially-configured location cannot be used for attendance.'}
                 </p>
                 <FormRow>
-                  <Input label="Latitude" value={form.latitude} onChange={e=>setForm({...form,latitude:e.target.value})} placeholder="e.g. 19.0760"/>
-                  <Input label="Longitude" value={form.longitude} onChange={e=>setForm({...form,longitude:e.target.value})} placeholder="e.g. 72.8777"/>
+                  <Input label="Latitude" required={validateWarehouseGeoForm(form).attempted} value={form.latitude} onChange={e=>setForm({...form,latitude:e.target.value})} placeholder="e.g. 19.0760" error={validateWarehouseGeoForm(form).errors.latitude}/>
+                  <Input label="Longitude" required={validateWarehouseGeoForm(form).attempted} value={form.longitude} onChange={e=>setForm({...form,longitude:e.target.value})} placeholder="e.g. 72.8777" error={validateWarehouseGeoForm(form).errors.longitude}/>
                 </FormRow>
                 <FormRow>
-                  <Input label="Geofence Radius (meters)" value={form.geofenceRadiusMeters} onChange={e=>setForm({...form,geofenceRadiusMeters:e.target.value})} placeholder="e.g. 500"/>
+                  <Input label="Geofence Radius (meters)" required={validateWarehouseGeoForm(form).attempted} value={form.geofenceRadiusMeters} onChange={e=>setForm({...form,geofenceRadiusMeters:e.target.value})} placeholder="e.g. 500" error={validateWarehouseGeoForm(form).errors.geofenceRadiusMeters}/>
                 </FormRow>
+                {(() => {
+                  const readiness = getGeoReadiness({
+                    latitude: form.latitude?.trim?.() === '' ? undefined : Number(form.latitude),
+                    longitude: form.longitude?.trim?.() === '' ? undefined : Number(form.longitude),
+                    geofenceRadiusMeters: form.geofenceRadiusMeters?.trim?.() === '' ? undefined : Number(form.geofenceRadiusMeters),
+                    status: form.status,
+                  });
+                  return (
+                    <p className="text-xs mt-1" style={{ color: readiness.ready ? 'var(--color-success)' : 'var(--color-warning, var(--color-text-secondary))' }}>
+                      {readiness.ready ? '✓ Ready for attendance.' : `⚠ Not usable for attendance yet — missing: ${readiness.missing.join(', ')}.`}
+                    </p>
+                  );
+                })()}
               </FormSection>
 
               <FormSection title="Tax & Legal">
@@ -812,7 +834,7 @@ export default function Companies() {
 
           <div className="flex justify-end gap-2 border-t border-[var(--color-border-subtle)] pt-4 mt-6">
             <Button variant="outline" type="button" onClick={closeForm}>Cancel</Button>
-            <Button type="submit" loading={save.isPending}>{editId?'Update Company':'Add Company'}</Button>
+            <Button type="submit" loading={save.isPending} disabled={!validateWarehouseGeoForm(form).valid}>{editId?'Update Company':'Add Company'}</Button>
           </div>
         </form>
       </Modal>

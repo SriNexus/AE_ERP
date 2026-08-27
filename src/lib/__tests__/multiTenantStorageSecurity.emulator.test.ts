@@ -40,6 +40,10 @@ const UID_ADMIN_A = 'uid-admin-a';
 const ID_ADMIN_A = 'MUSR-ADMIN-A';
 const UID_USER_C = 'uid-user-c';
 const ID_USER_C = 'MUSR-USER-C';
+const UID_DIRECTOR_C = 'uid-director-c';
+const ID_DIRECTOR_C = 'MUSR-DIRECTOR-C';
+const UID_ACCOUNTS_C = 'uid-accounts-c';
+const ID_ACCOUNTS_C = 'MUSR-ACCOUNTS-C';
 
 let env: RulesTestEnvironment;
 
@@ -80,6 +84,17 @@ async function seed() {
     // Ordinary user of CO-C — proves same-company access is unaffected.
     await setDoc(doc(db, 'users', ID_USER_C), userDoc(ID_USER_C, 'Sales', COMPANY_C, 'user.c@neozy.test'));
     await setDoc(doc(db, 'user_auth_maps', UID_USER_C), mappingDoc(UID_USER_C, ID_USER_C, COMPANY_C, 'user.c@neozy.test'));
+
+    // Director of CO-C — storage.rules' canReadScopedDocuments/
+    // canWriteScopedDocuments give Director read but NOT write on
+    // case/project-scoped documents (view-only), untested until Phase 3.
+    await setDoc(doc(db, 'users', ID_DIRECTOR_C), userDoc(ID_DIRECTOR_C, 'Director', COMPANY_C, 'director.c@neozy.test'));
+    await setDoc(doc(db, 'user_auth_maps', UID_DIRECTOR_C), mappingDoc(UID_DIRECTOR_C, ID_DIRECTOR_C, COMPANY_C, 'director.c@neozy.test'));
+
+    // Accounts of CO-C — denied BOTH read and write on scoped documents
+    // (the one role excluded from canReadScopedDocuments's fallback grant).
+    await setDoc(doc(db, 'users', ID_ACCOUNTS_C), userDoc(ID_ACCOUNTS_C, 'Accounts', COMPANY_C, 'accounts.c@neozy.test'));
+    await setDoc(doc(db, 'user_auth_maps', UID_ACCOUNTS_C), mappingDoc(UID_ACCOUNTS_C, ID_ACCOUNTS_C, COMPANY_C, 'accounts.c@neozy.test'));
 
     // A case document under CO-C, staff-managed (no partnerId) — exercises
     // the scoped-document path (canReadScopedDocuments/canWriteScopedDocuments).
@@ -155,5 +170,59 @@ describe('Phase 8 (Master Plan §9.5) — Storage Rules GroupAdmin extension', (
   it('a signed-out identity is denied everywhere, GroupAdmin extension included', async () => {
     const storage = env.unauthenticatedContext().storage();
     await assertFails(uploadBytes(ref(storage, `companies/${COMPANY_C}/products/logo.png`), bytes));
+  });
+});
+
+// Phase 3 (Storage Rules Verification + CI Visibility Hardening): the suite
+// above exercises the Phase 8 GroupAdmin-extension branch thoroughly but
+// left canAccessGeneralCompanyPath()'s READ side, and essentially all of
+// canReadScopedDocuments()/canWriteScopedDocuments()'s non-GroupAdmin role
+// branches (Director view-only, Accounts full-deny, baseline cross-company
+// denial), completely unexercised by a real emulator request — existing,
+// already-implemented storage.rules logic, not new semantics.
+describe('Phase 3 — Storage Rules baseline coverage (general path READ + scoped-document role branches)', () => {
+  it('cross-company READ is denied on the general company path (canAccessGeneralCompanyPath governs read and write identically, but read had no direct emulator proof)', async () => {
+    // Seed a real object under Company A, bypassing rules, so the denial
+    // below is a genuine rules rejection rather than a "file not found".
+    await env.withSecurityRulesDisabled(async (rulesCtx) => {
+      await uploadBytes(ref(rulesCtx.storage(), `companies/${COMPANY_A}/products/logo.png`), bytes);
+    });
+    const storage = ctx(UID_USER_C, 'user.c@neozy.test').storage();
+    await assertFails(getBytes(ref(storage, `companies/${COMPANY_A}/products/logo.png`)));
+  });
+
+  it('cross-company access to a case-scoped document is denied (canReadScopedDocuments/canWriteScopedDocuments both gate on currentUserCompanyId() == companyId)', async () => {
+    // USER_C's own company is CO-C, but the path below claims CO-A as the
+    // owning company for the same CASE-C1 id — the company/companyId
+    // mismatch, not the case document itself, is what must deny this.
+    const storage = ctx(UID_USER_C, 'user.c@neozy.test').storage();
+    const path = `companies/${COMPANY_A}/cases/CASE-C1/documents/reg.pdf`;
+    await assertFails(uploadBytes(ref(storage, path), bytes));
+    await assertFails(getBytes(ref(storage, path)));
+  });
+
+  it('Director (own company) can READ a case-scoped document but is DENIED write — view-only, per canWriteScopedDocuments excluding Director', async () => {
+    const path = `companies/${COMPANY_C}/cases/CASE-C1/documents/reg.pdf`;
+    await env.withSecurityRulesDisabled(async (rulesCtx) => {
+      await uploadBytes(ref(rulesCtx.storage(), path), bytes);
+    });
+    const storage = ctx(UID_DIRECTOR_C, 'director.c@neozy.test').storage();
+    await assertSucceeds(getBytes(ref(storage, path)));
+    await assertFails(uploadBytes(ref(storage, path), bytes));
+  });
+
+  it('Accounts (own company) is DENIED both read and write on a case-scoped document', async () => {
+    const path = `companies/${COMPANY_C}/cases/CASE-C1/documents/reg.pdf`;
+    await env.withSecurityRulesDisabled(async (rulesCtx) => {
+      await uploadBytes(ref(rulesCtx.storage(), path), bytes);
+    });
+    const storage = ctx(UID_ACCOUNTS_C, 'accounts.c@neozy.test').storage();
+    await assertFails(getBytes(ref(storage, path)));
+    await assertFails(uploadBytes(ref(storage, path), bytes));
+  });
+
+  it('an authenticated, otherwise-legitimate actor is denied on a path with no matching rule (implicit fail-closed default, e.g. a top-level path outside companies/)', async () => {
+    const storage = ctx(UID_USER_C, 'user.c@neozy.test').storage();
+    await assertFails(uploadBytes(ref(storage, 'unmatched-top-level-file.txt'), bytes));
   });
 });

@@ -22,8 +22,26 @@ export interface AttendanceCheckSubRecord {
   /** GPS evidence captured at the time of the event. Absent for `source: 'manual_admin'` entries. */
   location?: GeoEvidence;
 
-  /** ID of the approved attendance location (Warehouse) used for geofence eval */
+  /** ID of the approved attendance location (Warehouse or Company) used for geofence eval */
   approvedLocationId?: string;
+
+  /** Name of the matched Warehouse/Company, denormalized at write time so the
+   * Attendance detail view never needs a second fetch (and keeps showing the
+   * name that was actually used, even if the location is later renamed). */
+  approvedLocationName?: string;
+
+  /** Whether the matched location was the employee's assigned Warehouse or the Company fallback. */
+  approvedLocationSource?: 'warehouse' | 'company';
+
+  /** Saved/verified address of the matched Warehouse/Company at check-in/out time. */
+  approvedLocationAddress?: string;
+
+  /** The geofence radius (metres) that was actually used for this evaluation. */
+  geofenceRadiusMeters?: number;
+
+  /** Latitude/longitude of the matched Warehouse/Company's configured centre (distinct from the employee's own recorded GPS in `location`). */
+  approvedLocationLatitude?: number;
+  approvedLocationLongitude?: number;
 
   /** Distance from the user to the attendance location center, in meters */
   distanceFromLocationMeters?: number;
@@ -31,11 +49,54 @@ export interface AttendanceCheckSubRecord {
   /** Whether the point was within the configured geofence radius */
   withinGeofence: boolean;
 
-  /** Whether GPS accuracy met the company threshold */
+  /**
+   * Whether GPS accuracy was usable at all (finite, positive, and within
+   * `gpsAccuracyCeilingMeters`). Renamed in meaning (not in field name, to
+   * avoid a schema migration) by the production geofence-accuracy fix:
+   * this used to mean "accuracy met the strict target threshold" — a
+   * single hard gate independent of distance, which rejected legitimate
+   * nearby check-ins purely for having a noisy GPS chip. It now means
+   * "accuracy was good enough to reason about at all" — the actual
+   * within-fence decision, including how the device's uncertainty was
+   * weighed against distance, is recorded in `geoConfidence` below.
+   */
   accuracyAccepted: boolean;
 
-  /** How the check-in/out was captured. Extensible for future 'biometric'|'qr'|'nfc' */
-  source: 'gps' | 'manual_admin';
+  /**
+   * Confidence grade behind `withinGeofence`, from
+   * `evaluateGeofenceWithConfidence()` (src/lib/geo.ts) — 'high' (worst
+   * case still inside the fence), 'medium' (best estimate inside),
+   * 'low' (best estimate outside, but plausible given reported GPS
+   * uncertainty), or 'none' (rejected). Absent on pre-fix records and on
+   * `source: 'manual_admin'` entries, which never went through geofence
+   * evaluation at all.
+   */
+  geoConfidence?: 'high' | 'medium' | 'low' | 'none';
+
+  /**
+   * How the check-in/out was captured. Extensible for future 'qr'|'nfc'.
+   * Phase 8 (Face Attendance + DeepFace Master Plan §14) adds `'biometric'`
+   * — additive only; existing `'gps'`/`'manual_admin'` values and their
+   * behavior are completely unchanged. A `'biometric'` check-in/out still
+   * captures and validates GPS exactly like the `'gps'` path (§12: biometric
+   * verification SUPPLEMENTS GPS attendance, it never replaces it) — this
+   * field only records which additional identity/liveness gate was passed
+   * before the existing GPS pipeline ran.
+   */
+  source: 'gps' | 'manual_admin' | 'biometric';
+
+  /**
+   * Phase 8 addition. Present only when `source === 'biometric'`. Carries
+   * the server-derived proof of the verification event this check-in/out
+   * was gated on — `AttendanceService.checkIn()`/`checkOut()` independently
+   * re-reads the caller's own `biometric_face_references` document and
+   * requires this value to match its `lastVerifiedAt` field exactly, within
+   * a short freshness window, before accepting the write (see that file's
+   * `validateBiometricVerificationClaim()`) — never trusted as a bare claim.
+   * Never a raw embedding, distance, or any other biometric payload — just
+   * an ISO timestamp string, for traceability only.
+   */
+  biometricVerificationId?: string;
 
   /** Optional device info for auditability */
   deviceInfo?: {
@@ -123,11 +184,45 @@ export interface AttendanceRecord extends BaseRecord {
 // This interface is defined here so Phase 6/7 can reference it;
 // actual Settings persistence is Phase 9.
 export interface AttendanceSettings {
-  /** Fallback geofence radius when Warehouse has no geofenceRadiusMeters */
+  /**
+   * Default Geofence Radius pre-filled when an admin adds a NEW Warehouse
+   * or configures the Company attendance location — a UI convenience, not
+   * a runtime fallback. A location's own `geofenceRadiusMeters` remains
+   * genuinely required for that location to be attendance-ready
+   * (`AttendanceService.hasValidGeo()`/`resolveAttendanceLocation()` never
+   * substitute this value for a missing per-location radius — see
+   * docs/audits/GEO_ATTENDANCE_CURRENT_STATE_AUDIT.md Finding F1 for why
+   * that specific fallback was rejected as the fix).
+   */
   geofenceRadiusDefaultMeters: number;
 
-  /** Reject GPS captures worse than this accuracy (meters) */
+  /**
+   * Target/"good" GPS accuracy (meters). `captureLocationWithRetry()` aims
+   * for this and stops retrying early once achieved; it is also the
+   * boundary between the 'good' and 'acceptable' GPS quality tiers shown
+   * to the user. It is NOT a hard reject threshold — see
+   * `gpsAccuracyCeilingMeters` for that.
+   */
   gpsAccuracyThresholdMeters: number;
+
+  /**
+   * Hard-reject accuracy ceiling (meters) — a reading worse than this is
+   * treated as too unreliable to reason about at all and is rejected
+   * outright ('gps_unusable'), regardless of distance. Below this ceiling,
+   * accuracy is folded into the geofence decision as uncertainty rather
+   * than gated independently — see `evaluateGeofenceWithConfidence()`
+   * (src/lib/geo.ts) and AttendanceService.checkIn()/checkOut().
+   */
+  gpsAccuracyCeilingMeters: number;
+
+  /**
+   * Maximum acceptable spread (meters) between the multiple GPS readings
+   * `captureLocationWithRetry()` collects within one capture window. A
+   * larger spread means the device's own fixes disagree with each other
+   * beyond what normal GPS noise explains — rejected as
+   * 'location_inconsistent' rather than silently averaged/trusted.
+   */
+  locationConsistencyMaxSpreadMeters: number;
 
   /** Minutes after shiftStartTime before marked Late */
   gracePeriodMinutes: number;
@@ -156,6 +251,8 @@ export interface AttendanceSettings {
 export const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettings = {
   geofenceRadiusDefaultMeters: 200,
   gpsAccuracyThresholdMeters: 50,
+  gpsAccuracyCeilingMeters: 150,
+  locationConsistencyMaxSpreadMeters: 250,
   gracePeriodMinutes: 15,
   shiftStartTime: '09:00',
   shiftEndTime: '18:00',

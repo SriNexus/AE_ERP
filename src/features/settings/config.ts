@@ -60,7 +60,7 @@ export const SETTINGS_SECTIONS: SettingsSectionConfig[] = [
   { id: 'documents',         label: 'Documents',           description: 'Templates, prefixes & signatures',                  icon: FileText },
   { id: 'email',             label: 'Email',               description: 'Gmail compose templates & defaults',                icon: Mail, adminOnly: true },
   { id: 'about-erp',         label: 'About ERP',           description: 'Version, license & system info',                    icon: Info },
-  { id: 'attendance',        label: 'Attendance',          description: 'GPS check-in policy, shift timing & rules',        icon: Clock, adminOnly: true, showInNavigation: false },
+  { id: 'attendance',        label: 'Attendance',          description: 'GPS check-in policy, shift timing & rules',        icon: Clock, adminOnly: true },
 
   // Retained as route/persistence compatibility IDs; omitted from navigation.
   { id: 'overview',          label: 'Overview',            description: 'ERP system at a glance',                            icon: LayoutDashboard, showInNavigation: false },

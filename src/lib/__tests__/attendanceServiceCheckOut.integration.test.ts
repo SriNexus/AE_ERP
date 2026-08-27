@@ -125,6 +125,20 @@ describe('AttendanceService.checkOut() — real invocation', () => {
     expect(typeof result.record?.workingHours).toBe('number');
     expect(result.record!.workingHours!).toBeGreaterThan(0);
     expect(mockUpdateDoc).toHaveBeenCalledTimes(1);
+
+    // Phase 9 (DI-02 sweep): the wh-001 fixture has no address field, so
+    // checkOutRecord.approvedLocationAddress is undefined — prove the actual
+    // payload passed to updateDoc() never contains an undefined-valued key
+    // (the key must be ABSENT, not present-with-undefined), matching the
+    // fix applied to this raw updateDoc() call site.
+    const [, writtenPayload] = mockUpdateDoc.mock.calls[0];
+    const checkOut = writtenPayload.checkOut;
+    expect(checkOut).toBeDefined();
+    for (const [key, value] of Object.entries(checkOut)) {
+      expect(value, `checkOut.${key} must not be undefined`).not.toBeUndefined();
+    }
+    expect('approvedLocationAddress' in checkOut).toBe(false);
+    expect(checkOut.approvedLocationId).toBe('wh-001');
   });
 
   it('SUCCEEDS (does not block) when outside the geofence, but flags withinGeofence=false', async () => {
@@ -140,7 +154,12 @@ describe('AttendanceService.checkOut() — real invocation', () => {
     expect(mockUpdateDoc).toHaveBeenCalledTimes(1);
   });
 
-  it('SUCCEEDS (does not block) when accuracy is poor, but flags accuracyAccepted=false', async () => {
+  it('SUCCEEDS (does not block) with moderate accuracy — accuracyAccepted now means "usable", not "met the old strict target"', async () => {
+    // Production fix: accuracyAccepted's meaning changed (see
+    // AttendanceCheckSubRecord's doc comment) — it now reports whether the
+    // accuracy was usable at all (below the ceiling), since the actual
+    // within-fence decision folds accuracy in as uncertainty instead of
+    // gating on it independently. 149m is below the default 150m ceiling.
     mockGetDocs.mockResolvedValue(existingCheckedInRecord());
     const { AttendanceService } = await import('../../services/AttendanceService');
     const location = makeGeoEvidence({ accuracy: 149 }); // the exact real-world reading
@@ -148,7 +167,20 @@ describe('AttendanceService.checkOut() — real invocation', () => {
     const result = await AttendanceService.checkOut(location);
 
     expect(result.success).toBe(true);
+    expect(result.record?.checkOut?.accuracyAccepted).toBe(true);
+    expect(result.record?.checkOut?.geoConfidence).toBe('medium');
+  });
+
+  it('SUCCEEDS (does not block) when accuracy exceeds the ceiling, but flags accuracyAccepted=false', async () => {
+    mockGetDocs.mockResolvedValue(existingCheckedInRecord());
+    const { AttendanceService } = await import('../../services/AttendanceService');
+    const location = makeGeoEvidence({ accuracy: 480 }); // beyond the default 150m ceiling
+
+    const result = await AttendanceService.checkOut(location);
+
+    expect(result.success).toBe(true);
     expect(result.record?.checkOut?.accuracyAccepted).toBe(false);
+    expect(result.record?.checkOut?.geoConfidence).toBe('medium'); // falls back to plain distance<=radius when accuracy is unusable
   });
 
   it('rejects with no_check_in when the employee has not checked in today', async () => {

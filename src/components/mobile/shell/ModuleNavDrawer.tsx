@@ -21,13 +21,14 @@ import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { X, ChevronDown, LogOut } from 'lucide-react';
 import { cn } from '../../../utils/cn';
-import { canDo } from '../../../lib/permissions';
+import { usePermissions } from '../../../lib/permissions';
 import { isModuleAllowedForBusinessMode, resolveBusinessMode } from '../../../lib/companyBusinessMode';
 import { ERP_NAV_ITEMS, type NavItem } from '../../layout/navigationConfig';
 import { CompanySwitcher } from '../../../features/company/components/CompanySwitcher';
 import { ModuleGrid } from '../app/ModuleGrid';
 import { useContextResolver } from '../context/ContextResolver';
 import { useAppStore } from '../../../store/useAppStore';
+import { useOwnerAccess } from '../../auth/OwnerRoute';
 
 type DrawerMode = 'navigation' | 'app-launcher';
 
@@ -69,19 +70,31 @@ export function ModuleNavDrawer({ open, onClose, mode = 'navigation' }: ModuleNa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname]);
 
-  // Permission-filtered nav items (only used for 'navigation' mode)
+  // Permission-filtered nav items (only used for 'navigation' mode).
+  // Mirrors Sidebar.tsx's visibleNav exactly — desktop and mobile must
+  // consume the same authorization result (ownerOnly, permission cache
+  // readiness, business-mode) so restricted pages (Platform, Group
+  // Administration, Audit Logs, AI Intelligence) never appear on mobile
+  // when they're hidden on desktop, and vice versa. No demo-specific
+  // filtering — Neozy Demo's own role/permission resolution now governs
+  // its nav visibility the same way any other Group's does (docs/reports/
+  // NEOZY_DEMO_GROUP_CONVERSION_REPORT.md).
+  const perms = usePermissions();
+  const hasOwnerAccess = useOwnerAccess();
   const businessMode = resolveBusinessMode(useAppStore((state) => state.company));
   const visibleNav = ERP_NAV_ITEMS.reduce<NavItem[]>((acc, item) => {
     if (item.path) {
-      if (item.module && !canDo('view', item.module)) return acc;
+      if (item.ownerOnly && !hasOwnerAccess) return acc;
+      if (item.module && !perms.canView(item.module)) return acc;
       if (item.module && !isModuleAllowedForBusinessMode(item.module, businessMode)) return acc;
       acc.push(item);
       return acc;
     }
-    const kids = (item.children || []).filter(c =>
-      (!c.module || canDo('view', c.module)) &&
-      (!c.module || isModuleAllowedForBusinessMode(c.module, businessMode))
-    );
+    const kids = (item.children || []).filter(c => {
+      if (c.ownerOnly && !hasOwnerAccess) return false;
+      if (c.module && !isModuleAllowedForBusinessMode(c.module, businessMode)) return false;
+      return !c.module || perms.canView(c.module);
+    });
     if (kids.length === 0) return acc;
     acc.push({ ...item, children: kids });
     return acc;

@@ -87,7 +87,21 @@ function createDefaultDependencies(): AuthDependencies {
   let db: ReturnType<typeof getAdminDb> | null = null;
   const getDb = () => db || (db = getAdminDb());
   return {
-    verifyIdToken: (token) => getAuth().verifyIdToken(token),
+    // `getAuth()` (no-arg) resolves the Admin SDK's DEFAULT app via
+    // `getApp()`, which throws "The default Firebase app does not exist" if
+    // `initializeApp()` was never called for this module instance — and the
+    // ONLY place that happens in this codebase is inside `getAdminDb()`
+    // (api/_lib/firebase.ts). `getDb()` is called first here, purely for
+    // its `initializeApp()` side effect (idempotent — a no-op once the app
+    // exists), to guarantee that ordering regardless of call order
+    // elsewhere. Without this, the very first Admin SDK call on a fresh
+    // serverless instance throws here, is silently swallowed by
+    // `verifyAuthToken()`'s catch-all below, and every Bearer-token-
+    // authenticated route (not just biometrics) returns a bare 401 — this
+    // was the actual runtime cause of a real "Could not confirm your face
+    // registration status" report that turned out to have nothing to do
+    // with the network.
+    verifyIdToken: (token) => { getDb(); return getAuth().verifyIdToken(token); },
     readMapping: async (authUid) => {
       const snap = await getDb().collection('user_auth_maps').doc(authUid).get();
       return (snap.exists ? snap.data() : null) as Record<string, unknown> | null;
@@ -242,7 +256,18 @@ export async function resolveAuthenticatedUser(
 export async function verifyAuthToken(authHeader?: string | null, apiKeyHeader?: string | null): Promise<AuthenticatedUser | null> {
   try {
     return await resolveAuthenticatedUser(authHeader, apiKeyHeader);
-  } catch {
+  } catch (error) {
+    // Server-side-only diagnostic (never sent to the client — the caller
+    // only ever sees a generic 401 from this function returning null, by
+    // design, so an unauthenticated request can't learn WHY auth failed).
+    // Logs only the error's own name/message/code — never a token, never
+    // request headers, never credential contents. Without this, a genuine
+    // server-side misconfiguration (e.g. a missing Admin SDK credential, or
+    // the app-initialization-ordering bug this same file fixes above) was
+    // completely invisible — every failure looked identical from outside.
+    const code = error instanceof AuthResolutionError ? error.code : undefined;
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[auth] verifyAuthToken failed${code ? ` (${code})` : ''}: ${message}`);
     return null;
   }
 }

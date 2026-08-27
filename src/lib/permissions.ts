@@ -1,7 +1,6 @@
 import { useAppStore } from '../store/useAppStore';
 import type { UserRole } from '../types';
 import { canAccessProjectRecord, getProjectVisibilityMode, type ProjectVisibilityRecord } from './projectVisibility';
-import { isOfficialDemoCompany } from '../config/demo';
 
 export type Permission = 'view' | 'create' | 'edit' | 'delete' | 'cancel' | 'approve' | 'disburse' | 'export' | 'import' | 'view_pricing';
 export type Module =
@@ -175,26 +174,17 @@ function getCachedRole(roleName: string) {
 
   const role = cache.roles[normalizedKey(roleName)];
   if (!role) {
-    // Fallback: provide full Admin permissions when role document is missing
-    // ONLY for the demo company — never grant full access to production tenants.
-    const state = useAppStore.getState();
-    const companyId = state.user?.companyId || state.activeCompanyId;
-    if (isOfficialDemoCompany(companyId)) {
-      return {
-        name: roleName,
-        schemaVersion: 1 as const,
-        description: 'Demo fallback role definition',
-        permissions: ALL_MODULES.reduce((acc, module) => {
-          acc[module] = {
-            view: true, create: true, edit: true, delete: true,
-            cancel: true, approve: true, disburse: true, export: true, import: true,
-            view_pricing: true,
-            visibility: 'all' as const,
-          };
-          return acc;
-        }, {} as Record<string, any>),
-      } as FirestoreRoleDocument;
-    }
+    // Demo-to-Group conversion: this used to fabricate a full-Admin role
+    // definition on the fly whenever a role document was missing, but ONLY
+    // for the demo company — an if(isDemo)-style bypass of the normal
+    // authorization model. Removed: Neozy Demo now has a real, persisted
+    // `company-demo-neozy_Admin` role document (seeded by
+    // scripts/demo/datasets/foundation.ts and backfilled in production),
+    // the same as every other company's Admin role, so this fallback is
+    // both unnecessary and — per the task's "no special-case for normal ERP
+    // behavior" requirement — no longer appropriate to keep. A genuinely
+    // missing role document now fails closed for Neozy Demo exactly like it
+    // already does for every other company.
     return null;
   }
 
@@ -259,11 +249,13 @@ export function canDo(first: Permission | Module, second: Permission | Module, r
 
   const modulePermissions = resolveModulePermissions(roleDocument.permissions, module);
   if (!modulePermissions) {
-    // For demo companies, unknown modules default to full access
-    // This handles modules added after the role documents were seeded in Firestore
-    if (isOfficialDemoCompany(state.user?.companyId)) {
-      return ALL_PERMISSIONS.includes(action as Permission);
-    }
+    // Demo-to-Group conversion: Neozy Demo used to get an automatic
+    // full-access fallback for any module missing from its role document —
+    // removed. It now fails closed for a missing module key exactly like
+    // every other company (a real Group's Admin gets the same denial until
+    // the module is added to their role doc / self-heal runs) — per the
+    // task's "must be indistinguishable from a normal Group" requirement,
+    // this is not a case where Neozy Demo should get special treatment.
     diagnostic('missing-module-permission', `role=${resolvedRole}; module=${module}`);
     return false;
   }

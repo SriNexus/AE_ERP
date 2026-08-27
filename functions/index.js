@@ -25,25 +25,27 @@
  * resolved via `user_auth_maps`. It performs no Firestore reads or writes of
  * its own beyond the triggering event, and is deployed with the minimum IAM
  * role required (Firebase Authentication Admin).
+ *
+ * Face Attendance + DeepFace Master Plan, Phase 9 addition: an ADDITIVE
+ * side effect (§9's own required wording) revoking the deactivated user's
+ * `biometric_face_references` document, if one exists — this function's own
+ * primary behavior above (refresh-token revocation) is completely
+ * unmodified; the new logic only runs after it, in its own guarded,
+ * independently-failing block, per §9's own "no other Cloud Function may be
+ * introduced" constraint (extending this ONE existing trigger, not adding a
+ * second one).
  */
 const { onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { initializeApp } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
 const { getFirestore } = require('firebase-admin/firestore');
+const {
+  isDeactivated,
+  isDeactivationTransition,
+  buildBiometricRevocationPatch,
+} = require('./biometricRevocation');
 
 initializeApp();
-
-// Matches firestore.rules' actorIsActive() inactive set EXACTLY (both the
-// lowercase canonical forms from authIdentity.validateProfile and the
-// capitalized forms the Users workspace actually writes, 'Inactive'/
-// 'Suspended').
-const INACTIVE_STATUSES = ['inactive', 'suspended', 'disabled', 'Inactive', 'Suspended', 'Disabled'];
-
-function isDeactivated(data) {
-  if (!data) return false;
-  const status = typeof data.status === 'string' ? data.status.trim() : '';
-  return INACTIVE_STATUSES.includes(status) || data.isDeleted === true;
-}
 
 exports.onUserDeactivated = onDocumentUpdated('users/{userId}', async (event) => {
   const before = event.data.before.data();
@@ -52,7 +54,7 @@ exports.onUserDeactivated = onDocumentUpdated('users/{userId}', async (event) =>
   // Only react to a transition INTO deactivation. Re-activation, creation,
   // and edits that keep the user active are no-ops (and an already-deactivated
   // doc being edited stays deactivated — the rules gate it regardless).
-  if (isDeactivated(before) || !isDeactivated(after)) {
+  if (!isDeactivationTransition(before, after)) {
     return;
   }
 
@@ -74,7 +76,6 @@ exports.onUserDeactivated = onDocumentUpdated('users/{userId}', async (event) =>
 
   if (uids.size === 0) {
     console.log(`[onUserDeactivated] No auth mapping found for user ${userId}; nothing to revoke.`);
-    return;
   }
 
   for (const uid of uids) {
@@ -84,5 +85,29 @@ exports.onUserDeactivated = onDocumentUpdated('users/{userId}', async (event) =>
     } catch (error) {
       console.error(`[onUserDeactivated] Failed to revoke refresh tokens for auth uid ${uid}:`, error);
     }
+  }
+
+  // ── Face Attendance + DeepFace Master Plan, Phase 9: revoke the
+  // biometric reference (§9's retention/deletion policy), if one exists.
+  // Independent try/catch — a failure here must never be conflated with,
+  // or block, the (already-completed) refresh-token revocation above.
+  // Idempotent by construction: only writes when an ACTIVE reference
+  // exists — a repeat/redelivered event, or a user who was already
+  // revoked (e.g. by Admin/HR action) or never enrolled at all, is a safe
+  // no-op, never a duplicate/conflicting write and never an error. Uses a
+  // read-then-conditional-update (not a blind `set(..., {merge:true})`),
+  // deliberately — the latter would risk fabricating a malformed partial
+  // `biometric_face_references` document (missing required §9 fields like
+  // `embedding`/`companyId`) for a user who never enrolled at all.
+  try {
+    const bioRef = db.collection('biometric_face_references').doc(userId);
+    const bioSnap = await bioRef.get();
+    if (bioSnap.exists && bioSnap.data().status === 'active') {
+      const patch = buildBiometricRevocationPatch(after, new Date().toISOString());
+      await bioRef.update(patch);
+      console.log(`[onUserDeactivated] Revoked biometric_face_references for user ${userId}.`);
+    }
+  } catch (error) {
+    console.error(`[onUserDeactivated] Failed to revoke biometric_face_references for user ${userId}:`, error);
   }
 });

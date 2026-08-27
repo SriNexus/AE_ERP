@@ -77,7 +77,13 @@ const text = (v) => (typeof v === 'string' ? v.trim() : '');
       id: DEMO_GROUP_ID,
       data: {
         id: DEMO_GROUP_ID,
-        name: 'Neozy Demo Group',
+        // Demo-to-Group conversion (docs/reports/NEOZY_DEMO_GROUP_CONVERSION_REPORT.md):
+        // "Neozy Demo", not "Neozy Demo Group" — this only matters for a
+        // fresh/disaster-recovery environment where this script creates the
+        // doc for the first time; on the existing production project the
+        // doc already exists (this branch is skipped) and was renamed by
+        // scripts/migrate-demo-to-group.cjs instead.
+        name: 'Neozy Demo',
         shortName: 'Demo',
         status: 'Active',
         isDefault: false,

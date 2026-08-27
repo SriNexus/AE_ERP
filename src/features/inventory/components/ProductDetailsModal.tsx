@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getDownloadURL, getStorage, ref, uploadBytesResumable } from 'firebase/storage';
-import { assertTenantSafeUploadPath } from '../../../lib/demoUploadPolicy';
 import { Archive, Camera, Copy, Edit2, ImagePlus, PackagePlus, Trash2, Upload, Warehouse, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -211,7 +210,6 @@ export function ProductDetailsModal({
       if (!pendingUpload) throw new Error('No file selected');
       const storage = getStorage();
       const path = `products/${product.companyId || activeCompanyId}/${product.id}/${Date.now()}-${pendingUpload.file.name}`;
-      assertTenantSafeUploadPath(path, product.companyId || activeCompanyId);
       const fileRef = ref(storage, path);
       setUploading(true);
       setUploadProgress(0);

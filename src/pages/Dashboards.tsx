@@ -6,8 +6,9 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { getAll, fmtCompactCurrency } from '../lib/firestore';
+import { getAll, fmtCompactCurrency, resolveWriteCompanyId } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';
+import { getProductsCount } from '../lib/dashboardAggregation';
 import { useState } from 'react';
 import { Card, CardHeader, CardTitle, CardBody, PageHeader, StatCard } from '../components/ui/Card';
 import { useAppStore } from '../store/useAppStore';
@@ -54,13 +55,20 @@ export default function Dashboards() {
   const [tab, setTab] = useState<Tab>('Sales');
   const { company } = useAppStore();
   const sym = company.currencySymbol;
+  // Canonical tenant resolution — never the neutral 'default' placeholder
+  // (feeding raw activeCompanyId into a companyId equality query caused the
+  // documented Admin 403 storm; see Home.tsx).
+  const companyId = resolveWriteCompanyId();
 
   const { data: leads=[]      } = useQuery({ queryKey:['leads'],      queryFn:()=>getAll(COLLECTIONS.LEADS),            staleTime:60000 });
   const { data: orders=[]     } = useQuery({ queryKey:['orders'],     queryFn:()=>getAll(COLLECTIONS.ORDERS),           staleTime:60000 });
   const { data: customers=[]  } = useQuery({ queryKey:['customers'],  queryFn:()=>getAll(COLLECTIONS.CUSTOMERS),        staleTime:60000 });
   const { data: invoices=[]   } = useQuery({ queryKey:['invoices'],   queryFn:()=>getAll(COLLECTIONS.PROFORMA_INVOICES),staleTime:60000 });
   const { data: payments=[]   } = useQuery({ queryKey:['payments'],   queryFn:()=>getAll(COLLECTIONS.PAYMENTS),         staleTime:60000 });
-  const { data: products=[]   } = useQuery({ queryKey:['products'],   queryFn:()=>getAll(COLLECTIONS.PRODUCTS),         staleTime:60000 });
+  // Phase 12 (DEFECT-002): Products is used on this page ONLY as a raw count
+  // (see dashboardAggregation.ts) — a count-aggregation query instead of a
+  // full-collection fetch.
+  const { data: productsCount=0 } = useQuery({ queryKey:['dashboards-products-count', companyId], queryFn:()=>getProductsCount(companyId), staleTime:60000 });
   const { data: stock=[]      } = useQuery({ queryKey:['stock'],      queryFn:()=>getAll(COLLECTIONS.STOCK),            staleTime:60000 });
   const { data: dispatches=[] } = useQuery({ queryKey:['dispatch'],   queryFn:()=>getAll(COLLECTIONS.DISPATCH),         staleTime:60000 });
   const { data: employees=[]  } = useQuery({ queryKey:['employees'],  queryFn:()=>getAll(COLLECTIONS.EMPLOYEES),        staleTime:60000 });
@@ -254,7 +262,7 @@ export default function Dashboards() {
       {tab === 'Inventory' && (
         <div className="space-y-5 animate-fadeIn">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <StatCard label="Products"    value={fmtCompactNumber(products.length)}   icon={<Package className="h-5 w-5"/>}       color="purple"/>
+            <StatCard label="Products"    value={fmtCompactNumber(productsCount)}     icon={<Package className="h-5 w-5"/>}       color="purple"/>
             <StatCard label="Stock Items" value={fmtCompactNumber(stock.length)}      icon={<Package className="h-5 w-5"/>}       color="blue"/>
             <StatCard label="Low Stock"   value={fmtCompactNumber(lowStock.length)}   icon={<AlertTriangle className="h-5 w-5"/>} color="red" sub="needs reorder"/>
             <StatCard label="Dispatches"  value={fmtCompactNumber(dispatches.length)} icon={<Truck className="h-5 w-5"/>}         color="amber"/>

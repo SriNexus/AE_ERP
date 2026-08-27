@@ -669,7 +669,7 @@ function buildTaxInvoices():DemoDocument[]{
     const invoiceNumber=`TINV-DEMO-${slug}`;
     const inv=doc('tax_invoices',invoiceNumber,{
       invoiceNumber,serialNumber:Number(slug.split('-')[1]),fiscalYear:'26-27',sourceType,sourceId:orderId,orderId,
-      date,status,companyName:'Neozy Solar EPC Demo',companyGst:demoGstin(0,'27'),companyState:'Maharashtra',
+      date,status,companyName:'Neozy Demo',companyGst:demoGstin(0,'27'),companyState:'Maharashtra',
       customerId,customerName,customerGst:'',customerState,placeOfSupply:customerState,items,
       subtotal,cgst,sgst,igst,totalTax,total,notes:'Fictional demo tax invoice; no real GST filing occurs.',
       ...(status==='Issued'?{issuedAt:demoAt(96)}:{}),

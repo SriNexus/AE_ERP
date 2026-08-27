@@ -13,8 +13,6 @@ import { buildOwnershipVisibilityQueryPlan } from './ownershipVisibility';
 import type { Visibility } from './permissions';
 import { formatGeneralDate, formatGeneralNumber, getGeneralSettingsRuntime } from '../features/settings/generalRuntime';
 import { filterManageableUsers } from './ownerAccess';
-import { DEMO_COMPANY_ID } from '../config/demo';
-import { isDemoCapabilityAllowed } from './demoCapabilityPolicy';
 import { getCachedPartnerDocId, resolveCurrentPartnerDocId } from './partnerOwnership';
 
 export type DocWithId<T = DocumentData> = T & { id: string };
@@ -752,43 +750,11 @@ export async function getOne<T = DocumentData>(col: string, id: string): Promise
   return applyAccessFilters(col, [docData], partnerDocId)[0] ?? null;
 }
 
-/**
- * Check if the current user is in the demo company and, if so, that the
- * 'business-crud' capability is allowed (blocks the genuinely-restricted
- * categories — company-admin, user-admin, system-counter, stock-ledger-
- * mutation, etc. — per demoCapabilityPolicy.ts's real allow-list).
- *
- * Phase 15: this function used to ALSO enforce a hard per-collection cap
- * (a fixed ceiling of 5 non-deleted documents, formerly a named constant in
- * config/demo.ts) — counting every non-deleted document in the collection
- * and throwing once the cap was reached. That directly contradicted
- * the Blueprint's own binding principle (§14: "full create/edit/soft-delete
- * capability with no artificial ceiling — seeded records plus user-created
- * records must coexist") and was, in practice, a hard block on ALL demo
- * creation: every collection the seed data touches already has more than 5
- * seeded records (Leads: 16, Customers: 11, Projects: 10, …), so this check
- * would fire on literally the first create attempt in any of them. This is
- * the exact mechanism the Blueprint's Appendix E (item 5) flagged as
- * `[UNKNOWN — REQUIRES IMPLEMENTATION-TIME VERIFICATION]` — located and
- * removed here, not merely raised to a bigger number (a bigger number is
- * still an artificial ceiling; the Blueprint requires none).
- */
-async function enforceDemoRecordLimit(col: string): Promise<void> {
-  const state = useAppStore.getState();
-  const companyId = (state.activeCompanyId === 'all' ? state.company?.id : state.activeCompanyId) || state.user?.companyId;
-  if (companyId !== DEMO_COMPANY_ID) return;
-  if (!isDemoCapabilityAllowed(companyId, 'business-crud')) {
-    throw new Error('This operation is not available in Demo Mode.');
-  }
-}
-
 // ── CREATE (auto-id) ──────────────────────────────────────────
 export async function createDoc<T extends DocumentData>(col: string, data: T): Promise<DocWithId<T>> {
   if (!firebaseEnv.isConfigured) {
     throw new Error(NOT_CONFIGURED_MSG);
   }
-
-  await enforceDemoRecordLimit(col);
 
   const state = useAppStore.getState();
   // Canonical write-time tenant: an explicit invalid companyId ('default',
@@ -830,8 +796,6 @@ export async function createDocWithId<T extends DocumentData>(col: string, id: s
   if (!firebaseEnv.isConfigured) {
     throw new Error(NOT_CONFIGURED_MSG);
   }
-
-  await enforceDemoRecordLimit(col);
 
   const state = useAppStore.getState();
   // Canonical write-time tenant: same fail-closed policy as createDoc — an
@@ -1031,11 +995,6 @@ export async function hardDelete(col: string, id: string): Promise<void> {
 export async function batchCreate(col: string, items: DocumentData[]): Promise<void> {
   if (!firebaseEnv.isConfigured) {
     throw new Error(NOT_CONFIGURED_MSG);
-  }
-
-  // Enforce the demo business-crud capability gate for batch creates (see enforceDemoRecordLimit()'s own doc comment — Phase 15 removed the numeric per-collection cap this used to also apply here).
-  if (items.length > 0) {
-    await enforceDemoRecordLimit(col);
   }
 
   const state = useAppStore.getState();

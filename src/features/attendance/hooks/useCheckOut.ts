@@ -15,8 +15,12 @@
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { captureLocationWithRetry, type GeoCaptureError } from '../../../lib/geo';
+import { useState } from 'react';
+import { captureLocationWithRetry, type GeoCaptureError, type CaptureProgressInfo } from '../../../lib/geo';
 import { AttendanceService, AttendanceCheckError } from '../../../services/AttendanceService';
+import { loadSettings } from '../../settings/services/settingsService';
+import { normalizeAttendanceSettings } from '../../settings/attendanceRuntime';
+import { describeCheckOutToast } from '../toastMessages';
 import toast from 'react-hot-toast';
 import type { AttendanceCheckResult } from '../types';
 
@@ -53,6 +57,8 @@ export interface UseCheckOutReturn {
   errorReason: string | null;
   /** Whether a check-out is currently in progress */
   isCapturing: boolean;
+  /** Live GPS-acquisition progress — see useCheckIn's `progress` for details. */
+  progress: CaptureProgressInfo | null;
   /** Trigger the check-out flow */
   checkOut: () => void;
   /** Reset to idle state */
@@ -65,18 +71,20 @@ export interface UseCheckOutReturn {
 
 export function useCheckOut(): UseCheckOutReturn {
   const qc = useQueryClient();
+  const [progress, setProgress] = useState<CaptureProgressInfo | null>(null);
 
   const mutation = useMutation<AttendanceCheckResult, Error, void>({
     mutationFn: async () => {
+      setProgress(null);
+      const settings = normalizeAttendanceSettings(await loadSettings('attendance').catch(() => null));
+
       // ── Step 1: Capture GPS (bounded retry for accuracy) ───
       let location;
       try {
         location = await captureLocationWithRetry({
           enableHighAccuracy: true,
-          timeoutMs: 10_000,
-          totalTimeoutMs: 20_000,
-          retryIntervalMs: 2_000,
-          targetAccuracyMeters: 50,
+          targetAccuracyMeters: settings.gpsAccuracyThresholdMeters,
+          onProgress: (info) => setProgress(info),
         });
       } catch (err) {
         if (err && typeof err === 'object' && 'reason' in err) {
@@ -92,12 +100,14 @@ export function useCheckOut(): UseCheckOutReturn {
     },
     onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['attendance'] });
-      toast.success('Check-out successful!');
+      toast.success(describeCheckOutToast(result.record?.employee || '', result.record?.checkOut, result.record?.workingHours));
+      setProgress(null);
     },
     onError: (err) => {
       if (!(err instanceof AttendanceCheckError)) {
         toast.error('Something went wrong. Please try again.');
       }
+      setProgress(null);
     },
   });
 
@@ -123,8 +133,9 @@ export function useCheckOut(): UseCheckOutReturn {
     record: mutation.data?.record ?? null,
     errorMessage,
     errorReason,
+    progress: mutation.isPending ? progress : null,
     isCapturing: mutation.isPending,
     checkOut: () => mutation.mutate(),
-    reset: () => mutation.reset(),
+    reset: () => { mutation.reset(); setProgress(null); },
   };
 }

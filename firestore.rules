@@ -81,8 +81,32 @@ service cloud.firestore {
       return hasValidAuthMap();
     }
 
+    // ROOT CAUSE (real production report, reproduced live: a Group Admin's
+    // account, and any other account created/migrated before isSuperAdmin
+    // was always stamped, has NO isSuperAdmin field on its users/{id} doc at
+    // all — confirmed by direct field dump of the real reported account).
+    // currentUser().isSuperAdmin == true, unguarded, is exactly the
+    // undefined-map-field-access class this file's own comments repeatedly
+    // warn about elsewhere (hasGroupId/hasCompanyId/roleNotSystemProtected
+    // all guard with keys().hasAny() first) — reproduced directly against
+    // the emulator with the exact real (field-absent) document: evaluating
+    // isSuperAdmin() denied EVERY rule that calls isAdmin() (which calls
+    // this) for that actor, including a trivial roles/{id} field update,
+    // by exhausting the 1000-expression budget rather than short-circuiting
+    // cleanly to false. The FIRST fix used the keys().hasAny()+field-access
+    // two-step pattern (this file's usual convention) — correct, but its
+    // extra expression-node cost, multiplied across this function's several
+    // real call sites plus the users/{userId} rule's OWN two stacked `allow
+    // update` statements plus the emulator's documented wildcard-fallback
+    // re-evaluation, was enough on its own to blow the 1000-expression
+    // budget on a live-reproduced payload (department+role changed
+    // together) that was already right at the edge before this fix existed.
+    // map.get(key, default) is Firestore Rules' own single-expression,
+    // budget-cheaper way to read a possibly-absent field (confirmed valid
+    // and working against the emulator this session) — used here instead.
     function isSuperAdmin() {
-      return isOwnerIdentity() || (hasUserProfile() && currentUser().isSuperAdmin == true);
+      return isOwnerIdentity()
+        || (hasUserProfile() && currentUser().get('isSuperAdmin', false) == true);
     }
 
     // F-13 (Phase 0, Master Plan §9.2): an "active" actor. A deactivated user
@@ -638,6 +662,28 @@ service cloud.firestore {
         && groupIdMatchesCompany(request.resource.data);
     }
 
+    // LEAN update-tenant check for the Phase 2 sensitive-collection role
+    // gates (employees/payroll/payments/banks/commission_records/
+    // settlements). Mirrors warehouseActorCanUpdate()'s direct-comparison
+    // shape (authMapPath().companyId == existing.companyId, ONE
+    // companyGroupIsActive() call, not sameCompany()'s two) rather than
+    // canUpdateCompanyScoped(), whose sameCompany()x2 + isSuperAdmin()/
+    // userCompanyId() re-entry pushed these collections' UPDATE past the
+    // 1000-expression cap even after switching the role gate itself to the
+    // lean actor* helpers (live-verified 2026-08-26). Deliberately excludes
+    // its own Owner/SuperAdmin bypass — the caller hoists that bypass to the
+    // ternary-discriminator level so it is evaluated once, not once here
+    // and again in the caller's role gate.
+    function tenantWriteCanUpdate(existing) {
+      return hasAuthMap()
+        && get(authMapPath()).data.keys().hasAny(['companyId'])
+        && get(authMapPath()).data.companyId is string
+        && existing.companyId == get(authMapPath()).data.companyId
+        && companyGroupIsActive(existing)
+        && companyIdUnchanged()
+        && groupIdMatchesCompany(request.resource.data);
+    }
+
     function isPartner() {
       return hasUserProfile() && currentUser().role == 'Partner';
     }
@@ -732,7 +778,20 @@ service cloud.firestore {
     // blocks authoritative. Also adds security_logs (F-04), device_tokens
     // (F-17) and backup_metadata (F-05), which now have their own blocks.
     function isSpecialCollection(collectionId) {
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance'];
+      // Security Remediation Phase 2 (F-06/RULES-001): employees, payroll,
+      // payments, banks, commission_records, settlements added — each now
+      // has its own role-aware match block below and must be excluded from
+      // the role-blind generic fallback.
+      // Face Attendance + DeepFace Master Plan, Phase 3: 'biometric_face_references'
+      // added — it has its own role-aware match block above (self/Admin-HR/
+      // GroupAdmin, not the role-blind company-scoped fallback) and MUST be
+      // excluded here, or the generic fallback below would additively grant
+      // ANY same-company active user read/write access via
+      // canReadCompanyScoped()/canCreateCompanyScoped()/canUpdateCompanyScoped()
+      // (Firestore evaluates every matching `match` block for a path and
+      // allows the request if ANY grants it — a dedicated block alone does
+      // NOT suppress the generic fallback from ALSO applying).
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
     }
 
     match /companies/{companyId} {
@@ -815,6 +874,32 @@ service cloud.firestore {
     // role is custom/manageable by company Admins.
     function roleNotSystemProtected(data) {
       return !data.keys().hasAny(['isSystem']) || data.isSystem != true;
+    }
+
+    // AD-1 (2026-08-22) blocked EVERY update to a system role document for
+    // every non-Super-Admin actor (roleNotSystemProtected(oldData) &&
+    // roleNotSystemProtected(newData) on the whole write) — reproduced live
+    // against production as the real, reported failure: a Group Admin (and,
+    // by the same rule, an ordinary Company Admin) could never save a single
+    // permission-matrix change on a seeded system role (Admin, Director,
+    // Sales, Operations, ...), even though the Roles.tsx UI leaves every
+    // permission checkbox fully interactive for them (only the Name field is
+    // UI-disabled, and Delete is UI-hidden, for system roles) — an "action
+    // button visible but backend rejects" gap, not a working design.
+    // AD-1's own governing text is scoped to "cannot create/promote system
+    // roles" — this narrows enforcement to match that scope exactly: a
+    // system role's PERMISSION GRANTS, description, department and manager
+    // flag remain fully editable by Admin/GroupAdmin (their whole reason to
+    // exist), while its identity — name and the isSystem flag itself — stays
+    // immutable for anyone but Super Admin/Owner (who keep the unrestricted
+    // `|| isSuperAdmin()` bypass on the Admin branch, unchanged). Creating a
+    // NEW role with isSystem==true, or promoting an existing custom role to
+    // isSystem==true, remains Super-Admin-only via the unmodified `create`
+    // rule and roleNotSystemProtected(request.resource.data) above.
+    function roleSystemIdentityUnchanged(oldData, newData) {
+      return (roleNotSystemProtected(oldData) && roleNotSystemProtected(newData))
+        || (!roleNotSystemProtected(oldData) && !roleNotSystemProtected(newData)
+          && newData.name == oldData.name);
     }
 
     // ── Phase 3 (F-07/F-08) — warehouses collection ────────────────────────
@@ -922,9 +1007,9 @@ service cloud.firestore {
       // into one, cutting a duplicated isSuperAdmin()/currentUser() re-entry.
       allow update: if actorIsActive() && (
         (isAdmin() && sameCompany(resource.data) && companyIdUnchanged()
-          && ((roleNotSystemProtected(resource.data) && roleNotSystemProtected(request.resource.data)) || isSuperAdmin()))
+          && (roleSystemIdentityUnchanged(resource.data, request.resource.data) || isSuperAdmin()))
         || (groupAdminCanReadRole(resource.data) && companyIdUnchanged()
-          && roleNotSystemProtected(resource.data) && roleNotSystemProtected(request.resource.data))
+          && roleSystemIdentityUnchanged(resource.data, request.resource.data))
       ) && !request.resource.data.keys().hasAny(['groupId']);
       // DELETE: out of Phase 1 scope — RBAC-F01/RBAC-F16 are create/update-only
       // findings. allow delete: if false is preserved unchanged for every
@@ -1109,6 +1194,17 @@ service cloud.firestore {
       // repeated get() chains into two `let` bindings, referenced afterward
       // as cheap field lookups, cuts the evaluated-node count without
       // changing any condition's logic.
+      // ROOT CAUSE (same class as isSuperAdmin() above, reproduced live
+      // against the real GroupAdmin account's own missing-field users doc):
+      // actor.isSuperAdmin == true and (request.resource.data.isSuperAdmin
+      // == true) == (resource.data.isSuperAdmin == true) below both read the
+      // field unguarded — a legacy/migrated user document (actor's own, or
+      // the target being edited) missing the field entirely denies the whole
+      // rule instead of treating absence as false. Guarded the same way
+      // every other optional field in this file is.
+      function isSuperAdminFlag(data) {
+        return data.get('isSuperAdmin', false) == true;
+      }
       function usersUpdateAllowed(userId) {
         let authMap = get(authMapPath()).data;
         let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
@@ -1120,14 +1216,30 @@ service cloud.firestore {
           //    may grant/revoke isSuperAdmin cross-company, company admin
           //    may manage same-company users without changing isSuperAdmin
           //    or companyId (companyId immutable on this path).
+          //    Guards inlined at each site, NOT hoisted to a top-level `let`
+          //    and NOT a wrapper-function call: this function is documented
+          //    as already budget-marginal (see the comment block above), and
+          //    a `let` at the top of the function is evaluated for EVERY
+          //    call regardless of which branch (A/B/C) ultimately matches —
+          //    live-verified this session to be enough, on its own, to push
+          //    a branch-C-only (GroupAdmin) payload over the 1000-expression
+          //    budget even though branch C never needed the actor-super
+          //    check at all. Inlining keeps each guard lazy — evaluated only
+          //    when the branch that actually needs it is reached — while
+          //    still fixing the real bug (a missing isSuperAdmin field reads
+          //    as false here, never errors, unlike the original unguarded
+          //    `actor.isSuperAdmin == true`). Uses isSuperAdminFlag() (now
+          //    map.get(key,default)-based — one expression, not
+          //    keys().hasAny()+field-access) so each site stays cheap even
+          //    called individually rather than hoisted.
           || (
             actor.role == 'Admin'
             && (
-              actor.isSuperAdmin == true
+              isSuperAdminFlag(actor)
               || (
                 authMap.companyId == resource.data.companyId
                 && authMap.companyId == request.resource.data.companyId
-                && (request.resource.data.isSuperAdmin == true) == (resource.data.isSuperAdmin == true)
+                && isSuperAdminFlag(request.resource.data) == isSuperAdminFlag(resource.data)
               )
             )
             && request.resource.data.companyId == resource.data.companyId
@@ -1135,7 +1247,7 @@ service cloud.firestore {
             // Admin branch (the GroupAdmin branch and the self branch
             // already forbid the role), so GroupAdmin actors short-circuit
             // before it.
-            && (actor.isSuperAdmin == true
+            && (isSuperAdminFlag(actor)
               || !request.resource.data.keys().hasAny(['role'])
               || request.resource.data.role != 'GroupAdmin')
           )
@@ -1157,7 +1269,7 @@ service cloud.firestore {
             actor.role == 'GroupAdmin'
             && hasGroupId(resource.data) && resource.data.groupId == actorGroupId()
             && groupIsActive(resource.data.groupId)
-            && (request.resource.data.isSuperAdmin == true) == (resource.data.isSuperAdmin == true)
+            && isSuperAdminFlag(request.resource.data) == isSuperAdminFlag(resource.data)
             && (
               !request.resource.data.keys().hasAny(['role'])
               || request.resource.data.role != 'GroupAdmin'
@@ -1522,6 +1634,130 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // ── Security Remediation Phase 2 (F-06/RULES-001, docs/audits/
+    // NEOZY_SECURITY_REMEDIATION_PHASE_2_IMPLEMENTATION_CONTRACT.md): the
+    // generic company-scoped fallback (canReadCompanyScoped()/
+    // canCreateCompanyScoped()/canUpdateCompanyScoped(), see the
+    // match /{collectionId}/{documentId} fallback below) enforces tenant
+    // membership but not role — ANY active same-company user could read/
+    // write these 6 financial/HR collections via a direct SDK call,
+    // bypassing the UI's canDo() gating entirely. Explicit role-aware
+    // blocks below close this for exactly these 6 collections (the ones
+    // the Phase 1 audit found to be genuinely role-restricted in the
+    // actual seeded role grants — src/lib/roleBootstrap.ts — not merely
+    // company-restricted). Every other collection is deliberately left on
+    // the generic fallback unchanged — this is not a general RBAC rewrite.
+    //
+    // Pattern: an isGroupAdmin() TERNARY discriminator, not an `||` of
+    // canXCompanyScoped()/groupAdminCanX() — this file's own commission_rules
+    // block (§ above) already documents that `||` does not reliably
+    // short-circuit in this rules engine once the first branch resolves
+    // false, and a first attempt at these 6 blocks using that `||` shape
+    // measurably hit "maximum of 1000 expressions" on every write during
+    // emulator verification (both canXCompanyScoped() AND groupAdminCanX()
+    // were being evaluated, stacked with isAdmin()+isGroupAdmin()+
+    // roleMatches() — 5 heavy calls). The ternary evaluates exactly ONE
+    // tenant-check branch. isAdmin() already folds in isOwnerIdentity()/
+    // isSuperAdmin(), so no separate Owner/SuperAdmin bypass is needed
+    // here. Never a dynamic roles/{id}.permissions get() — role gates are
+    // plain roleMatches() role-NAME checks, the same cheap pattern already
+    // proven in dispatch/stock/scheme_registrations.
+
+    match /employees/{employeeId} {
+      // Role grants (roleBootstrap.ts): Admin (full, via createAllModulePermissions()),
+      // GroupAdmin (own Group, scope extension — no separate role check),
+      // HR (view/create/edit/delete), Director (view only). No other
+      // seeded role has any `employees` grant.
+      // Expression-budget note: role gates use the LEAN actorIsSuperAdmin()/
+      // actorRoleMatches() pair (the documented F4/G2/J2/K3-safe pattern this
+      // file already uses for `stock`/warehouse rules), not isSuperAdmin()/
+      // roleMatches() — those re-enter hasUserProfile()/currentUser() on
+      // every call and, combined with canUpdateCompanyScoped()'s own
+      // sameCompany()x2 + groupIdMatchesCompany() cost plus the generic
+      // fallback's redundant re-evaluation (documented on `stock`), pushed
+      // UPDATE past Firestore's 1000-expression cap.
+      allow read: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanRead(resource.data) : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|HR|Director'))));
+      allow create: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanCreate(request.resource.data) : (canCreateCompanyScoped() && (actorIsSuperAdmin() || actorRoleMatches('Admin|HR'))));
+      allow update: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanUpdate(resource.data) : (isOwnerIdentity() || actorIsSuperAdmin() || (tenantWriteCanUpdate(resource.data) && actorRoleMatches('Admin|HR'))));
+      allow delete: if false;
+    }
+
+    match /payroll/{payrollId} {
+      // Role grants: Admin (full), GroupAdmin (own Group), HR (view only,
+      // explicit), Director (view only). No non-Admin role has payroll
+      // create/edit/delete today — write is Admin/GroupAdmin-only.
+      allow read: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanRead(resource.data) : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|HR|Director'))));
+      allow create: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanCreate(request.resource.data) : (canCreateCompanyScoped() && (actorIsSuperAdmin() || actorRoleMatches('Admin'))));
+      allow update: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanUpdate(resource.data) : (isOwnerIdentity() || actorIsSuperAdmin() || (tenantWriteCanUpdate(resource.data) && actorRoleMatches('Admin'))));
+      allow delete: if false;
+    }
+
+    match /payments/{paymentId} {
+      // Role grants: Admin (full), GroupAdmin (own Group), Accounts (full
+      // CRUD), Director (view only). No other seeded role has any
+      // `payments` grant.
+      allow read: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanRead(resource.data) : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|Accounts|Director'))));
+      allow create: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanCreate(request.resource.data) : (canCreateCompanyScoped() && (actorIsSuperAdmin() || actorRoleMatches('Admin|Accounts'))));
+      allow update: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanUpdate(resource.data) : (isOwnerIdentity() || actorIsSuperAdmin() || (tenantWriteCanUpdate(resource.data) && actorRoleMatches('Admin|Accounts'))));
+      allow delete: if false;
+    }
+
+    match /banks/{bankId} {
+      // Role grants: Admin (full), GroupAdmin (own Group), Sales/Accounts/
+      // Director/Manager (view only). No non-Admin role has banks
+      // create/edit/delete today — write is Admin/GroupAdmin-only.
+      allow read: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanRead(resource.data) : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|Sales|Accounts|Director|Manager'))));
+      allow create: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanCreate(request.resource.data) : (canCreateCompanyScoped() && (actorIsSuperAdmin() || actorRoleMatches('Admin'))));
+      allow update: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanUpdate(resource.data) : (isOwnerIdentity() || actorIsSuperAdmin() || (tenantWriteCanUpdate(resource.data) && actorRoleMatches('Admin'))));
+      allow delete: if false;
+    }
+
+    match /commission_records/{recordId} {
+      // Governed by the 'partners' permissions.ts module — confirmed via
+      // routes.tsx's RoleRoute module="partners" gate on every Settlements/
+      // Commission page. Role grants: Admin (full), GroupAdmin (own Group),
+      // Manager (view/create/edit, team-scope at the app layer), Partner
+      // (view, self-scope at the app layer), Director (view only). This
+      // rules-layer gate is deliberately coarse (company/role boundary
+      // only) — it does NOT replicate Manager's team-scope or Partner's
+      // self-scope narrowing, matching the existing dispatch/stock
+      // precedent where visibility scoping stays an application-layer
+      // concern (canDo()'s `visibility` field + applyAccessFilters), never
+      // a Firestore-rules concept, to avoid the extra get() calls a
+      // per-record ownership check would require.
+      allow read: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanRead(resource.data) : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager|Partner|Director'))));
+      allow create: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanCreate(request.resource.data) : (canCreateCompanyScoped() && (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager'))));
+      allow update: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanUpdate(resource.data) : (isOwnerIdentity() || actorIsSuperAdmin() || (tenantWriteCanUpdate(resource.data) && actorRoleMatches('Admin|Manager'))));
+      allow delete: if false;
+    }
+
+    match /settlements/{settlementId} {
+      // Identical authorization shape to commission_records — same
+      // governing 'partners' module, same routes.tsx module="partners" gate.
+      allow read: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanRead(resource.data) : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager|Partner|Director'))));
+      allow create: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanCreate(request.resource.data) : (canCreateCompanyScoped() && (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager'))));
+      allow update: if actorIsActive()
+        && (isGroupAdmin() ? groupAdminCanUpdate(resource.data) : (isOwnerIdentity() || actorIsSuperAdmin() || (tenantWriteCanUpdate(resource.data) && actorRoleMatches('Admin|Manager'))));
+      allow delete: if false;
+    }
+
     match /document_counters/{counterId} {
       // Phase 1: document_counters is a §3.2 denormalized collection, so new
       // counter docs carry groupId (write-helper stamped). The shape
@@ -1751,22 +1987,94 @@ service cloud.firestore {
       // still evaluate per-document against canReadCompanyScoped).
       allow get: if actorIsActive() && signedIn() && (resource == null || canReadCompanyScoped() || groupAdminCanRead(resource.data));
       allow list: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
-      function isOwnPersonalSettings(data, sectionId) {
-        return hasUserProfile()
-          && documentId == currentUserId() + '_settings_' + sectionId
-          && data.section == sectionId
-          && data.updatedBy == currentUserId()
-          && sameCompany(data);
+      // `documentId == currentUserId() + '_settings_' + sectionId` is the
+      // ENTIRE ownership proof: documentId is a Firestore path segment (not
+      // client-forgeable), and currentUserId() is derived server-side from
+      // request.auth.uid via the trusted user_auth_maps mapping — a
+      // deterministic id match already means "this document belongs to the
+      // requesting user," independent of any field inside the document.
+      // A prior version additionally required data.updatedBy ==
+      // currentUserId() — redundant with the id check above for a legitimate
+      // client (both ultimately derive from currentUserId()), but a real
+      // liability: scripts/backfill-group-denorm.cjs treated `settings` as a
+      // generic tenant-scoped collection and stamped updatedBy:
+      // 'system-backfill' onto every settings doc missing a groupId,
+      // including personal (user-scoped) documents. That silently and
+      // permanently locked every affected user out of saving their OWN
+      // appearance/notifications settings ever again — the update rule below
+      // requires isOwnPersonalSettings() to hold for BOTH resource.data (the
+      // existing doc) and request.resource.data (the new one), and the
+      // existing doc's stale updatedBy could never satisfy it again. Removing
+      // this clause closes that self-lockout without weakening authorization
+      // (the id-derived-from-auth check below is still airtight).
+      // Parameterized over the SUBMITTED/EXISTING data's own `section` field
+      // (still allowlisted to exactly the two self-service sections below)
+      // instead of being called once per literal section name. Each call
+      // chains several get()-heavy helpers (hasUserProfile/currentUserId/
+      // sameCompany); calling it twice per side (once per hardcoded section
+      // name, 4 times total for `update`) measurably approaches Firestore's
+      // 1000-sub-expression-per-request budget for this rule — confirmed by
+      // direct emulator reproduction of the real personal-settings update
+      // path. Calling it once per side (2 times total for `update`) halves
+      // that cost with an IDENTICAL security surface: `sectionId in
+      // PERSONAL_SETTINGS_SECTIONS` still rejects any section other than the
+      // two originally enumerated, and `documentId == currentUserId() +
+      // '_settings_' + sectionId` is unchanged as the ownership proof.
+      // F-13 budget engineering (same class of fix as usersUpdateAllowed()
+      // above): isAdmin()/isSuperAdmin()/isGroupAdmin()/sameCompany()/
+      // sameGroup() each independently re-fetch get(authMapPath()) and
+      // get(users/{authMap.userId}) from scratch. The original create/update
+      // rules called that chain via up to 4 separate helper invocations —
+      // confirmed by direct emulator reproduction of the real reported
+      // "Missing or insufficient permissions" failure to approach and exceed
+      // Firestore's 1000-sub-expression-per-request budget for this rule
+      // alone. Binding authMap/actor ONCE via `let` and reusing them below is
+      // behaviorally identical to the original isAdmin()/isSuperAdmin()/
+      // isGroupAdmin()/sameCompany()/sameGroup()/currentUserId() logic
+      // (actorIsActive() — the outer gate on both allow clauses below —
+      // already guarantees hasUserProfile() for every non-owner actor
+      // reaching this point, which is exactly what those helpers required
+      // internally anyway). companyGroupIsActive()/hasCompanyId()/
+      // hasGroupId()/groupIdMatchesCompany() remain the exact same shared,
+      // unmodified global helpers — only the redundant identity re-derivation
+      // is eliminated, not the real (necessary) reads of the companies/groups
+      // documents those helpers perform.
+      function settingsCreateAllowed(data) {
+        let authMap = get(authMapPath()).data;
+        let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
+        let ownerAwareUserId = isOwnerIdentity() ? 'owner:' + request.auth.uid : authMap.userId;
+        let ownerOrSuper = isOwnerIdentity() || isSuperAdminFlag(actor);
+        let dataSameCompany = ownerOrSuper || (hasCompanyId(data) && data.companyId == authMap.companyId && companyGroupIsActive(data));
+        let dataSameGroup = ownerOrSuper || (actor.role == 'GroupAdmin' && hasGroupId(data)
+          && authMap.keys().hasAny(['groupId']) && authMap.groupId is string && data.groupId == authMap.groupId);
+        return ((isOwnerIdentity() || actor.role == 'Admin' || isSuperAdminFlag(actor)) && dataSameCompany)
+          || (actor.role == 'GroupAdmin' && dataSameGroup)
+          || (data.section in ['appearance', 'notifications']
+            && documentId == ownerAwareUserId + '_settings_' + data.section
+            && dataSameCompany);
       }
-      allow create: if actorIsActive() && ((isAdmin() && sameCompany(request.resource.data))
-        || (isGroupAdmin() && sameGroup(request.resource.data))
-        || isOwnPersonalSettings(request.resource.data, 'appearance')
-        || isOwnPersonalSettings(request.resource.data, 'notifications'))
+      function settingsUpdateAllowed(oldData, newData) {
+        let authMap = get(authMapPath()).data;
+        let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
+        let ownerAwareUserId = isOwnerIdentity() ? 'owner:' + request.auth.uid : authMap.userId;
+        let ownerOrSuper = isOwnerIdentity() || isSuperAdminFlag(actor);
+        let oldSameCompany = ownerOrSuper || (hasCompanyId(oldData) && oldData.companyId == authMap.companyId && companyGroupIsActive(oldData));
+        let newSameCompany = ownerOrSuper || (hasCompanyId(newData) && newData.companyId == authMap.companyId && companyGroupIsActive(newData));
+        let oldSameGroup = ownerOrSuper || (actor.role == 'GroupAdmin' && hasGroupId(oldData)
+          && authMap.keys().hasAny(['groupId']) && authMap.groupId is string && oldData.groupId == authMap.groupId);
+        let newSameGroup = ownerOrSuper || (actor.role == 'GroupAdmin' && hasGroupId(newData)
+          && authMap.keys().hasAny(['groupId']) && authMap.groupId is string && newData.groupId == authMap.groupId);
+        return ((isOwnerIdentity() || actor.role == 'Admin' || isSuperAdminFlag(actor))
+            && oldSameCompany && newSameCompany && companyIdUnchanged())
+          || (actor.role == 'GroupAdmin'
+            && oldSameGroup && newSameGroup && groupIdUnchanged() && companyIdUnchanged())
+          || (oldData.section in ['appearance', 'notifications'] && newData.section == oldData.section
+            && documentId == ownerAwareUserId + '_settings_' + oldData.section
+            && oldSameCompany && newSameCompany && companyIdUnchanged());
+      }
+      allow create: if actorIsActive() && settingsCreateAllowed(request.resource.data)
         && groupIdMatchesCompany(request.resource.data);
-      allow update: if actorIsActive() && ((isAdmin() && sameCompany(resource.data) && sameCompany(request.resource.data) && companyIdUnchanged())
-        || (isGroupAdmin() && sameGroup(resource.data) && sameGroup(request.resource.data) && groupIdUnchanged() && companyIdUnchanged())
-        || (isOwnPersonalSettings(resource.data, 'appearance') && isOwnPersonalSettings(request.resource.data, 'appearance') && companyIdUnchanged())
-        || (isOwnPersonalSettings(resource.data, 'notifications') && isOwnPersonalSettings(request.resource.data, 'notifications') && companyIdUnchanged()))
+      allow update: if actorIsActive() && settingsUpdateAllowed(resource.data, request.resource.data)
         && groupIdMatchesCompany(request.resource.data);
       allow delete: if false;
     }
@@ -2063,6 +2371,152 @@ service cloud.firestore {
         && resource.data.id == memberId && request.resource.data.id == memberId
         && request.resource.data.groupId == resource.data.groupId
         && request.resource.data.userId == resource.data.userId;
+      allow delete: if false;
+    }
+
+    // ── Face Attendance + DeepFace Master Plan, Phase 3 — biometric_face_references ──
+    // §9's data model, §5's threat model, §11's authorization model, implemented
+    // verbatim.
+    //
+    // Expression-budget note (live-verified 2026-08-26): an EARLIER version of
+    // this block used the same per-collection-helper style as `employees`/
+    // `attendance` (isGroupAdmin() ternary + separate canCreateCompanyScoped()/
+    // groupAdminCanCreate()/actorUserId()/actorRoleMatches() calls) and hit
+    // Firestore's 1000-expression cap on every create/update — each of those
+    // helpers independently re-derives the actor's identity via its own
+    // get(authMapPath())/get(users/{id}) chain, and stacking several of them
+    // (needed here because this collection, uniquely among the sensitive
+    // collections, has a self-service branch on TOP of the Admin/HR/GroupAdmin
+    // branches) multiplied past the cap. Rewritten below using the pattern
+    // this file already proves works for an equally-multi-branch rule —
+    // `settingsCreateAllowed()`/`settingsUpdateAllowed()` (the `settings`
+    // collection, above) — binding `authMap`/`actor` ONCE per allow-clause via
+    // `let` and reusing those two values for every self/company/group/role
+    // check that clause needs, instead of re-deriving identity per branch.
+
+    // Minimal structural validation (Phase 3 "malformed document denial"
+    // requirement) — deliberately lean (direct type/enum checks only, no deep
+    // schema library — matching this file's established house style of
+    // hasCompanyId()-shaped guards rather than full JSON-schema validation) so
+    // a document missing/mistyping a security-relevant field is rejected at
+    // create time rather than silently accepted.
+    function hasValidBiometricReferenceShape(data) {
+      return data.userId is string && data.userId.size() > 0
+        && data.companyId is string && data.companyId.size() > 0
+        && data.embedding is list && data.embedding.size() > 0
+        && data.embeddingModel is string && data.embeddingModel.size() > 0
+        && data.detectorBackend is string && data.detectorBackend.size() > 0
+        && data.status in ['active', 'revoked']
+        && data.enrolledBy is string && data.enrolledBy.size() > 0;
+    }
+
+    function biometricReadAllowed(data) {
+      let authMap = get(authMapPath()).data;
+      let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
+      let ownerOrSuper = isOwnerIdentity() || actor.get('isSuperAdmin', false) == true;
+      let isSelf = hasCompanyId(data) && data.companyId == authMap.companyId && data.userId == authMap.userId;
+      // Deliberately EXCLUDES Director — unlike `employees`' own read grant
+      // (which includes Director's view-only executive visibility), biometric
+      // embedding data is a materially more sensitive category than typical
+      // business records, and neither §9 nor §11 of the master plan grants
+      // Director (or any role beyond Admin/HR) any biometric access —
+      // "reads are restricted to the minimum required actors" is honored
+      // literally, not by copying `employees`' broader read list wholesale.
+      let sameCo = ownerOrSuper || (hasCompanyId(data) && data.companyId == authMap.companyId && companyGroupIsActive(data));
+      let sameGrp = ownerOrSuper || (actor.role == 'GroupAdmin' && hasGroupId(data)
+        && authMap.keys().hasAny(['groupId']) && authMap.groupId is string && data.groupId == authMap.groupId && groupIsActive(data.groupId));
+      return ownerOrSuper
+        || isSelf
+        || (sameCo && (actor.role == 'Admin' || actor.role == 'HR'))
+        || sameGrp;
+    }
+
+    function biometricCreateAllowed(data) {
+      let authMap = get(authMapPath()).data;
+      let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
+      let ownerOrSuper = isOwnerIdentity() || actor.get('isSuperAdmin', false) == true;
+      // Anchors enrolledBy/createdBy/updatedBy to the actor's OWN real
+      // identity — a caller can never claim a different acting identity than
+      // their own, closing the "forge createdBy/updatedBy identity" attack
+      // this phase's threat model requires closed. Mirrors actorUserId()'s
+      // owner-pseudo-id convention exactly, but computed once via `let`.
+      let actorUid = isOwnerIdentity() ? 'owner:' + request.auth.uid : authMap.userId;
+      let identityAnchored = data.enrolledBy == actorUid && data.createdBy == actorUid && data.updatedBy == actorUid;
+      let isSelf = data.userId == actorUid;
+      let sameCo = ownerOrSuper || (hasCompanyId(data) && data.companyId == authMap.companyId && companyGroupIsActive(data));
+      let sameGrp = actor.role == 'GroupAdmin' && hasGroupId(data)
+        && authMap.keys().hasAny(['groupId']) && authMap.groupId is string && data.groupId == authMap.groupId && groupIsActive(data.groupId);
+      return identityAnchored
+        && hasValidBiometricReferenceShape(data)
+        && groupIdMatchesCompany(data)
+        && ((sameCo && (isSelf || actor.role == 'Admin' || actor.role == 'HR')) || sameGrp);
+    }
+
+    function biometricUpdateAllowed(oldData, newData) {
+      let authMap = get(authMapPath()).data;
+      let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
+      let ownerOrSuper = isOwnerIdentity() || actor.get('isSuperAdmin', false) == true;
+      let actorUid = isOwnerIdentity() ? 'owner:' + request.auth.uid : authMap.userId;
+      // Forever-immutable anchor fields (§9's data model), enforced
+      // unconditionally — including for the Owner/SuperAdmin branch,
+      // deliberately stricter than this file's usual unrestricted break-glass
+      // bypass: re-pointing userId/companyId/groupId on an existing biometric
+      // reference would silently reassign one person's stored face to a
+      // DIFFERENT employee's identity, which no legitimate operation ever
+      // needs (a genuine identity change is always a new document via
+      // create, never an update). enrolledAt/enrolledBy anchor the ORIGINAL
+      // enrollment event permanently — re-enrollment events are recorded in
+      // `history` instead (§9's retention policy), never by overwriting
+      // these two fields.
+      //
+      // Phase 8 addition (Face Attendance + DeepFace Master Plan, §5's threat
+      // table: "Stale verification result reused for a later check-in |
+      // Verification result is bound to a single attendance write attempt
+      // (short-lived server-side token/nonce, consumed once)"): `lastVerifiedAt`
+      // joins this client-write-forbidden set too. §9's original field table
+      // documented it as "not a security control" — Phase 8 deliberately
+      // repurposes it as the anti-replay anchor `AttendanceService.checkIn()`/
+      // `checkOut()` re-reads before accepting a `source: 'biometric'` claim
+      // (see that file's `validateBiometricVerificationClaim()`). That anchor
+      // is only trustworthy if NO client-SDK write — self, Admin, HR,
+      // GroupAdmin, or Owner/SuperAdmin — can ever set it; only the Admin-SDK
+      // verification flow (`api/_lib/biometrics/verification.ts`, which
+      // bypasses these rules entirely) may. Adding it here has zero effect on
+      // that flow (Admin SDK never evaluates this file) and only closes the
+      // client-side forgery gap.
+      let immutableUnchanged = !newData.diff(oldData).affectedKeys().hasAny(
+        ['id', 'userId', 'companyId', 'groupId', 'enrolledAt', 'enrolledBy', 'schemaVersion', 'lastVerifiedAt']
+      );
+      let isSelf = hasCompanyId(oldData) && oldData.companyId == authMap.companyId && oldData.userId == authMap.userId;
+      // Self-service updates (re-enrollment) may never touch revocation
+      // state — §9/§11: revocation is Admin/HR-triggered or automatic
+      // (Phase 9's deactivation hook), never self-service. An employee
+      // re-enrolling their own face cannot use the same write to un-revoke
+      // themselves or hide a revocation.
+      let selfExcludesRevocation = !newData.diff(oldData).affectedKeys().hasAny(['status', 'revokedAt', 'revokedBy']);
+      let sameCo = hasCompanyId(oldData) && oldData.companyId == authMap.companyId && companyGroupIsActive(oldData);
+      let sameGrp = actor.role == 'GroupAdmin' && hasGroupId(oldData)
+        && authMap.keys().hasAny(['groupId']) && authMap.groupId is string && oldData.groupId == authMap.groupId && groupIsActive(oldData.groupId)
+        && hasGroupId(newData) && newData.groupId == authMap.groupId;
+      return immutableUnchanged
+        && newData.updatedBy == actorUid
+        && (
+          ownerOrSuper
+          || (sameCo && (actor.role == 'Admin' || actor.role == 'HR'))
+          || sameGrp
+          || (isSelf && selfExcludesRevocation)
+        );
+    }
+
+    match /biometric_face_references/{referenceId} {
+      allow read: if actorIsActive() && biometricReadAllowed(resource.data);
+      allow create: if actorIsActive()
+        && request.resource.data.id == referenceId
+        && biometricCreateAllowed(request.resource.data);
+      allow update: if actorIsActive() && biometricUpdateAllowed(resource.data, request.resource.data);
+      // DELETE: always denied (§9's retention policy: soft-revoke via
+      // `status`, never hard-delete — consistent with this file's house
+      // soft-delete convention for every other sensitive collection).
       allow delete: if false;
     }
 

@@ -1,4 +1,4 @@
-import { batchCreate, createDocWithId, deleteDocById, getOne, resolveWriteCompanyId, resolveWriteGroupId, updateDocById } from './firestore';
+import { batchCreate, createDocWithId, deleteDocById, getOne, hardDelete, resolveWriteCompanyId, resolveWriteGroupId, updateDocById } from './firestore';
 import { COLLECTIONS } from './firebase';
 import { addEntityRole, createOrResolveEntity, softDeleteEntity, updateEntity } from './entities';
 import {
@@ -40,10 +40,24 @@ function systemCompanyId(payload: Record<string, unknown>): string {
   return stringValue(payload.companyId) || resolveWriteCompanyId();
 }
 
-function systemUserId(payload: Record<string, unknown>, field: 'createdBy' | 'updatedBy'): string {
-  return stringValue(payload[field])
-    || stringValue(useAppStore.getState().user?.id)
-    || 'system';
+// Phase 11 (OWNERSHIP-001, Master Plan "Record Ownership / Business
+// Authorization Audit"): createdBy/updatedBy are audit-trail identity
+// anchors — unlike companyId (systemCompanyId() above), which has a
+// rules-layer safety net (sameCompany() independently re-validates any
+// client-supplied companyId against the actor), NOTHING re-validates
+// createdBy/updatedBy server-side; the generic fallback's
+// canCreateCompanyScoped()/canUpdateCompanyScoped() never inspect these
+// fields. Previously trusted `payload[field]` FIRST — since this is
+// client-side (browser) code, any authenticated user could forge who a
+// create/update is attributed to (e.g. `createLeadProjection(id, {
+// createdBy: 'someone-else-id', ... })` via devtools, not just the normal
+// UI form), corrupting the audit trail every downstream logCreate()/
+// logUpdate() and "created/updated by" display relies on. No legitimate
+// caller needs the payload value to win — the one call site that supplied
+// its own `createdBy` (Users.tsx) always passed its own current user id,
+// identical to what the authoritative store already resolves.
+function systemUserId(_payload: Record<string, unknown>, _field: 'createdBy' | 'updatedBy'): string {
+  return stringValue(useAppStore.getState().user?.id) || 'system';
 }
 
 function hydrateCreatePayload<T extends Record<string, unknown>>(payload: T): T & { companyId: string; createdBy: string; updatedBy: string; groupId?: string } {
@@ -164,7 +178,7 @@ function shouldResolveMasterIdentity(col: ProjectionCollection): boolean {
   return col !== COLLECTIONS.USERS;
 }
 
-async function attachEntityId<T extends Record<string, unknown>>(col: ProjectionCollection, payload: T): Promise<T & { entityId: string }> {
+async function attachEntityId<T extends Record<string, unknown>>(col: ProjectionCollection, payload: T): Promise<T & { entityId: string; entityJustCreated: boolean }> {
   const entityInput = mapProjectionToEntity(col, payload);
   const result = await createOrResolveEntity(entityInput);
   if (!result.entity?.id) throw new Error('Entity relation could not be resolved');
@@ -173,7 +187,30 @@ async function attachEntityId<T extends Record<string, unknown>>(col: Projection
     await addEntityRole(result.entity.id, entityInput.primaryRole, updatedBy);
     await updateEntity(result.entity.id, entityUpdatePayload(entityInput, updatedBy));
   }
-  return { ...payload, entityId: result.entity.id };
+  return { ...payload, entityId: result.entity.id, entityJustCreated: result.created === true };
+}
+
+// TXN-001 (Phase 5): createOrResolveEntity() genuinely needs a read
+// (detectEntityMatch) before it decides whether to create or match — that
+// read-then-conditionally-write shape can't be folded into a plain
+// writeBatch with the primary-collection write below without a much larger,
+// cross-cutting rework of the shared entities/detectEntityMatch machinery
+// (used identically by Leads/Customers/Employees/Users), which is out of
+// this fix's scope. Instead — mirroring authProvisioning.ts's own
+// compensating-delete pattern for the Auth account — a BRAND NEW entity doc
+// (never a MATCHED, pre-existing, possibly-shared one) is hard-deleted if
+// the subsequent primary-collection write throws, so a failed provisioning
+// attempt never leaves a masterless `entities` record behind. Matched
+// (pre-existing) entities are never touched here.
+async function compensateOrphanedEntity(entityId: string, entityJustCreated: boolean): Promise<void> {
+  if (!entityJustCreated) return;
+  try {
+    await hardDelete(COLLECTIONS.ENTITIES, entityId);
+  } catch {
+    // Best-effort, matching authProvisioning.ts's own rollback precedent —
+    // the ORIGINAL error is what the caller must see; a failed compensation
+    // is a (rare) follow-up cleanup concern, not a reason to mask it.
+  }
 }
 
 export async function createProjectionWithUserId<T extends Record<string, unknown>>(
@@ -183,16 +220,21 @@ export async function createProjectionWithUserId<T extends Record<string, unknow
 ) {
   const hydrated = hydrateCreatePayload({ ...payload, id });
   const withUser = shouldResolveMasterIdentity(col) ? await attachUserId(col, id, hydrated) : hydrated;
-  const withEntity = await attachEntityId(col, withUser);
-  if (col === COLLECTIONS.USERS) {
-    // users write path bypasses the groupId-stamping write helpers (USERS is
-    // excluded from the generic auto-stamp by design — it has its own groupId
-    // semantics per Master Plan §3.2) — hydrateCreatePayload already stamped
-    // the authoritative groupId derived from companyId above.
-    await updateDocById(col, id, projectionUpdateWithoutIdentityOverwrite(withEntity));
-    return getOne(col, id);
+  const { entityJustCreated, ...withEntity } = await attachEntityId(col, withUser);
+  try {
+    if (col === COLLECTIONS.USERS) {
+      // users write path bypasses the groupId-stamping write helpers (USERS is
+      // excluded from the generic auto-stamp by design — it has its own groupId
+      // semantics per Master Plan §3.2) — hydrateCreatePayload already stamped
+      // the authoritative groupId derived from companyId above.
+      await updateDocById(col, id, projectionUpdateWithoutIdentityOverwrite(withEntity));
+      return await getOne(col, id);
+    }
+    return await createDocWithId(col, id, withEntity);
+  } catch (error) {
+    await compensateOrphanedEntity(withEntity.entityId, entityJustCreated);
+    throw error;
   }
-  return createDocWithId(col, id, withEntity);
 }
 
 export async function batchCreateProjectionsWithUserId<T extends Record<string, unknown>>(
@@ -203,7 +245,8 @@ export async function batchCreateProjectionsWithUserId<T extends Record<string, 
     const id = stringValue(item.id);
     const hydrated = hydrateCreatePayload({ ...item, id });
     const withUser = await attachUserId(col, id, hydrated);
-    return attachEntityId(col, withUser);
+    const { entityJustCreated: _entityJustCreated, ...withEntity } = await attachEntityId(col, withUser);
+    return withEntity;
   }));
   return batchCreate(col, payload);
 }

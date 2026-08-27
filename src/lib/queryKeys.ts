@@ -114,6 +114,9 @@ function forCompany(companyId: string) {
     // Settings
     settings:    ['settings',    c] as const,
     settingsAll: ['settings',    c, 'all'] as const,
+    // Phase 10 (F-CACHE-01 sweep): teams was missing from this factory
+    // entirely — useTeams.ts used a raw, company-unscoped module-level key.
+    teams: ['teams', c] as const,
   } as const;
 }
 

@@ -11,6 +11,7 @@ import {
   INSTALLATION_BACKFILL_COLLECTIONS,
   type InstallationBackfillInput,
 } from '../src/lib/installationBackfill.ts';
+import { sanitizePayload } from '../src/lib/sanitizer.ts';
 
 // Phase 10: creates the real, Project-scoped `installations` document for
 // historical Leads whose installation progress predates
@@ -174,7 +175,10 @@ async function main() {
     const batch = writeBatch(db);
     for (const item of slice) {
       const id = `INST-BACKFILL-${item.leadId}`;
-      batch.set(doc(db, INSTALLATION_BACKFILL_COLLECTIONS.INSTALLATIONS, id), {
+      // Phase 9 (DI-02 sweep): assignedEngineerId/Name/Phone are optional on
+      // `item` (no engineer assigned yet) — sanitize before this raw
+      // batch.set(), matching the fix applied throughout this sweep.
+      batch.set(doc(db, INSTALLATION_BACKFILL_COLLECTIONS.INSTALLATIONS, id), sanitizePayload({
         id,
         installationId: id,
         projectId: item.projectId,
@@ -191,7 +195,7 @@ async function main() {
         createdAt: now,
         updatedAt: now,
         isDeleted: false,
-      });
+      }));
     }
     await batch.commit();
     committed += slice.length;

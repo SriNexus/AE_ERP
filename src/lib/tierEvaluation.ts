@@ -298,8 +298,12 @@ export async function manualTierOverride(
   metadata?: { changedBy?: string; changedByName?: string; effectiveDate?: string },
 ): Promise<void> {
   const state = useAppStore.getState();
-  const userId = metadata?.changedBy || state.user?.id || 'system';
-  const userName = metadata?.changedByName || state.user?.name || 'System';
+  // Final Gap Sweep (Master Plan Phase 13/14): identity-attribution fields —
+  // same forgery class Phase 11 (OWNERSHIP-001) fixed elsewhere. This
+  // exported, client-side function must never let a caller-supplied
+  // metadata.changedBy/changedByName win over the real session actor.
+  const userId = state.user?.id || 'system';
+  const userName = state.user?.name || 'System';
   const effectiveDate = metadata?.effectiveDate || new Date().toISOString();
 
   const partner = await getOne<ChannelPartner>(COLLECTIONS.CHANNEL_PARTNERS, partnerId);

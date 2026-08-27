@@ -187,6 +187,22 @@ describe('Phase 4 — platform mutations are owner/Super Admin gated and raw-wri
     expect(mocks.logSecurityEvent).toHaveBeenCalledWith('company_bootstrap', expect.stringContaining('ChaitanyaSri'), { companyId: 'CO-TEST-1', groupId: 'GROUP-A' });
   });
 
+  // Phase 9 (DI-02 sweep): bootstrapCompany's `...rest` spreads the caller's
+  // remaining input fields (BootstrapCompanyInput's index signature allows
+  // arbitrary extras) — this was one of the two explicitly-named
+  // found-but-not-yet-fixed instances of the undefined-payload bug class.
+  it('an optional field explicitly passed as undefined never reaches the write payload', async () => {
+    await bootstrapCompany({ groupId: 'GROUP-A', name: 'Test Co', businessMode: undefined });
+    const [, payload] = mocks.setDoc.mock.calls[0];
+    expect('businessMode' in payload).toBe(false);
+  });
+
+  it('the same optional field, when actually populated, still passes through unchanged', async () => {
+    await bootstrapCompany({ groupId: 'GROUP-A', name: 'Test Co', businessMode: 'B2B' });
+    const [, payload] = mocks.setDoc.mock.calls[0];
+    expect(payload.businessMode).toBe('B2B');
+  });
+
   it('setGroupStatus requires the id anchor on the group update (rules)', async () => {
     await setGroupStatus('GROUP-A', 'Suspended');
     const [ref, patch] = mocks.updateDoc.mock.calls[0];

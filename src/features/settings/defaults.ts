@@ -26,7 +26,7 @@ import type {
   BackupSettings,
   DeveloperSettings,
 } from './types';
-import type { AttendanceSettings } from '../attendance/types';
+import { DEFAULT_ATTENDANCE_SETTINGS as ATTENDANCE_SETTINGS_CANONICAL_DEFAULTS } from '../attendance/types';
 import { DEFAULT_EMAIL_TEMPLATES } from './emailRuntime';
 import { DEFAULT_BUILT_IN_THEME_ID } from '../../theme/presetIds';
 import { APPEARANCE_FONT_SIZE_SCHEMA } from './appearanceRuntime';
@@ -193,17 +193,12 @@ export const DEFAULT_BACKUP_SETTINGS: BackupSettings = {
 
 // ── Developer ────────────────────────────────────────────────
 // ── Attendance (Phase 9) ───────────────────────────────────
-export const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettings = {
-  geofenceRadiusDefaultMeters: 200,
-  gpsAccuracyThresholdMeters: 50,
-  gracePeriodMinutes: 15,
-  shiftStartTime: '09:00',
-  shiftEndTime: '18:00',
-  halfDayThresholdHours: 4,
-  staleLocationMaxAgeSeconds: 300,
-  checkInMethod: 'gps',
-  weeklyOffDays: [0], // Sunday
-};
+// Production fix (docs/audits/GEO_ATTENDANCE_CURRENT_STATE_AUDIT.md
+// Finding F3): this used to be a SEPARATE, manually-kept-in-sync copy of
+// the defaults already declared in features/attendance/types/index.ts —
+// re-exporting the canonical value instead removes one of three places
+// that had to be edited together for every new attendance setting field.
+export const DEFAULT_ATTENDANCE_SETTINGS = ATTENDANCE_SETTINGS_CANONICAL_DEFAULTS;
 
 export const DEFAULT_DEVELOPER_SETTINGS: DeveloperSettings = {
   apiKeys: [],

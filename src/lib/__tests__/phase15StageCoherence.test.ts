@@ -245,8 +245,10 @@ describe('Phase 15.1 — B2B lifecycle examples stay fully isolated from every B
 });
 
 describe('Phase 15.1 — the login-triggered sandbox reset endpoint uses the SAME audited generator as every other demo entry point (confirmed root cause of the B2B-customer-with-Project screenshots)', () => {
-  // api/demo-reset.ts is what src/pages/Login.tsx actually calls (via
-  // src/lib/sandboxReset.ts) on a browser's first login as demo@neozy.in.
+  // api/demo-reset.ts is a manually-triggered maintenance endpoint for
+  // reseeding the Neozy Demo Group's data (Demo-to-Group conversion: no
+  // longer auto-triggered on login — see
+  // docs/reports/NEOZY_DEMO_GROUP_CONVERSION_REPORT.md).
   // It used to build its own separate, hand-written "V1" dataset that never
   // set Customer.type at all — completely bypassing the audited
   // scripts/demo/datasets/businessGraph.ts generator every other demo entry

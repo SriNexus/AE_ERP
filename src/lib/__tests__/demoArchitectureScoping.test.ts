@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { DEMO_COMPANY_ID, DEMO_ERP_USER_ID } from '../../config/demo';
-import { isCanonicalDemoIdentity, isDemoCapabilityAllowed } from '../demoCapabilityPolicy';
+import { isCanonicalDemoIdentity } from '../demoCapabilityPolicy';
 import { resolveSessionCompanyId } from '../tenantRouting';
 
 describe('isolated Demo tenant architecture', () => {
@@ -22,9 +22,10 @@ describe('isolated Demo tenant architecture', () => {
     expect(resolveSessionCompanyId({ companyId: 'home', isSuperAdmin: true }, 'selected')).toBe('selected');
   });
 
-  it('applies Demo restrictions only to the Demo company', () => {
-    expect(isDemoCapabilityAllowed(DEMO_COMPANY_ID, 'external-side-effect')).toBe(false);
-    expect(isDemoCapabilityAllowed('company-production', 'external-side-effect')).toBe(true);
+  it('no capability-gating mechanism remains — Neozy Demo is a real Group, not a restricted sandbox', () => {
+    const demoCapabilityPolicySrc = readFileSync('src/lib/demoCapabilityPolicy.ts', 'utf8');
+    expect(demoCapabilityPolicySrc).not.toContain('isDemoCapabilityAllowed');
+    expect(demoCapabilityPolicySrc).not.toContain('DemoCapability');
   });
 
   it('does not use deployment-wide Demo mode in public or authenticated presentation', () => {

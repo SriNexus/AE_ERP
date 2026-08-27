@@ -26,6 +26,7 @@ import { db, COLLECTIONS, firebaseEnv } from './firebase';
 import { useAppStore } from '../store/useAppStore';
 import { genId } from './firestore';
 import { logRoleChange, logSecurityEvent, logCreate, logUpdate } from './auditLogger';
+import { sanitizePayload } from './sanitizer';
 
 const NOT_CONFIGURED_MSG = 'Firebase is not configured. This application requires a valid Firebase configuration.';
 
@@ -126,6 +127,17 @@ export async function grantGroupAdmin(input: GrantGroupAdminInput): Promise<void
   const { actorId } = requirePlatformIdentity();
   const memberId = `${input.groupId}_${input.userId}`;
 
+  // TX-01 (Phase 6): a single writeBatch() spanning these two writes was
+  // ATTEMPTED and reverted — real-emulator evidence
+  // (src/lib/__tests__/groupAdminGrantBatchAtomicity.emulator.test.ts,
+  // live-verified 2026-08-26) showed the batch exceeds Firestore's
+  // 1000-expression-per-request budget: both the group_members create rule
+  // and the (already expression-heavy) users update rule's promotion branch
+  // are evaluated together against ONE shared budget for the request,
+  // compounded by the generic wildcard fallback's documented, unavoidable
+  // redundant evaluation happening twice instead of once. See
+  // groupAdmin.ts's grantGroupAdminForGroup() for the full writeup — same
+  // finding, same fix (sequential writes, safely under budget).
   // 1) group_members/{groupId}_{userId} — raw setDoc: the generic helper would
   //    strip groupId (GROUP_ID_EXCLUDED_COLLECTIONS includes group_members),
   //    and the rules REQUIRE groupId on this document.
@@ -218,7 +230,13 @@ export async function bootstrapCompany(input: BootstrapCompanyInput): Promise<{ 
   const { actorId } = requirePlatformIdentity();
   const id = genId.generic('CO');
   const { groupId, name, ...rest } = input;
-  const payload = {
+  // Phase 9 (DI-02 sweep): `...rest` spreads the caller-supplied input's
+  // remaining fields (BootstrapCompanyInput's own index signature allows
+  // arbitrary extras) — currently safe because this function's only caller
+  // passes fully-specified literals, but that is exactly the kind of
+  // narrow-caller assumption that breaks silently later (as DI-02 itself
+  // demonstrated), so this is sanitized for defense-in-depth.
+  const payload = sanitizePayload({
     id,
     companyId: id,
     groupId,
@@ -230,7 +248,7 @@ export async function bootstrapCompany(input: BootstrapCompanyInput): Promise<{ 
     updatedBy: actorId,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
-  };
+  });
   await setDoc(doc(db, COLLECTIONS.COMPANIES, id), payload);
   await logCreate('company', id, { name: payload.name, groupId, status: payload.status }, 'companies');
   await logSecurityEvent('company_bootstrap', `Company bootstrapped: ${payload.name}`, { companyId: id, groupId });

@@ -1,6 +1,4 @@
 import type { EmailSettings, EmailTemplateConfig, EmailTemplateKey, EmailTemplateSettings } from './types';
-import { useAppStore } from '../../store/useAppStore';
-import { isDemoCapabilityAllowed } from '../../lib/demoCapabilityPolicy';
 
 export interface EmailTemplateDefinition {
   key: EmailTemplateKey;
@@ -247,7 +245,6 @@ export function buildEmailComposePayload(request: EmailComposeRequest): EmailCom
 
 export function openGmailCompose(url: string): boolean {
   if (typeof window === 'undefined' || typeof document === 'undefined') return false;
-  if (!isDemoCapabilityAllowed(useAppStore.getState().user?.companyId, 'external-side-effect')) return false;
   const win = window.open(url, '_blank', 'noopener,noreferrer');
   if (win) {
     try { win.opener = null; } catch {

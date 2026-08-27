@@ -15,8 +15,12 @@
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { captureLocationWithRetry, type GeoCaptureError } from '../../../lib/geo';
+import { useState } from 'react';
+import { captureLocationWithRetry, type GeoCaptureError, type CaptureProgressInfo } from '../../../lib/geo';
 import { AttendanceService, AttendanceCheckError } from '../../../services/AttendanceService';
+import { loadSettings } from '../../settings/services/settingsService';
+import { normalizeAttendanceSettings } from '../../settings/attendanceRuntime';
+import { describeCheckInToast } from '../toastMessages';
 import toast from 'react-hot-toast';
 import type { AttendanceCheckResult } from '../types';
 
@@ -53,6 +57,13 @@ export interface UseCheckInReturn {
   errorReason: string | null;
   /** Whether a check-in is currently in progress */
   isCapturing: boolean;
+  /**
+   * Live GPS-acquisition progress (§10 of the production-fix brief) — set
+   * while `status === 'capturing'`, so the UI can show "Getting your
+   * location… Best accuracy so far: ±82m" instead of a silent spinner.
+   * `null` when not currently capturing.
+   */
+  progress: CaptureProgressInfo | null;
   /** Trigger the check-in flow */
   checkIn: () => void;
   /** Reset to idle state */
@@ -65,18 +76,24 @@ export interface UseCheckInReturn {
 
 export function useCheckIn(): UseCheckInReturn {
   const qc = useQueryClient();
+  const [progress, setProgress] = useState<CaptureProgressInfo | null>(null);
 
   const mutation = useMutation<AttendanceCheckResult, Error, void>({
     mutationFn: async () => {
+      setProgress(null);
+
+      // ── Step 0: Read the company's accuracy target (§17: no scattered
+      // magic numbers — the GPS retry loop's target comes from the same
+      // AttendanceSettings the final decision is judged against). ────
+      const settings = normalizeAttendanceSettings(await loadSettings('attendance').catch(() => null));
+
       // ── Step 1: Capture GPS (bounded retry for accuracy) ───
       let location;
       try {
         location = await captureLocationWithRetry({
           enableHighAccuracy: true,
-          timeoutMs: 10_000,
-          totalTimeoutMs: 20_000,
-          retryIntervalMs: 2_000,
-          targetAccuracyMeters: 50,
+          targetAccuracyMeters: settings.gpsAccuracyThresholdMeters,
+          onProgress: (info) => setProgress(info),
         });
       } catch (err) {
         // Map GeoCaptureError to user-facing message per §16
@@ -94,7 +111,10 @@ export function useCheckIn(): UseCheckInReturn {
     onSuccess: (result) => {
       // Invalidate the same query key useAttendance() uses
       qc.invalidateQueries({ queryKey: ['attendance'] });
-      toast.success('Check-in successful!');
+      // Small, auto-dismissing toast — employee, time, geofence status.
+      // Never a modal (Attendance page redesign spec §6).
+      toast.success(describeCheckInToast(result.record?.employee || '', result.record?.checkIn));
+      setProgress(null);
     },
     onError: (err) => {
       // Toast is NOT shown here — the component reads errorMessage/state
@@ -103,6 +123,7 @@ export function useCheckIn(): UseCheckInReturn {
       if (!(err instanceof AttendanceCheckError)) {
         toast.error('Something went wrong. Please try again.');
       }
+      setProgress(null);
     },
   });
 
@@ -129,8 +150,9 @@ export function useCheckIn(): UseCheckInReturn {
     record: mutation.data?.record ?? null,
     errorMessage,
     errorReason,
+    progress: mutation.isPending ? progress : null,
     isCapturing: mutation.isPending,
     checkIn: () => mutation.mutate(),
-    reset: () => mutation.reset(),
+    reset: () => { mutation.reset(); setProgress(null); },
   };
 }

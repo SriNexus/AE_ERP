@@ -9,9 +9,10 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { where, orderBy, limit as limitQuery, collection, query } from 'firebase/firestore';
 import { Shield, Search, X, Clock, AlertTriangle, Eye, Loader2, ChevronRight } from 'lucide-react';
-import { getAll } from '../../../lib/firestore';
-import { COLLECTIONS } from '../../../lib/firebase';
+import { getAll, companyScopedQuery, resolveReadCompanyId } from '../../../lib/firestore';
+import { COLLECTIONS, db, countDocumentsSafe } from '../../../lib/firebase';
 import { useAppStore } from '../../../store/useAppStore';
 import { isOwnerEmail } from '../../../lib/ownerAccess';
 import { cn } from '../../../utils/cn';
@@ -47,9 +48,30 @@ export function MobileAuditWorkspace() {
     );
   }
 
+  // Phase 12 (DEFECT-002, Master Plan "Performance Hardening"): this is a
+  // pure recent-activity browse list (already truncated to 50 for display,
+  // no export, no full-history search requirement) — unlike
+  // Dashboards.tsx/Reports.tsx/fraudDetection.ts's audit_logs reads, which
+  // compute cross-record aggregates and therefore genuinely need the full
+  // dataset. Bounding by recency reuses the composite index already declared
+  // for audit_logs in firestore.indexes.json (companyId, isDeleted,
+  // createdAt DESC).
   const { data: logs, isLoading } = useQuery({
     queryKey: ['audit-logs-mobile', activeCompanyId],
-    queryFn: () => getAll<any>(COLLECTIONS.AUDIT_LOGS),
+    queryFn: () => getAll<any>(COLLECTIONS.AUDIT_LOGS, [
+      where('isDeleted', '==', false),
+      orderBy('createdAt', 'desc'),
+      limitQuery(200),
+    ]),
+    staleTime: 30_000,
+  });
+
+  const { data: totalLogs = 0 } = useQuery({
+    queryKey: ['audit-logs-mobile-total', activeCompanyId],
+    queryFn: () => countDocumentsSafe(
+      query(collection(db, COLLECTIONS.AUDIT_LOGS), ...companyScopedQuery(COLLECTIONS.AUDIT_LOGS), where('isDeleted', '==', false)),
+      `audit_logs_total:${resolveReadCompanyId()}`,
+    ),
     staleTime: 30_000,
   });
 
@@ -104,7 +126,7 @@ export function MobileAuditWorkspace() {
 
       {/* Stats */}
       <div className="flex gap-2 px-3 pb-2">
-        <span className="text-xs text-[var(--color-text-muted)]">{logs?.length || 0} total logs</span>
+        <span className="text-xs text-[var(--color-text-muted)]">{totalLogs} total logs</span>
         <span className="text-xs text-[var(--color-text-muted)]">·</span>
         <span className="text-xs text-[var(--color-text-muted)]">{filtered.length} shown</span>
       </div>

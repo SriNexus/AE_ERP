@@ -18,7 +18,6 @@ import { useAppStore } from '../../../store/useAppStore';
 import { queryKeys } from '../../../lib/queryKeys';
 import { safeNumber } from '../../../lib/analyticsCore';
 import { askAi } from '../../../services/aiService';
-import { isOfficialDemoCompany } from '../../../config/demo';
 import { isOwnerEmail } from '../../../lib/ownerAccess';
 
 // ── Types ─────────────────────────────────────────────────

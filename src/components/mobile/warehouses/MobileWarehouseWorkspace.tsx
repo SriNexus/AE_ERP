@@ -8,7 +8,7 @@ import { Badge, Button, Card, ConfirmDialog, Input, Modal, Pagination, Select, T
 import { INDIAN_STATES } from '../../../config/company';
 import { useProducts } from '../../../features/inventory/hooks/useInventory';
 import { useDeleteWarehouse, useSaveWarehouse, useWarehouses } from '../../../features/warehouses/hooks/useWarehouses';
-import { WAREHOUSE_FORM_DEFAULT, WAREHOUSE_STATUS_OPTIONS, warehouseGeoToForm, parseWarehouseGeo, type Warehouse, type WarehouseForm } from '../../../features/warehouses/types';
+import { WAREHOUSE_FORM_DEFAULT, WAREHOUSE_STATUS_OPTIONS, warehouseGeoToForm, parseWarehouseGeo, validateWarehouseGeoForm, getGeoReadiness, type Warehouse, type WarehouseForm } from '../../../features/warehouses/types';
 import { COLLECTIONS } from '../../../lib/firebase';
 import { fmtDate, getAll, updateDocById } from '../../../lib/firestore';
 import { getMovementsByWarehouse, summarizeMovements, type InventoryMovement } from '../../../lib/inventoryMovements';
@@ -421,6 +421,16 @@ export function MobileWarehouseWorkspace({ mode }: { mode: Mode }) {
   function submitForm(event: React.FormEvent) {
     event.preventDefault();
     if (!form.name.trim()) return toast.error('Warehouse name is required');
+    // Production fix (docs/audits/GEO_ATTENDANCE_CURRENT_STATE_AUDIT.md
+    // Finding F2): block, don't silently drop, an incomplete geo-fence.
+    const geoValidation = validateWarehouseGeoForm({
+      latitude: form.latitude,
+      longitude: form.longitude,
+      geofenceRadiusMeters: form.geofenceRadiusMeters,
+    });
+    if (!geoValidation.valid) {
+      return toast.error('Geo-fence configuration is incomplete — Latitude, Longitude, and Geofence Radius are all required together.');
+    }
     const geo = parseWarehouseGeo({
       latitude: form.latitude,
       longitude: form.longitude,
@@ -735,12 +745,35 @@ function WarehouseDialogs({ formOpen, form, dirty, saving, confirmClose, onClose
           <Section title="Geo-Fence / Attendance Location">
             <p className="text-xs text-[var(--color-text-muted)]">
               Configure GPS coordinates for geo-fenced attendance check-in/check-out.
+              {(() => { const v = validateWarehouseGeoForm(form); return v.attempted
+                ? ' All three fields below are required together — a partially-configured location cannot be used for attendance.'
+                : ''; })()}
             </p>
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="Latitude" inputMode="decimal" placeholder="e.g. 18.5204" value={form.latitude} onChange={(event) => onFormChange({ latitude: event.target.value })} />
-              <Input label="Longitude" inputMode="decimal" placeholder="e.g. 73.8567" value={form.longitude} onChange={(event) => onFormChange({ longitude: event.target.value })} />
-            </div>
-            <Input label="Geofence Radius (meters)" inputMode="decimal" placeholder="e.g. 200" value={form.geofenceRadiusMeters} onChange={(event) => onFormChange({ geofenceRadiusMeters: event.target.value })} />
+            {(() => {
+              const geoValidation = validateWarehouseGeoForm(form);
+              return (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Input label="Latitude" required={geoValidation.attempted} inputMode="decimal" placeholder="e.g. 18.5204" value={form.latitude} onChange={(event) => onFormChange({ latitude: event.target.value })} error={geoValidation.errors.latitude} />
+                    <Input label="Longitude" required={geoValidation.attempted} inputMode="decimal" placeholder="e.g. 73.8567" value={form.longitude} onChange={(event) => onFormChange({ longitude: event.target.value })} error={geoValidation.errors.longitude} />
+                  </div>
+                  <Input label="Geofence Radius (meters)" required={geoValidation.attempted} inputMode="decimal" placeholder="e.g. 200" value={form.geofenceRadiusMeters} onChange={(event) => onFormChange({ geofenceRadiusMeters: event.target.value })} error={geoValidation.errors.geofenceRadiusMeters} />
+                </>
+              );
+            })()}
+            {(() => {
+              const readiness = getGeoReadiness({
+                latitude: form.latitude.trim() === '' ? undefined : Number(form.latitude),
+                longitude: form.longitude.trim() === '' ? undefined : Number(form.longitude),
+                geofenceRadiusMeters: form.geofenceRadiusMeters.trim() === '' ? undefined : Number(form.geofenceRadiusMeters),
+                status: form.status,
+              });
+              return (
+                <p className="text-xs" style={{ color: readiness.ready ? 'var(--color-success)' : 'var(--color-warning, var(--color-text-secondary))' }}>
+                  {readiness.ready ? '✓ Ready for attendance.' : `⚠ Not usable for attendance yet — missing: ${readiness.missing.join(', ')}.`}
+                </p>
+              );
+            })()}
           </Section>
           <Section title="Notes">
             <Textarea label="Notes" value={form.notes} onChange={(event) => onFormChange({ notes: event.target.value })} rows={4} />
@@ -748,7 +781,7 @@ function WarehouseDialogs({ formOpen, form, dirty, saving, confirmClose, onClose
           {dirty ? <p className="text-xs font-medium text-[var(--color-warning-text)]">Unsaved changes</p> : null}
           <div className="flex gap-2">
             <Button type="button" variant="outline" className="flex-1" onClick={onCloseForm}>Cancel</Button>
-            <Button type="submit" className="flex-1" loading={saving}>Save</Button>
+            <Button type="submit" className="flex-1" loading={saving} disabled={!validateWarehouseGeoForm(form).valid}>Save</Button>
           </div>
         </form>
       </Modal>
