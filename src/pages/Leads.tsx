@@ -36,14 +36,12 @@ import {
   FollowupBadge,
 } from '../features/leads/components/LeadWorkspaceParts';
 import { LeadWorkspaceDialogs } from '../features/leads/components/LeadWorkspaceDialogs';
-import { InactiveRecordsModal } from '../components/shared/InactiveRecordsModal';
 import {
   Plus, Trash2, Target, Phone, Calendar, RefreshCw,
-  UploadCloud, Download, Archive,
+  UploadCloud, Download,
   User, AlertTriangle, Users, ListChecks,
-  Handshake, Eye, X, GraduationCap,
+  Handshake, Eye, X,
 } from 'lucide-react';
-import { TutorialCenter } from '../features/tutorials';
 import { parseCSV } from '../features/leads/utils/leadsCsv';
 import toast from 'react-hot-toast';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -238,8 +236,6 @@ export default function Leads() {
   // ── Lead form (create only — editing a lead happens exclusively inside
   // Lead Workspace, never from this list page; see workspace docs §4)
   const [showForm, setShowForm] = useState(false);
-  // ── Contextual tutorial entry point (Learn this workspace)
-  const [showTutorials, setShowTutorials] = useState(false);
   const [form,     setForm]     = useState({ ...FORM0 });
 
   // ── Delete
@@ -299,8 +295,6 @@ export default function Leads() {
 
   // ── CSV Import
   const [showCsvImport, setShowCsvImport] = useState(false);
-  // Phase 13 (Blueprint §13): "show inactive" + restore for soft-deleted Leads
-  const [showInactive, setShowInactive] = useState(false);
   const [csvPreview,    setCsvPreview]    = useState<any[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -624,12 +618,14 @@ export default function Leads() {
   }
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col gap-2 overflow-hidden">
+    // Enterprise-density pass: pull the list content back into ~half of the
+    // shell's 1.25rem outer padding on the left/right/top (the most visible
+    // wasted whitespace) — internal control/section spacing is unchanged.
+    <div className="-mx-2.5 -mt-2.5 flex flex-1 min-h-0 flex-col gap-2 overflow-hidden">
       {/* ── Premium Workspace Hero ─────────────────────────── */}
       <WorkspaceHero
         title="Leads"
         icon={<Target className="h-6 w-6" />}
-        breadcrumbs={['Home', 'Sales', 'Leads']}
         statusText="Last sync · Realtime Connected"
         statusDotColor="var(--color-success)"
         className="gap-3"
@@ -638,14 +634,8 @@ export default function Leads() {
             <Button variant="outline" size="sm" icon={<RefreshCw className="h-4 w-4" />} onClick={() => refetch()}>
               Refresh
             </Button>
-            <Button variant="outline" size="sm" icon={<UploadCloud className="h-3.5 w-3.5" />} onClick={() => setShowCsvImport(true)}>
+            <Button variant="secondary" size="sm" icon={<UploadCloud className="h-4 w-4" />} onClick={() => setShowCsvImport(true)}>
               Upload CSV
-            </Button>
-            <Button variant="outline" size="sm" icon={<Archive className="h-3.5 w-3.5" />} onClick={() => setShowInactive(true)}>
-              Show Inactive
-            </Button>
-            <Button variant="outline" size="sm" icon={<GraduationCap className="h-3.5 w-3.5" />} onClick={() => setShowTutorials(true)}>
-              Learn this workspace
             </Button>
             {perms.canCreate('leads') && (
               <Button size="sm" data-tour="leads-create" icon={<Plus className="h-4 w-4" />} onClick={() => { setForm({ ...FORM0 }); setShowForm(true); }}>
@@ -1049,17 +1039,6 @@ export default function Leads() {
         message={delId === '__bulk__' ? `Delete ${selected.size} selected leads permanently? All logs will be lost.` : 'Delete this lead permanently? All logs will be lost.'}
       />
 
-      <InactiveRecordsModal
-        open={showInactive}
-        onClose={() => setShowInactive(false)}
-        col={COLLECTIONS.LEADS}
-        title="Inactive Leads"
-        getLabel={(row: any) => row.name || row.phone || row.id}
-        getSubtitle={(row: any) => row.phone || row.email || ''}
-        onRestored={() => refetch()}
-      />
-
-      <TutorialCenter open={showTutorials} onClose={() => setShowTutorials(false)} initialCategory="sales" />
     </div>
   );
 }

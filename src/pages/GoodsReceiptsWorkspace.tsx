@@ -29,6 +29,7 @@ import { useQuery } from '@tanstack/react-query';
 import { getOne, getAll, fmtDate, fmtCurrency } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';
 import { useAppStore } from '../store/useAppStore';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import { queryKeys } from '../lib/queryKeys';
 import { usePermissions } from '../lib/permissions';
 import { cn } from '../utils/cn';
@@ -104,6 +105,7 @@ export default function GoodsReceiptsWorkspace() {
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const perms = usePermissions();
   const qkeys = queryKeys.forCompany(activeCompanyId);
+  const resolveUserName = useUserNameResolver();
 
   // ── Tab state ──────────────────────────────────────────
   const [activeTab, setActiveTab] = useState<TabId>('overview');
@@ -311,7 +313,7 @@ export default function GoodsReceiptsWorkspace() {
           Audit Information
         </h3>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <OverviewField label="Created By" icon={User} value={gr.createdBy || gr.receivedBy} />
+          <OverviewField label="Created By" icon={User} value={resolveUserName(gr.createdBy || gr.receivedBy)} />
           <OverviewField label="Created At" icon={Clock} value={fmtDateSafe(gr.createdAt)} />
           <OverviewField label="Updated At" icon={Clock} value={fmtDateSafe(gr.updatedAt)} />
           <OverviewField label="Company ID" icon={Hash} value={gr.companyId} />

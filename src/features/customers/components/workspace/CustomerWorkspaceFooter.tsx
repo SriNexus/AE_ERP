@@ -78,39 +78,38 @@ export default function CustomerWorkspaceFooter({
   isEditing, hasUnsaved, saving, onSave, onSaveAndNext,
 }: Props) {
   return (
-    <div className="flex shrink-0 items-center justify-between rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm px-4 py-1.5">
-      {/* LEFT: Previous / Next */}
-      <div className="flex items-center gap-2">
+    <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm px-3 py-2 sm:px-4 lg:flex-row lg:flex-wrap lg:items-center lg:gap-3 lg:py-1.5">
+      {/* Navigation row — Previous far-left, position centred, Next far-right */}
+      <div className="flex w-full items-center justify-between gap-2 sm:gap-3 lg:flex-1">
         <FooterButton icon={<ChevronLeft className="h-4 w-4" />} label="Previous" onClick={onPrevious} disabled={!hasPrevious} />
+
+        <div className="flex min-w-0 flex-1 flex-wrap items-center justify-center gap-x-3 gap-y-0.5 text-[11px] text-[var(--color-text-muted)]">
+          <span className="shrink-0">
+            Customer <span className="font-semibold text-[var(--color-text)]">{currentPosition}</span> of {total}
+          </span>
+          {isEditing && (
+            <span className="flex items-center gap-1 text-[var(--color-primary-text)]">
+              <Pencil className="h-3 w-3" />
+              Editing
+            </span>
+          )}
+          {hasUnsaved && (
+            <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+              Unsaved
+            </span>
+          )}
+        </div>
+
         <FooterButton icon={<ChevronRight className="h-4 w-4" />} label="Next" onClick={onNext} disabled={!hasNext} />
       </div>
 
-      {/* CENTER: truthful record navigator — no invented progress meter */}
-      <div className="flex items-center gap-3 text-[11px] text-[var(--color-text-muted)]">
-        <span>
-          Customer <span className="font-semibold text-[var(--color-text)]">{currentPosition}</span> of {total}
-        </span>
-        {isEditing && (
-          <span className="flex items-center gap-1 text-[var(--color-primary-text)]">
-            <Pencil className="h-3 w-3" />
-            Editing customer details
-          </span>
-        )}
-        {hasUnsaved && (
-          <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-            Unsaved changes
-          </span>
-        )}
-      </div>
-
-      {/* RIGHT: Save / Save & Next — only present during an active edit
-          session (isEditing), not permanently visible-but-disabled. Scoped
-          explicitly to customer detail edits: embedded actions (Create
-          Quotation/Order/etc.) already save immediately via their own
-          buttons and toasts — this Save never touches those. */}
+      {/* Save / Save & Next — below the nav row on mobile, right on desktop;
+          only during an active edit session. Embedded actions (Create
+          Quotation/Order/etc.) save immediately via their own buttons — this
+          Save never touches those. */}
       {isEditing && (
-        <div className="flex items-center gap-2">
+        <div className="flex w-full items-center justify-center gap-2 border-t border-[var(--color-border-subtle)] pt-2 lg:w-auto lg:justify-end lg:border-t-0 lg:pt-0">
           <FooterButton icon={<Save className="h-4 w-4" />} label="Save" onClick={onSave} disabled={!hasUnsaved || saving} loading={saving} />
           <FooterButton icon={<ChevronRight className="h-4 w-4" />} label="Save & Next" onClick={onSaveAndNext} disabled={saving || !hasNext} loading={saving} tone="primary" />
         </div>

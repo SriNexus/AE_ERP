@@ -11,6 +11,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { fmtDate, fmtDateTime, fmtCurrency } from '../../lib/firestore';
 import type { CommissionRecord } from '../../features/channel-partner/types';
+import { useUserNameResolver } from '../../hooks/useUserNameResolver';
 
 interface PartnerCommissionDetailDrawerProps {
   record: CommissionRecord | null;
@@ -69,6 +70,7 @@ function StatusPill({ status }: { status?: string }) {
 }
 
 export function PartnerCommissionDetailDrawer({ record, open, onClose }: PartnerCommissionDetailDrawerProps) {
+  const resolveUserName = useUserNameResolver();
   if (!record) return null;
 
   return (
@@ -131,7 +133,7 @@ export function PartnerCommissionDetailDrawer({ record, open, onClose }: Partner
               Approval Details
             </p>
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="Approved By" value={record.approvedBy || '—'} />
+              <Field label="Approved By" value={resolveUserName(record.approvedBy)} />
               <Field label="Approved At" value={record.approvedAt ? fmtDateTime(record.approvedAt) : '—'} />
               {record.approvedAmount != null && (
                 <Field label="Approved Amount" value={fmtCurrency(record.approvedAmount)} />
@@ -207,7 +209,7 @@ export function PartnerCommissionDetailDrawer({ record, open, onClose }: Partner
                   <p className="text-sm font-medium text-[var(--color-text)]">Approved</p>
                   <p className="text-xs text-[var(--color-text-muted)]">
                     {record.approvedAt ? fmtDateTime(record.approvedAt) : '—'}
-                    {record.approvedBy ? ` by ${record.approvedBy}` : ''}
+                    {record.approvedBy ? ` by ${resolveUserName(record.approvedBy)}` : ''}
                   </p>
                 </div>
               </div>

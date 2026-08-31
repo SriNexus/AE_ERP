@@ -145,9 +145,10 @@ describe('Quotation list preview popup — reinstated to match the Invoice list 
 });
 
 describe('Old standalone quotation popup — retired for every entry point EXCEPT the list page\'s own row click (see above)', () => {
-  it('the /quotations/:id detail page deep-links unlinked edits via ?edit= instead of the popup', () => {
-    expect(quotationsPage).toContain("const editParam = searchParams.get('edit') || ''");
-    expect(quotationsWorkspacePage).toContain("navigate(`/quotations?edit=${encodeURIComponent(id || '')}`)");
+  it('the /quotations/:id workspace uses inline center-panel edit (startEdit) instead of navigating away', () => {
+    expect(quotationsWorkspacePage).toContain('const [isEditing, setIsEditing] = useState(false)');
+    expect(quotationsWorkspacePage).toContain('onClick={startEdit}');
+    expect(quotationsWorkspacePage).toContain('QuotationItemsEditor');
   });
 
   it('B2B Customer Workspace "View Latest" opens the detail page, not the popup', () => {

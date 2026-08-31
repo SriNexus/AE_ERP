@@ -79,7 +79,13 @@ describe('Face Attendance hooks — no Firebase SDK call at module top level (sa
   it('useFaceEnrollmentStatus.ts / useFaceEnrollment.ts / useFaceAttendance.ts each go through fetch(\'/api/biometrics/...\') — never a direct Firestore/Auth SDK read/write for biometric data', () => {
     for (const file of ['useFaceEnrollmentStatus.ts', 'useFaceEnrollment.ts', 'useFaceAttendance.ts']) {
       const source = readFileSync(join(hooksDir, file), 'utf-8');
-      expect(source).toMatch(/fetch\('\/api\/biometrics\//);
+      // useFaceEnrollmentStatus.ts builds its URL into a `url` variable
+      // (Employee-View "Register Face" follow-up — it conditionally appends
+      // ?targetUserId=) rather than a fetch('/api/biometrics/...') literal
+      // call; accept either shape, as long as the literal path string is
+      // present somewhere and the actual fetch call uses it.
+      expect(source).toMatch(/fetch\('\/api\/biometrics\/|fetch\(url/);
+      expect(source).toContain("/api/biometrics/");
       // No direct client-SDK Firestore access to the biometric collection
       // from any of these hooks — that would risk transmitting the raw
       // embedding to the browser (see api/biometrics/status.ts's own doc

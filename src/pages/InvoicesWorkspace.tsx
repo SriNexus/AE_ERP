@@ -27,7 +27,7 @@ import { statusBadge } from '../components/ui/Badge';
 import { Modal, ConfirmDialog } from '../components/ui/Modal';
 import { Input, Select, Textarea, FormRow, FormSection } from '../components/ui/Input';
 import { Plus, Trash2, Download, CheckCircle2, Edit2, FileText, RefreshCw, X, AlertTriangle, Clock } from 'lucide-react';
-import { InvoiceDetailModal } from '../features/invoices/components/InvoiceDetailModal';
+
 import toast from 'react-hot-toast';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAppStore, useCurrentUser } from '../store/useAppStore';
@@ -102,8 +102,7 @@ function isRowOpenIgnored(target: EventTarget | null) {
   return Boolean(target.closest('button,a,input,select,textarea,[data-action],[data-dropdown],[data-interactive]'));
 }
 
-function downloadInvoicesCsv(rows: any[], filename: string) {
-  const headers = ['Invoice No', 'Order No', 'Customer', 'Date', 'Due Date', 'Total', 'Payment Status', 'Invoice Status'];
+function downloadInvoicesCsv(rows: any[], filename: string) {    const headers = ['PI No', 'Order No', 'Customer', 'Date', 'Due Date', 'Total', 'Payment Status', 'PI Status'];
   const lines = rows.map((inv) => [
     invoiceDisplayNumber(inv),
     String(inv.orderNumber || inv.orderNo || '—'),
@@ -193,42 +192,19 @@ class InvoicePageBoundary extends React.Component<InvoicePageBoundaryProps, Invo
     if (this.state.hasError) {
       return (
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-6 shadow-[var(--shadow-enterprise-surface)]">
-          <p className="text-sm font-semibold text-[var(--color-text)]">Invoices page error was contained.</p>
+          <p className="text-sm font-semibold text-[var(--color-text)]">Proforma Invoices page error was contained.</p>
           <p className="mt-1 text-sm text-[var(--color-text-muted)]">This route can be reopened without affecting the rest of the ERP.</p>
           <button
             type="button"
             className="mt-4 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-semibold text-[var(--color-primary-foreground)]"
             onClick={() => window.location.reload()}
           >
-            Reload invoices
+            Reload proforma invoices
           </button>
         </div>
       );
     }
 
-    return this.props.children;
-  }
-}
-
-type InvoiceModalBoundaryProps = {
-  children: React.ReactNode;
-  onFatalError: (error: Error) => void;
-};
-type InvoiceModalBoundaryState = { hasError: boolean };
-
-class InvoiceModalBoundary extends React.Component<InvoiceModalBoundaryProps, InvoiceModalBoundaryState> {
-  state: InvoiceModalBoundaryState = { hasError: false };
-
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
-
-  componentDidCatch(error: Error) {
-    this.props.onFatalError(error);
-  }
-
-  render() {
-    if (this.state.hasError) return null;
     return this.props.children;
   }
 }
@@ -242,7 +218,6 @@ export default function Invoices() {
   const qkeys = queryKeys.forCompany(activeCompanyId);
   const user = useCurrentUser();
   const [searchParams, setSearchParams] = useSearchParams();
-  const openParam = searchParams.get('open') || '';
   const createParam = searchParams.get('create') || '';
   // Set only when arriving from the Customer Workspace's Generate Invoice
   // modal (CustomerInvoiceModal.tsx) — pre-selects the order the operator
@@ -263,13 +238,11 @@ export default function Invoices() {
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string|null>(null);
   const [form, setForm] = useState({...FORM0});
-  const [viewItem, setViewItem] = useState<any>(null);
   const [delId, setDelId] = useState<string|null>(null);
   const [showBulkStatus, setShowBulkStatus] = useState(false);
   const [bulkStatus, setBulkStatus] = useState('');
   const safeSelected = selected ?? new Set<string>();
   const selectedCount = safeSelected.size;
-  const safeViewItem = viewItem && typeof viewItem === 'object' ? viewItem : null;
 
   function syncQueueParams(nextState: {
     q?: string;
@@ -305,33 +278,17 @@ export default function Invoices() {
     if (kpi) next.set('kpi', kpi); else next.delete('kpi');
     if (nextPage > 1) next.set('page', String(nextPage)); else next.delete('page');
     if (nextPerPage !== PER_PAGE) next.set('perPage', String(nextPerPage)); else next.delete('perPage');
-    // Note: 'open' param is NOT touched by syncQueueParams.
-    // Only openInvoice / closeInvoiceDetails manage the 'open' param directly.
     setSearchParams(next, { replace: true });
   }
 
 
-  function openInvoice(inv: any, replace = false) {
-    userClosedRef.current = false; // User intentionally opened — reset guard
-    setViewItem(inv);
+  /** Navigate to the Invoice Workspace page at /invoices/:id. */
+  function openInvoiceWorkspace(inv: any) {
     if (!inv?.id) return;
-    const next = new URLSearchParams(searchParams);
-    next.set('open', inv.id);
-    if (search) next.set('q', search); else next.delete('q');
-    if (statusF) next.set('status', statusF); else next.delete('status');
-    if (paymentF) next.set('payment', paymentF); else next.delete('payment');
-    if (assignedF) next.set('assigned', assignedF); else next.delete('assigned');
-    if (dateRange && dateRange !== 'all') next.set('date', dateRange); else next.delete('date');
-    if (customFrom) next.set('from', customFrom); else next.delete('from');
-    if (customTo) next.set('to', customTo); else next.delete('to');
-    if (activeKpi) next.set('kpi', activeKpi); else next.delete('kpi');
-    if (page > 1) next.set('page', String(page)); else next.delete('page');
-    if (perPage !== PER_PAGE) next.set('perPage', String(perPage)); else next.delete('perPage');
-    setSearchParams(next, { replace });
+    navigate(`/invoices/${encodeURIComponent(inv.id)}`);
   }
 
   function openCreateForm() {
-    closeInvoiceDetails();
     setForm({ ...FORM0, date: new Date().toISOString().split('T')[0] });
     setItems([]);
     setEditId(null);
@@ -554,7 +511,7 @@ export default function Invoices() {
       qc.invalidateQueries({queryKey:qkeys.invoices});
       toast.success(editId?'Updated':'Invoice created');
       closeForm();
-      if (savedInvoice?.id) openInvoice(savedInvoice, true);
+      if (savedInvoice?.id) navigate(`/invoices/${encodeURIComponent(savedInvoice.id)}`);
     },
     onError: (e:any) => toast.error(e.message),
   });
@@ -605,66 +562,8 @@ export default function Invoices() {
     onError: (e: any) => toast.error(e.message),
   });
 
-  const sendInvoiceMutation = useMutation({
-    mutationFn: async (id: string) => {
-      const invoice = invoices.find((entry: any) => entry.id === id) || safeViewItem;
-      if (!invoice) throw new Error('Invoice not found');
-      const opened = sendInvoiceEmail(invoice, 'invoice');
-      if (!opened) throw new Error('Unable to open Gmail compose.');
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkeys.invoices });
-      toast.success('Email compose opened');
-      closeInvoiceDetails();
-    },
-    onError: (e: any) => toast.error(e.message),
-  });
-  const markPaidMutation = useMutation({
-    mutationFn: async (id: string) => updateDocById(COLLECTIONS.PROFORMA_INVOICES, id, { paymentStatus: 'Paid', paidAt: new Date().toISOString() }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkeys.invoices });
-      toast.success('Invoice marked paid');
-      closeInvoiceDetails();
-    },
-    onError: (e: any) => toast.error(e.message),
-  });
-
-  function duplicateInvoice(inv: any) {
-    closeInvoiceDetails();
-    setForm({
-      orderId: '',
-      customer: inv.customer || '',
-      customerId: inv.customerId || '',
-      date: new Date().toISOString().split('T')[0],
-      dueDate: inv.dueDate?.split('T')[0] || '',
-      status: 'Draft',
-      paymentStatus: 'Pending',
-      paymentMode: inv.paymentMode || '',
-      subtotal: String(inv.subtotal || 0),
-      taxAmount: String(inv.taxAmount || 0),
-      discount: String(inv.discount || 0),
-      total: String(inv.total || 0),
-      notes: inv.notes || '',
-    });
-    setItems(Array.isArray(inv.items) ? inv.items.map((item: any) => ({ ...item })) : []);
-    setEditId(null);
-    setShowForm(true);
-  }
-
-  // Track whether user explicitly closed the detail — prevents URL-driven reopen
-  const userClosedRef = useRef(false);
-
-  function closeInvoiceDetails() {
-    userClosedRef.current = true;
-    const next = new URLSearchParams(searchParams);
-    next.delete('open');
-    setSearchParams(next, { replace: true });
-    setViewItem(null);
-  }
-
   useEffect(() => {
     if (createParam !== '1') return;
-    closeInvoiceDetails();
     setForm({ ...FORM0, date: new Date().toISOString().split('T')[0] });
     setItems([]);
     setEditId(null);
@@ -701,7 +600,6 @@ export default function Invoices() {
     }
   }
   function openEdit(inv:any) { 
-    closeInvoiceDetails();
     setForm({orderId:inv.orderId||'',customer:inv.customer||'',customerId:inv.customerId||'',date:inv.date?.split('T')[0]||'',dueDate:inv.dueDate?.split('T')[0]||'',status:inv.status||'Draft',paymentStatus:inv.paymentStatus||'Pending',paymentMode:inv.paymentMode||'',subtotal:String(inv.subtotal||0),taxAmount:String(inv.taxAmount||0),discount:String(inv.discount||0),total:String(inv.total||0),notes:inv.notes||''}); 
     setItems(inv.items||[]); 
     setEditId(inv.id); 
@@ -772,33 +670,19 @@ export default function Invoices() {
   const allSel = selectedCount === paginated.length && paginated.length > 0;
   function handleRowClick(e: React.MouseEvent<HTMLTableRowElement>, inv: any) {
     if (isRowOpenIgnored(e.target)) return;
-    openInvoice(inv);
+    openInvoiceWorkspace(inv);
   }
   function handleRowKeyDown(e: React.KeyboardEvent<HTMLTableRowElement>, inv: any) {
     if (isRowOpenIgnored(e.target)) return;
     if (e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
-    openInvoice(inv);
+    openInvoiceWorkspace(inv);
   }
   function exportSelected() {
     const rows = (invoices as any[]).filter((inv) => safeSelected.has(inv.id));
     if (!rows.length) return toast.error('No invoices selected');
     downloadInvoicesCsv(rows, `invoices-export-${new Date().toISOString().slice(0, 10)}.csv`);
   }
-  // Sync URL → modal: opens the detail popup when the URL has an 'open' param.
-  // 'filtered' and 'perPage' are NOT in deps to prevent re-triggering on filter changes.
-  useEffect(() => {
-    const openId = openParam;
-    // If the user just closed the popup, never reopen — regardless of URL changes
-    if (userClosedRef.current) return;
-    if (!openId || isLoading) return;
-    const target = (invoices as any[]).find((invoice: any) => invoice.id === openId);
-    if (!target) return;
-    openInvoice(target);
-    // Scroll to the record on the page
-    window.setTimeout(() => document.querySelector(`[data-record-id="${CSS.escape(openId)}"]`)?.scrollIntoView({ block: 'center' }), 0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openParam, isLoading, invoices]);
   const stats = useMemo(() => {
     const all = invoices as any[];
     const today = all.filter(i => {
@@ -855,9 +739,9 @@ export default function Invoices() {
     <div className="flex flex-1 min-h-0 flex-col gap-2 overflow-hidden">
       {/* ── Premium Workspace Hero ─────────────────────────── */}
       <WorkspaceHero
-        title="Invoices"
+        title="Proforma Invoices"
         icon={<FileText className="h-6 w-6" />}
-        breadcrumbs={['Home', 'Sales', 'Invoices']}
+
         statusText="Last sync · Realtime Connected"
         statusDotColor="var(--color-success)"
         className="gap-3"
@@ -1051,7 +935,7 @@ export default function Invoices() {
                       <Td className="py-3">{statusBadge(inv.paymentStatus || 'Pending')}</Td>
                       <Td className="py-3" align="right">{/* Use inline View button to avoid circular dep */}
                         <div className="flex items-center justify-end gap-1.5" data-action>
-                          <Button size="xs" variant="outline" icon={<FileText className="h-3.5 w-3.5" />} onClick={(e) => { e.stopPropagation(); openInvoice(inv); }} className="h-7 rounded-xl border-[var(--color-border-strong)] bg-[var(--color-text)] px-3 text-[var(--color-text-inverse)] transition-all duration-200 ease-out hover:-translate-y-0.5 hover:opacity-90">View</Button>
+                          <Button size="xs" variant="outline" icon={<FileText className="h-3.5 w-3.5" />} onClick={(e) => { e.stopPropagation(); openInvoiceWorkspace(inv); }} className="h-7 rounded-xl border-[var(--color-border-strong)] bg-[var(--color-text)] px-3 text-[var(--color-text-inverse)] transition-all duration-200 ease-out hover:-translate-y-0.5 hover:opacity-90">View</Button>
                         </div>
                       </Td>
                     </Tr>
@@ -1104,38 +988,10 @@ export default function Invoices() {
         </form>
       </Modal>
 
-      <InvoiceModalBoundary
-        key={safeViewItem?.id || 'invoice-modal-closed'}
-        onFatalError={(error) => {
-          console.error('[InvoiceModal]', error);
-          toast.error('Invoice details could not be rendered. The popup was closed.');
-          closeInvoiceDetails();
-        }}
-      >
-      <InvoiceDetailModal
-        open={!!safeViewItem}
-        invoice={safeViewItem}
-        currencySymbol={company.currencySymbol}
-        orderNumberById={orderNumberById}
-        canDelete={canDo('delete', 'invoices')}
-        onClose={closeInvoiceDetails}
-        onEdit={() => { closeInvoiceDetails(); openEdit(safeViewItem); }}
-        onSend={() => sendInvoiceMutation.mutate(safeViewItem.id)}
-        onSendReminder={() => sendInvoiceEmail(safeViewItem, 'paymentReminder')}
-        onDownload={() => doPrint(safeViewItem, company)}
-        onDuplicate={() => duplicateInvoice(safeViewItem)}
-        onMarkPaid={() => markPaidMutation.mutate(safeViewItem.id)}
-        onDelete={() => { setDelId(safeViewItem.id); closeInvoiceDetails(); }}
-      />
-      </InvoiceModalBoundary>
       <ConfirmDialog
         open={!!delId}
         onClose={()=>setDelId(null)}
-        onConfirm={()=>delId&&del.mutate(delId, {
-          onSuccess: () => {
-            if (safeViewItem?.id === delId) closeInvoiceDetails();
-          },
-        })}
+        onConfirm={()=>delId&&del.mutate(delId)}
         loading={del.isPending}
         title="Delete Invoice"
         message="Delete this invoice?"

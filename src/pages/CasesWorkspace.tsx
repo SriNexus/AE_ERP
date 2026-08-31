@@ -45,6 +45,7 @@ import {
 import { getOne, getAll, fmtDate, fmtCurrency } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';
 import { useAppStore } from '../store/useAppStore';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import { queryKeys } from '../lib/queryKeys';
 import { canDo } from '../lib/permissions';
 import { cn } from '../utils/cn';
@@ -147,6 +148,7 @@ export default function CasesWorkspace() {
   const navigate = useNavigate();
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const qkeys = queryKeys.forCompany(activeCompanyId);
+  const resolveUserName = useUserNameResolver();
 
   // ── Health state ─────────────────────────────────────────
   const [healthStatus, setHealthStatus] = useState<'healthy' | 'warning' | 'broken' | null>(null);
@@ -572,7 +574,7 @@ export default function CasesWorkspace() {
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <OverviewField label="Company ID" value={caseRecord.companyId || '—'} icon={Building2} />
           <OverviewField label="Created By" icon={User}>
-            {caseRecord.createdBy ? String(caseRecord.createdBy) : '—'}
+            {resolveUserName(caseRecord.createdBy)}
           </OverviewField>
           <OverviewField label="Last Validated" icon={Clock}>
             {validationResult ? 'Via manual validation' : 'Not yet validated'}

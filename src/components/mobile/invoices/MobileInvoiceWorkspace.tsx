@@ -200,7 +200,6 @@ export function MobileInvoiceWorkspace({ mode }: { mode: Mode }) {
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
   const [form, setForm] = useState<InvoiceForm>({ ...FORM0 });
   const [items, setItems] = useState<any[]>([]);
-  const [viewInvoice, setViewInvoice] = useState<Invoice | null>(null);
   const [dirty, setDirty] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -321,7 +320,6 @@ export function MobileInvoiceWorkspace({ mode }: { mode: Mode }) {
   }
 
   function openEdit(invoice: Invoice) {
-    setViewInvoice(null);
     setEditingInvoice(invoice);
     setForm({
       orderId: invoice.orderId || invoice.sourceOrderId || '',
@@ -418,9 +416,9 @@ export function MobileInvoiceWorkspace({ mode }: { mode: Mode }) {
     onSuccess: (invoice) => {
       void qc.invalidateQueries({ queryKey: keys.invoices });
       void qc.invalidateQueries({ queryKey: keys.ordersRoot });
-      toast.success(editingInvoice ? 'Invoice updated' : 'Invoice created');
+      toast.success(editingInvoice ? 'Proforma Invoice updated' : 'Proforma Invoice created');
       closeForm();
-      setViewInvoice(invoice as Invoice);
+      if (invoice?.id) navigate(`/invoices/${encodeURIComponent((invoice as Invoice).id)}`);
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -437,7 +435,6 @@ export function MobileInvoiceWorkspace({ mode }: { mode: Mode }) {
       toast.success(`Deleted ${selectedRows.length || 1} invoice${selectedRows.length === 1 ? '' : 's'}`);
       setSelected(new Set());
       setDeleteOpen(false);
-      setViewInvoice(null);
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -468,7 +465,6 @@ export function MobileInvoiceWorkspace({ mode }: { mode: Mode }) {
       void qc.invalidateQueries({ queryKey: keys.invoices });
       toast.success('Email compose opened');
       setSelected(new Set());
-      setViewInvoice(null);
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -477,9 +473,8 @@ export function MobileInvoiceWorkspace({ mode }: { mode: Mode }) {
     mutationFn: async (ids: string[]) => Promise.all(ids.map((id) => updateDocById(COLLECTIONS.PROFORMA_INVOICES, id, { paymentStatus: 'Paid', paidAt: new Date().toISOString(), paidAmount: (invoices as Invoice[]).find((invoice) => invoice.id === id)?.total || 0, balanceAmount: 0 }))),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.invoices });
-      toast.success('Invoice marked paid');
+      toast.success('Proforma Invoice marked paid');
       setSelected(new Set());
-      setViewInvoice(null);
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -573,33 +568,12 @@ export function MobileInvoiceWorkspace({ mode }: { mode: Mode }) {
             selected={selected.has(invoice.id)}
             currencySymbol={company?.currencySymbol || '₹'}
             onSelect={() => toggleSelect(invoice.id)}
-            onView={() => setViewInvoice(invoice)}
+            onView={() => navigate(`/invoices/${encodeURIComponent(invoice.id)}`)}
           />
         ))}
       </div>
 
       {!isLoading && filteredInvoices.length > 0 && <Pagination page={page} total={filteredInvoices.length} perPage={PER_PAGE} onChange={changePage} />}
-
-      <InvoiceViewModal
-        invoice={viewInvoice}
-        orders={orders as any[]}
-        customers={customers as any[]}
-        dispatches={dispatches as any[]}
-        payments={payments as any[]}
-        currencySymbol={company?.currencySymbol || '₹'}
-        canEdit={canEdit}
-        canDelete={canDelete}
-        sending={sendMutation.isPending}
-        markingPaid={markPaidMutation.isPending}
-        onClose={() => setViewInvoice(null)}
-        onEdit={openEdit}
-        onDelete={(invoice) => { setSelected(new Set([invoice.id])); setViewInvoice(null); setDeleteOpen(true); }}
-        onDuplicate={(invoice) => { setViewInvoice(null); setDuplicateInvoice(invoice); }}
-        onNote={(invoice) => { setViewInvoice(null); setNoteInvoice(invoice); }}
-        onSend={(invoice) => sendMutation.mutate([invoice.id])}
-        onMarkPaid={(invoice) => markPaidMutation.mutate([invoice.id])}
-        onPrint={(invoice) => printInvoice(invoice, company)}
-      />
 
       <InvoiceDialogs
         formOpen={formOpen}
@@ -774,138 +748,6 @@ function InvoiceDialogs({ formOpen, form, items, orders, totals, dirty, saving, 
   );
 }
 
-function InvoiceViewModal({ invoice, orders, customers, dispatches, payments, currencySymbol, canEdit, canDelete, sending, markingPaid, onClose, onEdit, onDelete, onDuplicate, onNote, onSend, onMarkPaid, onPrint }: {
-  invoice: Invoice | null;
-  orders: any[];
-  customers: any[];
-  dispatches: any[];
-  payments: any[];
-  currencySymbol: string;
-  canEdit: boolean;
-  canDelete: boolean;
-  sending: boolean;
-  markingPaid: boolean;
-  onClose: () => void;
-  onEdit: (invoice: Invoice) => void;
-  onDelete: (invoice: Invoice) => void;
-  onDuplicate: (invoice: Invoice) => void;
-  onNote: (invoice: Invoice) => void;
-  onSend: (invoice: Invoice) => void;
-  onMarkPaid: (invoice: Invoice) => void;
-  onPrint: (invoice: Invoice) => void;
-}) {
-  if (!invoice) return null;
-  const orderId = invoice.orderId || invoice.sourceOrderId;
-  const order = orders.find((entry) => entry.id === orderId);
-  const phone = invoicePhone(invoice, customers);
-  const email = invoiceEmail(invoice, customers);
-  const paid = Number(invoice.paidAmount || invoice.amountPaid || 0);
-  const balance = Number(invoice.balanceAmount ?? Math.max(0, (Number(invoice.total) || 0) - paid));
-  const relatedDispatch = dispatches.filter((entry) => entry.orderId === orderId);
-  const relatedPayments = payments.filter((entry) => entry.orderId === orderId || entry.proformaInvoiceId === invoice.id || entry.invoiceId === invoice.id);
-  const activity = [
-    { type: 'Created', desc: 'Invoice record created', date: invoice.createdAt || invoice.date, userName: invoice.createdByName || 'System' },
-    ...(invoice.updatedAt ? [{ type: 'Updated', desc: 'Invoice was updated', date: invoice.updatedAt, userName: invoice.updatedByName || 'System' }] : []),
-    ...(invoice.paymentStatus === 'Paid' ? [{ type: 'Paid', desc: 'Invoice marked as paid', date: invoice.paidAt || invoice.updatedAt || invoice.createdAt, userName: invoice.updatedByName || 'System' }] : []),
-  ];
-  return (
-    <Modal open={!!invoice} onClose={onClose} title={invoiceNumber(invoice)} size="full">
-      <div className="space-y-4">
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">{statusBadge(invoice.status || 'Draft')}{statusBadge(invoice.paymentStatus || 'Pending')}</div>
-          <div className="grid grid-cols-2 gap-2">
-            <Detail label="Customer" value={invoice.customer || 'Not available'} />
-            <Detail label="Total" value={fmtCurrency(Number(invoice.total) || 0, currencySymbol)} />
-          </div>
-        </section>
-
-        <Section title="Invoice Information">
-          <Detail label="Invoice Number" value={invoiceNumber(invoice)} />
-          <Detail label="Invoice Date" value={invoice.date ? fmtDate(invoice.date) : 'Not set'} />
-          <Detail label="Due Date" value={invoice.dueDate ? fmtDate(invoice.dueDate) : 'Not set'} />
-          <Detail label="Template" value={invoice.templateUsed || 'INVOICE'} />
-        </Section>
-
-        <Section title="Customer Information">
-          <Detail label="Customer" value={invoice.customer || 'Not available'} />
-          <Detail label="Mobile" value={phone || 'Not available'} />
-          <Detail label="Email" value={email || 'Not available'} />
-        </Section>
-
-        <Section title="Order Reference">
-          <Detail label="Order" value={order?.orderNumber || order?.orderNo || orderId || 'No order linked'} />
-        </Section>
-
-        <Section title="Products">
-          {invoice.items?.length ? (
-            <div className="space-y-2">
-              {invoice.items.map((item: any, index: number) => (
-                <div key={index} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{item.product || `Item ${index + 1}`}</p>
-                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{Number(item.qty) || 0} {item.unit || ''} x {fmtCurrency(Number(item.price) || 0, currencySymbol)} · Tax {Number(item.tax) || 0}%</p>
-                </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-[var(--color-text-muted)]">No products available.</p>}
-        </Section>
-
-        <Section title="Pricing Summary">
-          <TotalRow label="Subtotal" value={fmtCurrency(Number(invoice.subtotal) || 0, currencySymbol)} />
-          <TotalRow label="Tax Details" value={fmtCurrency(Number(invoice.taxAmount || invoice.taxTotal) || 0, currencySymbol)} />
-          <TotalRow label="Discounts" value={fmtCurrency(Number(invoice.discount) || 0, currencySymbol)} />
-          <TotalRow label="Grand Total" value={fmtCurrency(Number(invoice.total) || 0, currencySymbol)} strong />
-        </Section>
-
-        <Section title="Payment Summary">
-          <Detail label="Payment Status" value={invoice.paymentStatus || 'Pending'} />
-          <Detail label="Paid Amount" value={fmtCurrency(paid, currencySymbol)} />
-          <Detail label="Outstanding" value={fmtCurrency(balance, currencySymbol)} />
-          <Detail label="Payment Mode" value={invoice.paymentMode || 'Not selected'} />
-        </Section>
-
-        <Section title="Billing Details">
-          <p className="text-sm text-[var(--color-text-secondary)]">{invoice.billingAddress || invoice.deliveryAddress || order?.billingAddress || order?.shippingAddress || 'Not available'}</p>
-        </Section>
-
-        <Section title="Notes">
-          <p className="whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">{invoice.notes || 'No notes recorded.'}</p>
-        </Section>
-
-        <Section title="Attachments"><p className="text-sm text-[var(--color-text-muted)]">{invoice.attachmentName || invoice.fileName || 'No attachments available.'}</p></Section>
-
-        <Section title="Timeline">
-          <MobileTimelinePreview title={`${invoiceNumber(invoice)} Timeline`} entries={activity} />
-        </Section>
-
-        <Section title="Payment History">
-          {relatedPayments.length ? relatedPayments.map((payment) => <Detail key={payment.id} label={payment.id} value={`${fmtCurrency(Number(payment.amount) || 0, currencySymbol)} · ${payment.status || 'Recorded'}`} />) : <p className="text-sm text-[var(--color-text-muted)]">No payments linked.</p>}
-        </Section>
-
-        <Section title="Related Dispatch">
-          {relatedDispatch.length ? relatedDispatch.map((dispatch) => <Detail key={dispatch.id} label={dispatch.dispatchNumber || dispatch.id} value={dispatch.status || 'Pending'} />) : <p className="text-sm text-[var(--color-text-muted)]">No dispatch records.</p>}
-        </Section>
-
-        <Section title="Audit Information">
-          <Detail label="Created By" value={invoice.createdByName || invoice.createdBy || 'System'} />
-          <Detail label="Updated" value={invoice.updatedAt ? formatDateLabel(invoice.updatedAt) : 'Not available'} />
-        </Section>
-
-        <div className="grid grid-cols-2 gap-2">
-          {phone ? <a className={linkButtonClass} href={`tel:${phone}`}><Phone className="h-4 w-4" />Call</a> : null}
-          {phone ? <a className={linkButtonClass} href={whatsappHref(phone)} target="_blank" rel="noreferrer"><MessageCircle className="h-4 w-4" />WhatsApp</a> : null}
-          {email ? <a className={linkButtonClass} href={`mailto:${email}`}><Mail className="h-4 w-4" />Email</a> : null}
-          <Button variant="outline" icon={<Printer className="h-4 w-4" />} onClick={() => onPrint(invoice)}>PDF</Button>
-          {canEdit ? <Button variant="outline" icon={<FileText className="h-4 w-4" />} loading={sending} onClick={() => onSend(invoice)}>Send Email</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<CheckCircle2 className="h-4 w-4" />} loading={markingPaid} onClick={() => onMarkPaid(invoice)}>Mark Paid</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Copy className="h-4 w-4" />} onClick={() => onDuplicate(invoice)}>Duplicate</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Calendar className="h-4 w-4" />} onClick={() => onNote(invoice)}>Add Note</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Edit2 className="h-4 w-4" />} onClick={() => onEdit(invoice)}>Edit</Button> : null}
-          {canDelete ? <Button variant="danger" icon={<Trash2 className="h-4 w-4" />} onClick={() => onDelete(invoice)}>Delete</Button> : null}
-        </div>
-      </div>
-    </Modal>
-  );
-}
 
 function TotalRow({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
   return <div className={cn('flex items-center justify-between gap-3 text-sm', strong ? 'font-bold text-[var(--color-text)]' : 'text-[var(--color-text-secondary)]')}><span>{label}</span><span>{value}</span></div>;

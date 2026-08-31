@@ -96,12 +96,12 @@ describe('FaceCapture / useFaceEnrollment — server boundary respected', () => 
     expect(useFaceEnrollment).toContain('getIdToken()');
   });
 
-  it('self-enrollment only in this phase — never sends a targetUserId (or any other client-chosen identity field) in the request body', () => {
-    expect(useFaceEnrollmentCode).not.toContain('targetUserId');
+  it('self-enrollment by default; an explicit on-behalf-of targetUserId (Employee-View "Register Face") is the only OTHER identity field ever sent, and only through the same single endpoint — never companyId/groupId/enrolledBy', () => {
     expect(useFaceEnrollmentCode).not.toMatch(/\bemployeeId\b|\bcompanyId\b|\bgroupId\b|\benrolledBy\b/);
-    // The only body field ever sent is the image itself.
-    const bodyMatch = useFaceEnrollment.match(/body: JSON\.stringify\(\{([^}]*)\}\)/);
-    expect(bodyMatch?.[1].trim()).toBe('image');
+    // The body is `{ image }` by default, or `{ image, targetUserId }` only
+    // when the caller (EmployeeFaceRegistrationFlow.tsx) explicitly passed
+    // one — never any other shape.
+    expect(useFaceEnrollmentCode).toContain('JSON.stringify(targetUserId ? { image, targetUserId } : { image })');
   });
 });
 

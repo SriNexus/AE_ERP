@@ -82,9 +82,10 @@ describe('Old standalone Order popup — retired, invocation paths rewired', () 
     expect(ordersPage).toContain("navigate(`/orders/${encodeURIComponent(o.id)}`)");
   });
 
-  it('the /orders/:id detail page deep-links edits via ?edit= instead of the popup, and the popup-only Assign Team quick action is dropped', () => {
+  it('the /orders/:id detail page uses inline edit mode (startEdit) instead of the popup, and the popup-only Assign Team quick action is dropped', () => {
     expect(ordersPage).toContain("const editParam = searchParams.get('edit') || ''");
-    expect(ordersWorkspacePage).toContain("navigate(`/orders?edit=${encodeURIComponent(id || '')}`)");
+    expect(ordersWorkspacePage).toContain('startEdit');
+    expect(ordersWorkspacePage).toContain('isEditing');
     expect(ordersWorkspacePage).not.toContain('&tab=assign');
     expect(ordersWorkspacePage).not.toContain('onAssignTeam');
   });

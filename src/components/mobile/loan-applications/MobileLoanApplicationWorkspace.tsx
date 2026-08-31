@@ -5,10 +5,10 @@
  * Desktop is source of truth. No mobile-specific business logic.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Download, Target, Plus, Trash2, UserCheck, CreditCard, ExternalLink } from 'lucide-react';
+import { Download, Target, Plus, Trash2, UserCheck } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Button, Card, ConfirmDialog, Modal, Pagination, Select, Textarea, Input } from '../../ui';
 import { LOAN_APPLICATION_FORM_DEFAULT, type LoanApplicationForm, LOAN_APPLICATION_STATUSES } from '../../../features/loan-applications/hooks/useLoanApplications';
@@ -84,8 +84,7 @@ export function MobileLoanApplicationWorkspace({ mode }: { mode: Mode }) {
   const [formOpen, setFormOpen] = useState(false);
   const [editingReg, setEditingReg] = useState<RegRecord | null>(null);
   const [form, setForm] = useState<LoanApplicationForm>({ ...LOAN_APPLICATION_FORM_DEFAULT });
-  const [viewReg, setViewReg] = useState<RegRecord | null>(null);
-  const openId = params.get('open') || '';
+
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -115,35 +114,13 @@ export function MobileLoanApplicationWorkspace({ mode }: { mode: Mode }) {
   const canEdit = perms.canEdit('loan_applications');
   const canDelete = perms.canDelete('loan_applications');
 
-  const userClosedRef = useRef(false);
-
   useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(filteredRows.length / PER_PAGE));
     if (page > maxPage) setPage(maxPage);
   }, [filteredRows.length, page]);
 
-  // Sync view with URL open param
-  useEffect(() => {
-    if (userClosedRef.current) { userClosedRef.current = false; return; }
-    if (!openId || isLoading) return;
-    const target = (registrations as RegRecord[]).find((r) => r.id === openId);
-    if (target && !viewReg) setViewReg(target);
-  }, [openId, isLoading, registrations, viewReg]);
-
   function openDetail(reg: RegRecord) {
-    userClosedRef.current = false;
-    setViewReg(reg);
-    const next = new URLSearchParams(params);
-    next.set('open', reg.id);
-    setParams(next, { replace: true });
-  }
-
-  function closeDetail() {
-    userClosedRef.current = true;
-    setViewReg(null);
-    const next = new URLSearchParams(params);
-    next.delete('open');
-    setParams(next, { replace: true });
+    navigate(`/loan-applications/${encodeURIComponent(reg.id)}`);
   }
 
   function changePage(nextPage: number) {
@@ -191,7 +168,6 @@ export function MobileLoanApplicationWorkspace({ mode }: { mode: Mode }) {
   });
 
   function openEdit(reg: RegRecord) {
-    closeDetail();
     setEditingReg(reg);
     setForm({
       customerId: reg.customerId || '',
@@ -325,12 +301,7 @@ export function MobileLoanApplicationWorkspace({ mode }: { mode: Mode }) {
         <Pagination page={page} total={filteredRows.length} perPage={PER_PAGE} onChange={changePage} />
       )}
 
-      <RegViewModal reg={viewReg} canEdit={canEdit} canDelete={canDelete} onClose={closeDetail}
-        onEdit={(reg) => openEdit(reg)}
-        onDelete={(reg) => { setSelected(new Set([reg.id])); closeDetail(); setDeleteOpen(true); }}
-        onCreatePayment={viewReg?.status === 'Approved' ? () => { closeDetail(); } : undefined}
-        onCreateProject={viewReg?.status === 'Payment Received' ? () => { closeDetail(); } : undefined}
-      />
+
 
       <RegDialogs
         formOpen={formOpen}
@@ -417,126 +388,9 @@ function RegSkeletonCard() {
   );
 }
 
-function RegViewModal({ reg, canEdit, canDelete, onClose, onEdit, onDelete, onCreatePayment, onCreateProject }: {
-  reg: RegRecord | null;
-  canEdit: boolean;
-  canDelete: boolean;
-  onClose: () => void;
-  onEdit: (reg: RegRecord) => void;
-  onDelete: (reg: RegRecord) => void;
-  onCreatePayment?: () => void;
-  onCreateProject?: () => void;
-}) {
-  if (!reg) return null;
-  const activity = reg.activityLog || [];
-  return (
-    <Modal open={!!reg} onClose={onClose} title={reg.customerName || 'Loan Application'} size="full">
-      <div className="space-y-4">
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-tight bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-900/40 dark:text-blue-400 dark:border-blue-700">{reg.status || 'Draft'}</span>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Detail label="Loan Application ID" value={reg.registrationId || reg.id} />
-            <Detail label="Assigned To" value={reg.assignedToName || 'Unassigned'} />
-          </div>
-        </section>
 
-        <Section title="Customer Information">
-          <Detail label="Name" value={reg.customerName || 'Not available'} />
-          <Detail label="Phone" value={reg.customerPhone || 'Not available'} />
-          <Detail label="Address" value={reg.customerAddress || 'Not available'} />
-        </Section>
 
-        <Section title="Bank Details">
-          <Detail label="Bank" value={reg.bankName || 'Not available'} />
-          <Detail label="Branch" value={reg.branch || 'Not available'} />
-          <Detail label="Loan Amount" value={reg.loanAmount ? `₹${Number(reg.loanAmount).toLocaleString('en-IN')}` : 'Not available'} />
-          <Detail label="Application No" value={reg.applicationNumber || 'Not available'} />
-        </Section>
 
-        <Section title="Workflow">
-          <Detail label="Digital Sign" value={reg.digitalSignStatus === 'completed' ? '✅ Completed' : '✍️ Pending'} />
-          <Detail label="Submission Date" value={reg.submissionDate || 'Not submitted'} />
-          <Detail label="Approval Date" value={reg.approvalDate || 'Not approved'} />
-          <Detail label="Payment Date" value={reg.paymentDate || 'Not received'} />
-        </Section>
-
-        <Section title="Activity">
-          {activity.length > 0 ? (
-            <div className="space-y-2">
-              {[...activity].reverse().slice(0, 10).map((log: any, idx: number) => (
-                <div key={log.id || idx} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{log.type || 'Activity'}</p>
-                  <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">{log.desc || 'No details'}</p>
-                  <p className="mt-0.5 text-[10px] text-[var(--color-text-disabled)]">{log.date ? fmtDate(log.date) : ''}{log.userName ? ` · by ${log.userName}` : ''}</p>
-                </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-[var(--color-text-muted)]">No activity recorded.</p>}
-        </Section>
-
-        <Section title="Activity History (Tasks)">
-          {activity.length > 0 ? (
-            <div className="space-y-2">
-              {activity.slice(0, 8).map((log: any, idx: number) => (
-                <div key={log.id || idx} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-2.5">
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs font-semibold text-[var(--color-text)]">{log.type || 'Activity'}</p>
-                    <span className="text-[10px] text-[var(--color-text-muted)]">{log.date ? log.date.slice(0, 10) : ''}</span>
-                  </div>
-                  <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">{log.desc || ''}</p>
-                  <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">{log.userName || ''}</p>
-                </div>
-              ))}
-              {activity.length > 8 && <p className="text-xs text-[var(--color-text-muted)]">+{activity.length - 8} more entries</p>}
-            </div>
-          ) : (
-            <p className="text-sm text-[var(--color-text-muted)]">No activity recorded. Tasks will auto-create when loan application status changes.</p>
-          )}
-        </Section>
-
-        <Section title="Notifications">
-          <p className="text-sm text-[var(--color-text-muted)]">
-            Notifications are auto-generated when loan application status changes. Recipients include the assigned employee, manager, and owner based on the status transition.
-          </p>
-        </Section>
-
-        <Section title="Notes">
-          <p className="whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">{reg.notes || 'No notes recorded.'}</p>
-        </Section>
-
-        <div className="space-y-2">
-          {reg.status === 'Approved' && onCreatePayment && (
-            <Button variant="primary" className="w-full" icon={<CreditCard className="h-4 w-4" />} onClick={onCreatePayment}>Create Payment</Button>
-          )}
-          <div className="grid grid-cols-2 gap-2">
-            {canEdit ? <Button variant="outline" onClick={() => onEdit(reg)}>Edit</Button> : null}
-            {canDelete ? <Button variant="danger" onClick={() => onDelete(reg)}>Delete</Button> : null}
-          </div>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-      <h3 className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)]">{title}</h3>
-      <div className="mt-3 space-y-3">{children}</div>
-    </section>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)]">{label}</p>
-      <p className="mt-1 break-words text-sm font-semibold text-[var(--color-text)]">{value}</p>
-    </div>
-  );
-}
 
 function RegDialogs({ formOpen, form, editingReg, saving, dirty, confirmClose, onCloseForm, onDiscard, onKeepEditing, onChange, onSubmit }: {
   formOpen: boolean;

@@ -88,7 +88,7 @@ function ActionButton({ icon, label, onClick, disabled, href, external }: {
   icon: React.ReactNode; label: string; onClick?: () => void; disabled?: boolean; href?: string; external?: boolean;
 }) {
   const className = [
-    'group flex flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-2.5 text-center transition-all',
+    'group flex min-w-0 flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-2.5 text-center transition-all sm:px-1.5',
     'shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)]',
     'hover:-translate-y-0.5 hover:border-[var(--color-primary-muted)] hover:shadow-[0_6px_14px_rgba(0,0,0,0.08),0_2px_4px_rgba(0,0,0,0.05)]',
     'active:translate-y-0 active:scale-[0.98] active:shadow-[0_1px_1px_rgba(0,0,0,0.04)]',
@@ -224,7 +224,8 @@ export default function CustomerQuickActions({ customer, isB2B, hasProject = fal
   return (
     <div className="px-4 py-4 border-b border-[var(--color-border-subtle)]">
       <h3 className="mb-3 text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Quick Actions</h3>
-      <div className="grid grid-cols-2 gap-2">
+      {/* Mobile: one row (4 across); desktop right rail: 2 columns. */}
+      <div className="grid grid-cols-4 gap-1.5 sm:gap-2 lg:grid-cols-2">
         {!isB2B && !hasProject && (
           <ActionButton icon={<HardHat className="h-4 w-4" />} label="Create Project" onClick={workflow.goToProject} disabled={!canCreateProjects} />
         )}

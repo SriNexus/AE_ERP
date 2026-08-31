@@ -122,24 +122,41 @@ export default function CustomerWorkspaceHeader({ customer, actions, onBack }: P
   const { type, displayName, phone, email, city, assignedToName, status } = resolveCustomerHeaderFields(customer);
 
   return (
-    <div className="flex shrink-0 items-center gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm px-6 py-4">
-      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-hover)] text-lg font-bold text-white shadow-sm ring-2 ring-[var(--color-primary-muted)]">
-        {displayName[0]?.toUpperCase() || '?'}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2.5 flex-wrap">
-          <h1 className="truncate text-xl font-bold text-[var(--color-text)]">{displayName}</h1>
-          <TypeChip type={type} />
-          <StatusPill status={status} />
+    <div className="flex shrink-0 flex-col px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3 sm:gap-y-2 sm:px-6 sm:py-4">
+      {/* Mobile back arrow — visible only below lg. On desktop the existing
+          "Customers" button in the actions row handles navigation. */}
+      <button
+        type="button"
+        onClick={onBack}
+        className="flex items-center gap-1.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors lg:hidden"
+        title="Back to Customers"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        <span className="text-[11px] font-semibold">Back</span>
+      </button>
+
+      {/* Identity + Actions row — wraps together so actions stay top-right
+          on both platforms. Secondary info is inside the identity div so it
+          doesn't create a separate flex item that pushes actions down. */}
+      <div className="flex flex-1 items-center gap-3 sm:flex-wrap sm:gap-x-3 sm:gap-y-2">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-hover)] text-lg font-bold text-white shadow-sm ring-2 ring-[var(--color-primary-muted)] sm:h-12 sm:w-12">
+          {displayName[0]?.toUpperCase() || '?'}
         </div>
-        {(city || assignedToName) && (
-          <div className="flex items-center gap-3 mt-1 flex-wrap">
-            {city && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><MapPin className="h-3 w-3" />{city}</span>}
-            {assignedToName && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><User className="h-3 w-3" />{assignedToName}</span>}
+        <div className="min-w-0">
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <h1 className="min-w-0 break-words text-base font-bold text-[var(--color-text)] sm:truncate sm:text-xl">{displayName}</h1>
+            <TypeChip type={type} />
+            <StatusPill status={status} />
           </div>
-        )}
+          {(city || assignedToName) && (
+            <div className="flex items-center gap-3 mt-1 flex-wrap">
+              {city && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><MapPin className="h-3 w-3" />{city}</span>}
+              {assignedToName && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><User className="h-3 w-3" />{assignedToName}</span>}
+            </div>
+          )}
+        </div>
       </div>
-      <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+      <div className="flex flex-wrap items-center justify-end gap-1.5 sm:shrink-0">
         {phone && (
           <a href={`tel:${phone}`}
             className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm">
@@ -168,14 +185,16 @@ export default function CustomerWorkspaceHeader({ customer, actions, onBack }: P
             {a.label}
           </button>
         ))}
+        {/* Back to list — desktop only. On mobile the back arrow above
+            handles navigation. */}
         <button
           type="button"
           onClick={onBack}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 sm:px-3 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm"
+          className="hidden lg:inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm"
           title="Back to Customers"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">Customers</span>
+          <span>Customers</span>
         </button>
       </div>
     </div>

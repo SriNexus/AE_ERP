@@ -233,6 +233,7 @@ export default function ProjectWorkspace() {
             customerName={customerName}
             projectType={projectType}
             users={users}
+            customer={customer}
             canEdit={canEditProject}
             isEditing={isEditingProject}
             editForm={editForm}
@@ -279,6 +280,7 @@ export default function ProjectWorkspace() {
           <ProjectWorkspaceRightPanel
             project={project}
             companyId={activeCompanyId}
+            customerName={customerName}
             onViewCustomer={onViewCustomer}
             onViewSourceLead={onViewSourceLead}
           />

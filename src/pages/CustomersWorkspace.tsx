@@ -580,7 +580,6 @@ export default function Customers() {
       <WorkspaceHero
         title="Customers"
         icon={<Building2 className="h-6 w-6" />}
-        breadcrumbs={['Home', 'Sales', 'Customers']}
         statusText="Last sync · Realtime Connected"
         statusDotColor="var(--color-success)"
         className="gap-3"

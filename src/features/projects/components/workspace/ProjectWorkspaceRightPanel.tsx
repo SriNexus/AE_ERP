@@ -20,16 +20,26 @@
  * relationship graph, per the mission's explicit instruction — not a copy
  * of its markup.
  */
-import { Zap, User as UserIcon, Link2 } from 'lucide-react';
+import { useState } from 'react';
+import { Zap, User as UserIcon, Link2, Wrench, Plus } from 'lucide-react';
 import { usePermissions } from '../../../../lib/permissions';
 import { fmtDate } from '../../../../lib/firestore';
+import { isProjectStageAtOrPast } from '../../../../lib/projectLifecycle';
+import { useCreateServiceTicket } from '../../../service-tickets/hooks/useServiceTickets';
+import type { ServiceTicketCreateInput } from '../../../../lib/serviceTicketWorkflow';
+import { Modal } from '../../../../components/ui/Modal';
+import { Input, Textarea } from '../../../../components/ui';
 import CustomerLinkedRecords from '../../../customers/components/workspace/rightPanel/CustomerLinkedRecords';
 import ProjectHealthCard from './rightPanel/ProjectHealthCard';
 import type { ProjectRecord } from '../../types';
 
+const ISSUE_TYPES = ['Warranty Claim', 'Fault Repair', 'Cleaning', 'Inspection', 'Performance Issue', 'Other'] as const;
+const PRIORITIES = ['Low', 'Medium', 'High', 'Urgent'] as const;
+
 interface Props {
   project: ProjectRecord;
   companyId: string;
+  customerName?: string;
   onViewCustomer?: () => void;
   onViewSourceLead?: () => void;
 }
@@ -62,17 +72,52 @@ function ActionButton({ icon, label, onClick }: { icon: React.ReactNode; label: 
   );
 }
 
-export default function ProjectWorkspaceRightPanel({ project, companyId, onViewCustomer, onViewSourceLead }: Props) {
+export default function ProjectWorkspaceRightPanel({ project, companyId, customerName, onViewCustomer, onViewSourceLead }: Props) {
   const perms = usePermissions();
   const canViewCustomers = perms.canView('customers');
   const canViewLeads = perms.canView('leads');
+  const canCreateProjects = perms.canCreate('projects');
   const teamAssigned = [project.salesOwner, project.assignedSurveyor, project.assignedInstaller].filter(Boolean).length;
+
+  // Service Ticket: only visible after project reaches Handover (completion)
+  const isCompleted = isProjectStageAtOrPast(project.currentStage, 'Handover');
+  const [ticketModalOpen, setTicketModalOpen] = useState(false);
+  const [ticketForm, setTicketForm] = useState<Partial<ServiceTicketCreateInput>>({});
+  const createTicketMut = useCreateServiceTicket();
+
+  function openTicketModal() {
+    setTicketForm({
+      projectId: project.id,
+      projectName: project.projectId || project.id,
+      customerId: project.customerId || '',
+      customerName: customerName || '',
+      issueType: 'Fault Repair',
+      description: '',
+      priority: 'Medium',
+      notes: '',
+    });
+    setTicketModalOpen(true);
+  }
+
+  function handleCreateTicket(e: React.FormEvent) {
+    e.preventDefault();
+    if (!ticketForm.issueType || !ticketForm.description) return;
+    createTicketMut.mutate(ticketForm as ServiceTicketCreateInput, {
+      onSuccess: () => { setTicketModalOpen(false); setTicketForm({}); },
+    });
+  }
+
+  const actionCount = [
+    onViewCustomer && canViewCustomers,
+    onViewSourceLead && canViewLeads,
+    isCompleted && canCreateProjects,
+  ].filter(Boolean).length;
 
   return (
     <div className="flex flex-col">
       <ProjectHealthCard project={project} />
 
-      {(onViewCustomer || onViewSourceLead) && (
+      {actionCount > 0 && (
         <div className="px-4 py-4 border-b border-[var(--color-border-subtle)]">
           <h3 className="mb-3 text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Quick Actions</h3>
           <div className="grid grid-cols-2 gap-2">
@@ -81,6 +126,9 @@ export default function ProjectWorkspaceRightPanel({ project, companyId, onViewC
             )}
             {onViewSourceLead && canViewLeads && (
               <ActionButton icon={<Link2 className="h-4 w-4" />} label="View Source Lead" onClick={onViewSourceLead} />
+            )}
+            {isCompleted && canCreateProjects && (
+              <ActionButton icon={<Wrench className="h-4 w-4" />} label="Service Ticket" onClick={openTicketModal} />
             )}
           </div>
         </div>
@@ -100,6 +148,48 @@ export default function ProjectWorkspaceRightPanel({ project, companyId, onViewC
       </div>
 
       <CustomerLinkedRecords customerId={project.customerId} companyId={companyId} />
+
+      {/* Service Ticket creation modal — auto-fills project + customer context */}
+      <Modal open={ticketModalOpen} onClose={() => setTicketModalOpen(false)} title="Raise Service Ticket" size="md">
+        <form onSubmit={handleCreateTicket} className="space-y-4">
+          <div className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] px-3 py-2 text-xs text-[var(--color-text-muted)]">
+            Project: {project.projectId || project.id} · Customer: {customerName || '—'}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Issue Type *</label>
+              <select required value={ticketForm.issueType || ''} onChange={(e) => setTicketForm({ ...ticketForm, issueType: e.target.value })}
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]">
+                {ISSUE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Priority *</label>
+              <select required value={ticketForm.priority || 'Medium'} onChange={(e) => setTicketForm({ ...ticketForm, priority: e.target.value as any })}
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]">
+                {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Description *</label>
+            <textarea required value={ticketForm.description || ''} onChange={(e) => setTicketForm({ ...ticketForm, description: e.target.value })} rows={3}
+              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]" placeholder="Describe the issue..." />
+          </div>
+          <div>
+            <label className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Assign Technician</label>
+            <input value={ticketForm.assignedTechnicianName || ''} onChange={(e) => setTicketForm({ ...ticketForm, assignedTechnicianName: e.target.value })}
+              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]" placeholder="Technician name" />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <button type="button" onClick={() => setTicketModalOpen(false)} className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]">Cancel</button>
+            <button type="submit" disabled={createTicketMut.isPending}
+              className="rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-50">
+              {createTicketMut.isPending ? 'Creating...' : 'Create Ticket'}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

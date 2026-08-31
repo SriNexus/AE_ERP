@@ -1,14 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type React from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Calendar,
-  CornerUpRight,
   Download,
-  Edit2,
-  File,
-  FileText,
   Mail,
   MessageCircle,
   Phone,
@@ -34,10 +29,7 @@ import { resolveBusinessMode } from '../../../lib/companyBusinessMode';
 import { getAllowedCustomerTypesForBusinessMode } from '../../../lib/customerClassification';
 
 import { NotificationType } from '../../../types';
-import { DocumentViewer, useDocumentViewer, formatFileSize } from '../../shared';
-import type { DocumentViewerFile } from '../../shared';
 import { cn } from '../../../utils/cn';
-import { MobileTimelinePreview } from '../shared/MobileTimelinePreview';
 
 const PER_PAGE = 10;
 const ALL = 'All';
@@ -173,8 +165,6 @@ export function MobileLeadWorkspace({ mode }: { mode: Mode }) {
   const [formOpen, setFormOpen] = useState(false);
   const [editingLead, setEditingLead] = useState<Lead | null>(null);
   const [form, setForm] = useState<LeadForm>({ ...LEAD_FORM_DEFAULT });
-  const [viewLead, setViewLead] = useState<Lead | null>(null);
-  const openId = params.get('open') || '';
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [followupLead, setFollowupLead] = useState<Lead | null>(null);
   const [followupNote, setFollowupNote] = useState('');
@@ -261,33 +251,13 @@ export function MobileLeadWorkspace({ mode }: { mode: Mode }) {
     return map;
   }, [leads]);
 
-  // Guards against race condition: when user closes the detail modal, this ref
-  // prevents the URL-sync useEffect from immediately reopening it. Only reset
-  // by openMobileDetail (intentional open) or consumed by useEffect itself.
-  const userClosedRef = useRef(false);
-  const reopenLeadIdRef = useRef<string | null>(null);
-
   const saveLead = useSaveLead(editingLead?.id || null, () => {
     setFormOpen(false);
-    if (editingLead?.id) reopenLeadIdRef.current = editingLead.id;
     setEditingLead(null);
     setForm({ ...LEAD_FORM_DEFAULT });
     setDirty(false);
     void qc.invalidateQueries({ queryKey: keys.leadsRoot });
   });
-
-  // IMP-09: Reopen detail after save — fires only when saveLead explicitly sets reopenLeadIdRef.
-  // Does NOT check userClosedRef because the reopen is intentional (triggered by save callback),
-  // not driven by URL params. The reopenLeadIdRef itself is the guard — it's only ever
-  // populated by the saveLead onSuccess callback.
-  useEffect(() => {
-    if (!reopenLeadIdRef.current) return;
-    const updated = (leads as Lead[]).find((l) => l.id === reopenLeadIdRef.current);
-    if (updated) {
-      reopenLeadIdRef.current = null;
-      openMobileDetail(updated);
-    }
-  }, [leads]);
 
   useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(filteredLeads.length / PER_PAGE));
@@ -302,37 +272,10 @@ export function MobileLeadWorkspace({ mode }: { mode: Mode }) {
     });
   }, [leads]);
 
-  // Sync viewLead with URL 'open' param (IMP-07)
-  // Guarded by userClosedRef: if the user just closed the modal, bail out
-  // immediately regardless of openId. This prevents a race condition where
-  // setParams (inside closeMobileDetail) hasn't updated openId yet but
-  // viewLead is null, causing the effect to reopen the modal.
-  useEffect(() => {
-    if (userClosedRef.current) {
-      userClosedRef.current = false; // Consume the guard
-      return;
-    }
-    if (!openId || isLoading) return;
-    const target = (leads as Lead[]).find((lead) => lead.id === openId);
-    if (target && !viewLead) {
-      setViewLead(target);
-    }
-  }, [openId, isLoading, leads, viewLead]);
-
+  // Opening a Lead navigates to the shared Lead Details page (LeadWorkspace),
+  // the same implementation desktop uses — no more mobile detail popup.
   function openMobileDetail(lead: Lead) {
-    userClosedRef.current = false; // Intentional open — reset guard
-    setViewLead(lead);
-    const next = new URLSearchParams(params);
-    next.set('open', lead.id);
-    setParams(next, { replace: true });
-  }
-
-  function closeMobileDetail() {
-    userClosedRef.current = true; // User closed — prevent URL-driven reopen
-    setViewLead(null);
-    const next = new URLSearchParams(params);
-    next.delete('open');
-    setParams(next, { replace: true });
+    navigate(`/leads/workspace/${encodeURIComponent(lead.id)}`);
   }
 
   function changePage(nextPage: number) {
@@ -532,8 +475,10 @@ export function MobileLeadWorkspace({ mode }: { mode: Mode }) {
   }
 
   return (
-    <div className="space-y-4 pb-2 pt-2">
-      <div className="px-1 pb-1 pt-2">
+    // Enterprise-density pass: reclaim ~half of the mobile shell's outer
+    // gutter on the sides/top so the list uses more of the screen.
+    <div className="-mx-2 -mt-2 space-y-4 pb-2 pt-2">
+      <div className="px-1 pb-1 pt-1">
         <h1 data-tour="mobile-leads-header" className="text-xl font-bold text-[var(--color-text)]">Leads</h1>
       </div>
 
@@ -596,35 +541,6 @@ export function MobileLeadWorkspace({ mode }: { mode: Mode }) {
           <Pagination page={page} total={filteredLeads.length} perPage={PER_PAGE} onChange={changePage} />
         </div>
       )}
-
-      <LeadViewModal
-        lead={viewLead}
-        score={viewLead ? leadScores.get(viewLead.id) : undefined}
-        canEdit={canEdit}
-        canDelete={canDelete}
-        onClose={closeMobileDetail}
-        onEdit={(lead) => {
-          closeMobileDetail();
-          openEdit(lead);
-        }}
-        onFollowup={(lead) => {
-          closeMobileDetail();
-          setFollowupLead(lead);
-        }}
-        onTransfer={(lead) => {
-          closeMobileDetail();
-          setTransferLead(lead);
-        }}
-        onConvert={(lead) => {
-          closeMobileDetail();
-          setConvertLead(lead);
-        }}
-        onDelete={(lead) => {
-          setSelected(new Set([lead.id]));
-          closeMobileDetail();
-          setDeleteOpen(true);
-        }}
-      />
 
       <LeadDialogs
         formOpen={formOpen}
@@ -883,200 +799,5 @@ function LeadDialogs({ formOpen, form, editingLead, salesUsers, saving, dirty, c
   );
 }
 
-function LeadViewModal({ lead, score, canEdit, canDelete, onClose, onEdit, onFollowup, onTransfer, onConvert, onDelete }: {
-  lead: Lead | null;
-  score?: { score: number; band: string };
-  canEdit: boolean;
-  canDelete: boolean;
-  onClose: () => void;
-  onEdit: (lead: Lead) => void;
-  onFollowup: (lead: Lead) => void;
-  onTransfer: (lead: Lead) => void;
-  onConvert: (lead: Lead) => void;
-  onDelete: (lead: Lead) => void;
-}) {
-  if (!lead) return null;
-  const activity = lead.activityLog || [];
-  const { doc: leadViewerDoc, open: leadViewerOpen, viewDocument: leadViewDocument, closeViewer: closeLeadViewer } = useDocumentViewer();
-  const leadDocuments = useMemo(() => {
-    const docs: { label: string; doc: DocumentViewerFile; metadata: { date?: string; size?: number } }[] = [];
-    if (lead?.electricityBillFileName) {
-      docs.push({ label: 'Electricity Bill', doc: { name: lead.electricityBillFileName, url: lead.electricityBillUrl || '', mimeType: lead.electricityBillMimeType, size: lead.electricityBillSize }, metadata: { date: lead.electricityBillDate || lead.createdAt, size: lead.electricityBillSize } });
-    }
-    if (lead?.aadhaarFileName) {
-      docs.push({ label: 'Aadhaar Card', doc: { name: lead.aadhaarFileName, url: lead.aadhaarUrl || '', mimeType: lead.aadhaarMimeType, size: lead.aadhaarSize }, metadata: { date: lead.aadhaarDate || lead.createdAt, size: lead.aadhaarSize } });
-    }
-    if (lead?.panFileName) {
-      docs.push({ label: 'PAN Card', doc: { name: lead.panFileName, url: lead.panUrl || '', mimeType: lead.panMimeType, size: lead.panSize }, metadata: { date: lead.panDate || lead.createdAt, size: lead.panSize } });
-    }
-    if (lead?.attachmentName || lead?.fileName) {
-      docs.push({ label: 'Attachment', doc: { name: lead.attachmentName || lead.fileName, url: lead.attachmentUrl || lead.fileUrl || '', mimeType: lead.attachmentMimeType, size: lead.attachmentSize }, metadata: { date: lead.attachmentDate || lead.createdAt, size: lead.attachmentSize } });
-    }
-    return docs.filter((d) => d.doc?.name);
-  }, [lead]);
-  return (
-    <Modal open={!!lead} onClose={onClose} title={leadTitle(lead)} size="full">
-      <div className="space-y-4">
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-2">
-              {statusBadge(lead.status || 'New')}
-              {lead.source ? <Badge variant="gray">{lead.source}</Badge> : null}
-              {score ? scoreBadge(score) : null}
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Detail label="Assigned To" value={lead.assignedToName || lead.assigned_t || 'Unassigned'} />
-            <Detail label="Next Follow-up" value={lead.next_date ? fmtDate(lead.next_date) : 'Not scheduled'} />
-          </div>
-        </section>
-
-        <Section title="Lead Information">
-          <Detail label="Lead Name" value={lead.name || 'Not available'} />
-          <Detail label="Created" value={lead.createdAt ? fmtDate(lead.createdAt) : 'Not available'} />
-        </Section>
-
-        <Section title="Company Information">
-          <Detail label="Company" value={lead.company || 'Not available'} />
-          <Detail label="GST" value={lead.gst || 'Not available'} />
-        </Section>
-
-        <Section title="Contact Details">
-          <Detail label="Mobile" value={lead.phone || 'Not available'} />
-          <Detail label="Email" value={lead.email || 'Not available'} />
-        </Section>
-
-        <Section title="Address">
-          <p className="text-sm text-[var(--color-text-secondary)]">{lead.address || [lead.city, lead.state].filter(Boolean).join(', ') || 'Not available'}</p>
-        </Section>
-
-        <Section title="Notes">
-          <p className="whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">{lead.last_note || lead.notes || 'No notes recorded.'}</p>
-        </Section>
-
-        <Section title="Timeline">
-          <MobileTimelinePreview title={`${leadTitle(lead)} Timeline`} entries={activity} />
-        </Section>
-
-        <Section title="Activities">
-          <Detail label="Calls" value={lead.callCount ? String(lead.callCount) : 'No calls logged'} />
-          <Detail label="Meetings" value={lead.meetingCount ? String(lead.meetingCount) : 'No meetings logged'} />
-          <Detail label="Emails / WhatsApp" value={lead.messageCount ? String(lead.messageCount) : 'No messages logged'} />
-        </Section>
-
-        <Section title="Activity Log">
-          {(lead.activityLog || []).length > 0 ? (
-            <div className="space-y-2">
-              {[...(lead.activityLog || [])].reverse().slice(0, 10).map((log: any, idx: number) => (
-                <div key={log.id || idx} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{log.type || 'Activity'}</p>
-                  <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">{log.desc || 'No details'}</p>
-                  <p className="mt-0.5 text-[10px] text-[var(--color-text-disabled)]">
-                    {log.date ? fmtDate(log.date) : ''}{log.userName ? ` · by ${log.userName}` : ''}
-                  </p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-[var(--color-text-muted)]">No activity recorded.</p>
-          )}
-        </Section>
-
-        <Section title="Attachments">
-          {leadDocuments.length > 0 ? (
-            <div className="space-y-2">
-              {leadDocuments.map((item, idx) => (
-                <div key={idx} className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] px-3 py-2.5">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <File className="h-4 w-4 shrink-0 text-[var(--color-primary-text)]" />
-                      <p className="truncate text-sm font-semibold text-[var(--color-text)]">{item.label}</p>
-                    </div>
-                    <p className="mt-0.5 truncate text-xs text-[var(--color-text-muted)]">{item.doc.name}</p>
-                    <p className="mt-0.5 text-[10px] text-[var(--color-text-disabled)]">
-                      {item.metadata.date ? fmtDate(item.metadata.date) : ''}
-                      {item.metadata.size ? ` · ${formatFileSize(item.metadata.size)}` : ''}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2" data-action>
-                    {item.doc.url ? (
-                      <Button
-                        size="xs" variant="outline"
-                        icon={<FileText className="h-3 w-3" />}
-                        onClick={() => leadViewDocument(item.doc)}
-                      >
-                        View
-                      </Button>
-                    ) : (
-                      <span className="text-xs text-[var(--color-text-muted)]">Reference only</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-[var(--color-text-muted)]">No attachments available.</p>
-          )}
-        </Section>
-
-        <Section title="History">
-          {lead.transferHistory?.length ? (
-            <div className="space-y-2">
-              {lead.transferHistory.map((entry: any, index: number) => (
-                <div key={index} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{entry.fromUserName || 'Unknown'} to {entry.toUserName || 'Unknown'}</p>
-                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{entry.note || 'No note'} {entry.transferredAt ? `· ${fmtDate(entry.transferredAt)}` : ''}</p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-[var(--color-text-muted)]">No transfer history recorded.</p>
-          )}
-        </Section>
-
-        <Section title="Related Records">
-          <Detail label="Converted Customer" value={lead.convertedCustomerId || 'Not converted'} />
-        </Section>
-
-        <div className="grid grid-cols-2 gap-2">
-          {lead.phone ? <a className={linkButtonClass} href={`tel:${lead.phone}`}><Phone className="h-4 w-4" />Call</a> : null}
-          {lead.phone ? <a className={linkButtonClass} href={whatsappHref(lead.phone)} target="_blank" rel="noreferrer"><MessageCircle className="h-4 w-4" />WhatsApp</a> : null}
-          {lead.email ? <a className={linkButtonClass} href={`mailto:${lead.email}`}><Mail className="h-4 w-4" />Email</a> : null}
-          {canEdit ? <Button variant="outline" icon={<Calendar className="h-4 w-4" />} onClick={() => onFollowup(lead)}>Follow-up</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<CornerUpRight className="h-4 w-4" />} onClick={() => onTransfer(lead)}>Transfer</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Edit2 className="h-4 w-4" />} onClick={() => onEdit(lead)}>Edit</Button> : null}
-          {canEdit && lead.status !== 'Converted' ? <Button variant="success" icon={<UserCheck className="h-4 w-4" />} onClick={() => onConvert(lead)}>Convert</Button> : null}
-          {canDelete ? <Button variant="danger" icon={<Trash2 className="h-4 w-4" />} onClick={() => onDelete(lead)}>Delete</Button> : null}
-        </div>
-      </div>
-      <DocumentViewer
-        document={leadViewerDoc}
-        open={leadViewerOpen}
-        onClose={closeLeadViewer}
-        fullScreen
-      />
-    </Modal>
-  );
-}
-
-const linkButtonClass = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-medium text-[var(--color-text)]';
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-      <h3 className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)]">{title}</h3>
-      <div className="mt-3 space-y-3">{children}</div>
-    </section>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)]">{label}</p>
-      <p className="mt-1 break-words text-sm font-semibold text-[var(--color-text)]">{value}</p>
-    </div>
-  );
-}
 
 export default MobileLeadWorkspace;

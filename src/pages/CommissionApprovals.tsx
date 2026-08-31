@@ -24,6 +24,7 @@ import { queryKeys } from '../lib/queryKeys';
 import { useAppStore } from '../store/useAppStore';
 import { usePermissions } from '../lib/permissions';
 import { CommissionApprovalDetailDrawer } from '../components/partner/CommissionApprovalDetailDrawer';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 
 const PER_PAGE = 10;
 
@@ -79,6 +80,7 @@ function formatCurrency(value: number | null | undefined): string {
 
 export default function CommissionApprovals() {
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
+  const resolveUserName = useUserNameResolver();
   const companyKeys = queryKeys.forCompany(activeCompanyId);
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -472,7 +474,7 @@ export default function CommissionApprovals() {
                       <Td className="text-xs text-[var(--color-text-secondary)] max-w-[140px] truncate">{record.customerName || '—'}</Td>
                       <Td className="text-xs font-semibold tabular-nums">{formatCurrency(record.amount)}</Td>
                       <Td><StatusBadge status={record.status} /></Td>
-                      <Td className="text-xs text-[var(--color-text-muted)]">{record.requestedBy || record.createdBy || '—'}</Td>
+                      <Td className="text-xs text-[var(--color-text-muted)]">{resolveUserName(record.requestedBy || record.createdBy)}</Td>
                       <Td className="text-xs text-[var(--color-text-muted)] whitespace-nowrap">{record.createdAt ? fmtDate(record.createdAt) : '—'}</Td>
                       <Td>
                         <div data-action onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}

@@ -37,6 +37,7 @@ const Payroll      = lazy(() => import('../../pages/Payroll'));
 const Leads        = lazy(() => import('../../pages/Leads'));
 const LeadWorkspace = lazy(() => import('../../pages/LeadWorkspace'));
 const LoanApplications = lazy(() => import('../../pages/LoanApplications'));
+const LoanApplicationWorkspace = lazy(() => import('../../pages/LoanApplicationWorkspace'));
 const Customers    = lazy(() => import('../../pages/Customers'));
 const CustomerWorkspace = lazy(() => import('../../pages/CustomerWorkspace'));
 const Quotations   = lazy(() => import('../../pages/Quotations'));
@@ -236,6 +237,7 @@ export function AppRoutes() {
         <Route path="/leads/workspace/:leadId" element={<RoleRoute module="leads"><SafePage><LeadWorkspace /></SafePage></RoleRoute>} />
         <Route path="/leads/:id"   element={<LegacyLeadRedirect />} />
         <Route path="/loan-applications" element={<RoleRoute module="loan_applications"><SafePage><LoanApplications /></SafePage></RoleRoute>} />
+        <Route path="/loan-applications/:id" element={<RoleRoute module="loan_applications"><SafePage><LoanApplicationWorkspace /></SafePage></RoleRoute>} />
         {/* Backward-compatible redirect: the old loan module route now lives at /loan-applications */}
         <Route path="/registrations" element={<Navigate to="/loan-applications" replace />} />
         <Route path="/customers"  element={<RoleRoute module="customers"><SafePage><Customers /></SafePage></RoleRoute>} />

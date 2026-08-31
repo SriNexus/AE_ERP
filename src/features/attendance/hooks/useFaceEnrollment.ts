@@ -11,12 +11,13 @@
  * endpoint, no client-computed authorization decision — this hook only
  * submits and translates the server's already-final verdict.
  *
- * Self-enrollment only in this phase (no `targetUserId` is ever sent) —
- * matching the deliberate, recorded Phase 7 scope decision (see the master
- * document's Phase 7 completion record): an Admin/HR "enroll on behalf of"
- * employee-picker UI is a separate, larger surface not built here. The
- * backend (Phase 4/6) already fully supports on-behalf-of enrollment
- * server-side; only the picker UI is deferred.
+ * Self-enrollment by default (no `targetUserId` sent) — matching the
+ * deliberate, recorded Phase 7 scope decision. Employee-View "Register
+ * Face" follow-up: accepts an optional `targetUserId` for the Admin/HR
+ * on-behalf-of case (`EmployeeFaceRegistrationFlow.tsx`) — the backend
+ * (Phase 4/6) already fully supports this server-side via
+ * `resolveEnrollmentTarget()`; this hook now simply forwards it instead of
+ * hardcoding self-only.
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -44,7 +45,7 @@ interface ApiResponseBody {
   error?: { code?: string; message?: string };
 }
 
-async function submitEnrollment(blob: Blob): Promise<FaceEnrollmentResult> {
+async function submitEnrollment(blob: Blob, targetUserId?: string): Promise<FaceEnrollmentResult> {
   const user = auth.currentUser;
   if (!user) {
     throw new FaceEnrollmentError('UNAUTHORIZED', 'Your session has expired. Please sign in again.');
@@ -61,7 +62,7 @@ async function submitEnrollment(blob: Blob): Promise<FaceEnrollmentResult> {
     response = await fetch('/api/biometrics/enroll', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
-      body: JSON.stringify({ image }),
+      body: JSON.stringify(targetUserId ? { image, targetUserId } : { image }),
     });
   } catch {
     throw new FaceEnrollmentError('NETWORK_ERROR', 'Could not reach the server. Check your connection and try again.');
@@ -82,13 +83,19 @@ async function submitEnrollment(blob: Blob): Promise<FaceEnrollmentResult> {
   return body.data;
 }
 
-export function useFaceEnrollment() {
+export function useFaceEnrollment(targetUserId?: string) {
   const qc = useQueryClient();
 
   const mutation = useMutation<FaceEnrollmentResult, FaceEnrollmentError, Blob>({
-    mutationFn: (blob: Blob) => submitEnrollment(blob),
+    mutationFn: (blob: Blob) => submitEnrollment(blob, targetUserId),
     onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['biometricFaceReference'] });
+      // Employee-View on-behalf-of enrollment: also invalidate the
+      // target-specific status query key (`useFaceEnrollmentStatus`'s own
+      // key shape when called with a targetUserId) so the Employee View
+      // popup reflects the new "Face Registered" state immediately, without
+      // requiring the admin to close and reopen it.
+      if (targetUserId) qc.invalidateQueries({ queryKey: ['biometricFaceReference', targetUserId] });
       // Master Plan §11/Phase 6's duplicate-face policy is advisory-only —
       // enrollment already succeeded regardless; the warning (if any) is
       // still shown to the user via the panel's own banner, not repeated

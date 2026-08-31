@@ -12,6 +12,7 @@ import { Button } from '../ui/Button';
 import { fmtDate, fmtDateTime } from '../../lib/firestore';
 import { DocumentViewer, useDocumentViewer, formatFileSize } from '../shared/DocumentViewer';
 import type { DocumentViewerFile } from '../shared/DocumentViewer';
+import { useUserNameResolver } from '../../hooks/useUserNameResolver';
 
 interface CommissionApprovalDetailDrawerProps {
   record: any;
@@ -65,6 +66,7 @@ function StatusBadge({ status }: { status?: string }) {
 
 export function CommissionApprovalDetailDrawer({ record, open, onClose, onApprove, onReject }: CommissionApprovalDetailDrawerProps) {
   const [activeTab, setActiveTab] = useState<string>('overview');
+  const resolveUserName = useUserNameResolver();
   const [rejectReason, setRejectReason] = useState('');
   const [showRejectInput, setShowRejectInput] = useState(false);
   const { doc: viewerDoc, open: viewerOpen, viewDocument, closeViewer } = useDocumentViewer();
@@ -135,9 +137,9 @@ export function CommissionApprovalDetailDrawer({ record, open, onClose, onApprov
                 <DetailRow label="Customer">{p.customerName || '—'}</DetailRow>
                 <DetailRow label="Amount">{formatCurrency(p.amount)}</DetailRow>
                 <DetailRow label="Status"><StatusBadge status={p.status} /></DetailRow>
-                <DetailRow label="Requested By">{p.requestedBy || p.createdBy || '—'}</DetailRow>
+                <DetailRow label="Requested By">{resolveUserName(p.requestedBy || p.createdBy)}</DetailRow>
                 <DetailRow label="Requested On">{p.createdAt ? fmtDate(p.createdAt) : '—'}</DetailRow>
-                {p.approvedBy && <DetailRow label="Approved By">{p.approvedBy}</DetailRow>}
+                {p.approvedBy && <DetailRow label="Approved By">{resolveUserName(p.approvedBy)}</DetailRow>}
                 {p.approvedAt && <DetailRow label="Approved On">{fmtDate(p.approvedAt)}</DetailRow>}
                 {p.remarks && <DetailRow label="Remarks"><p className="whitespace-pre-wrap text-right text-sm">{p.remarks}</p></DetailRow>}
               </div>
@@ -195,7 +197,7 @@ export function CommissionApprovalDetailDrawer({ record, open, onClose, onApprov
                   </div>
                   <div>
                     <p className="text-sm font-medium text-[var(--color-text)]">Commission Created</p>
-                    <p className="text-xs text-[var(--color-text-muted)]">{p.createdAt ? fmtDateTime(p.createdAt) : '—'}{p.requestedBy ? ` by ${p.requestedBy}` : ''}</p>
+                    <p className="text-xs text-[var(--color-text-muted)]">{p.createdAt ? fmtDateTime(p.createdAt) : '—'}{p.requestedBy ? ` by ${resolveUserName(p.requestedBy)}` : ''}</p>
                   </div>
                 </div>
                 {p.approvedAt && (
@@ -205,7 +207,7 @@ export function CommissionApprovalDetailDrawer({ record, open, onClose, onApprov
                     </div>
                     <div>
                       <p className="text-sm font-medium text-[var(--color-text)]">Approved</p>
-                      <p className="text-xs text-[var(--color-text-muted)]">{fmtDateTime(p.approvedAt)}{p.approvedBy ? ` by ${p.approvedBy}` : ''}</p>
+                      <p className="text-xs text-[var(--color-text-muted)]">{fmtDateTime(p.approvedAt)}{p.approvedBy ? ` by ${resolveUserName(p.approvedBy)}` : ''}</p>
                     </div>
                   </div>
                 )}
@@ -216,7 +218,7 @@ export function CommissionApprovalDetailDrawer({ record, open, onClose, onApprov
                     </div>
                     <div>
                       <p className="text-sm font-medium text-[var(--color-text)]">Rejected</p>
-                      <p className="text-xs text-[var(--color-text-muted)]">{fmtDateTime(p.rejectedAt)}{p.rejectedBy ? ` by ${p.rejectedBy}` : ''}{p.rejectionReason ? ` — ${p.rejectionReason}` : ''}</p>
+                      <p className="text-xs text-[var(--color-text-muted)]">{fmtDateTime(p.rejectedAt)}{p.rejectedBy ? ` by ${resolveUserName(p.rejectedBy)}` : ''}{p.rejectionReason ? ` — ${p.rejectionReason}` : ''}</p>
                     </div>
                   </div>
                 )}
@@ -227,7 +229,7 @@ export function CommissionApprovalDetailDrawer({ record, open, onClose, onApprov
                     </div>
                     <div>
                       <p className="text-sm font-medium text-[var(--color-text)]">Last Modified</p>
-                      <p className="text-xs text-[var(--color-text-muted)]">{fmtDateTime(p.updatedAt)}{p.updatedBy ? ` by ${p.updatedBy}` : ''}</p>
+                      <p className="text-xs text-[var(--color-text-muted)]">{fmtDateTime(p.updatedAt)}{p.updatedBy ? ` by ${resolveUserName(p.updatedBy)}` : ''}</p>
                     </div>
                   </div>
                 )}

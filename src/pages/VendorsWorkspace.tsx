@@ -31,6 +31,7 @@ import { Link } from 'react-router-dom';
 import { getOne, getAll, fmtDate, fmtCurrency } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';
 import { useAppStore } from '../store/useAppStore';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import { queryKeys } from '../lib/queryKeys';
 import { usePermissions } from '../lib/permissions';
 import { cn } from '../utils/cn';
@@ -120,6 +121,7 @@ export default function VendorsWorkspace() {
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const perms = usePermissions();
   const qkeys = queryKeys.forCompany(activeCompanyId);
+  const resolveUserName = useUserNameResolver();
 
   // ── Tab state ──────────────────────────────────────────
   const [activeTab, setActiveTab] = useState<TabId>('overview');
@@ -342,7 +344,7 @@ export default function VendorsWorkspace() {
           Audit Information
         </h3>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <OverviewField label="Created By" icon={User} value={vendor.createdBy} />
+          <OverviewField label="Created By" icon={User} value={resolveUserName(vendor.createdBy)} />
           <OverviewField label="Created At" icon={Clock} value={fmtDateSafe(vendor.createdAt)} />
           <OverviewField label="Updated At" icon={Clock} value={fmtDateSafe(vendor.updatedAt)} />
           <OverviewField label="Record ID" icon={Hash} value={vendor.id} />

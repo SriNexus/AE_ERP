@@ -28,6 +28,7 @@ import {
 import toast from 'react-hot-toast';
 import { useSearchParams } from 'react-router-dom';
 import { approveCommissionRecord } from '../lib/partnerLeadIntegration';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import type { CommissionRecord } from '../features/channel-partner/types';
 
 // ── Constants ────────────────────────────────────────────
@@ -78,6 +79,7 @@ function formatCurrency(value: number | null | undefined): string {
 
 export default function PartnerCommissions() {
   const qc = useQueryClient();
+  const resolveUserName = useUserNameResolver();
   const user = useCurrentUser();
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const perms = usePermissions();
@@ -634,7 +636,7 @@ export default function PartnerCommissions() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] px-4 py-3">
                     <p className="text-[11px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Approved By</p>
-                    <p className="mt-1 text-sm text-[var(--color-text)]">{viewRecord.approvedBy || '—'}</p>
+                    <p className="mt-1 text-sm text-[var(--color-text)]">{resolveUserName(viewRecord.approvedBy)}</p>
                   </div>
                   <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] px-4 py-3">
                     <p className="text-[11px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Approved At</p>

@@ -32,6 +32,7 @@ import { COLLECTIONS } from '../lib/firebase';
 import { useAppStore } from '../store/useAppStore';
 import { queryKeys } from '../lib/queryKeys';
 import { usePermissions } from '../lib/permissions';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import { cn } from '../utils/cn';
 import { PageHeader } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -107,6 +108,7 @@ export default function PurchaseOrdersWorkspace() {
   const perms = usePermissions();
   const qkeys = queryKeys.forCompany(activeCompanyId);
   const { transition: transitionPo } = usePurchaseOrderActions();
+  const resolveUserName = useUserNameResolver();
 
   // ── Tab state ──────────────────────────────────────────
   const [activeTab, setActiveTab] = useState<TabId>('overview');
@@ -328,7 +330,7 @@ export default function PurchaseOrdersWorkspace() {
           Audit Information
         </h3>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <OverviewField label="Created By" icon={User} value={po.createdBy} />
+          <OverviewField label="Created By" icon={User} value={resolveUserName(po.createdBy)} />
           <OverviewField label="Created At" icon={Clock} value={fmtDateSafe(po.createdAt)} />
           <OverviewField label="Updated At" icon={Clock} value={fmtDateSafe(po.updatedAt)} />
           <OverviewField label="Company ID" icon={Hash} value={po.companyId} />

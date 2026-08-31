@@ -6,8 +6,6 @@ import { useSettingsSection } from '../../../features/settings/hooks/useSettings
 import { buildEmailComposePayload, normalizeEmailSettings, openGmailCompose } from '../../../features/settings/emailRuntime';
 import type { EmailTemplateKey } from '../../../features/settings/types';
 import {
-  Calendar,
-  Copy,
   Download,
   Edit2,
   FileText,
@@ -15,7 +13,6 @@ import {
   MessageCircle,
   Phone,
   Plus,
-  ShoppingCart,
   Trash2,
   UserCheck,
 } from 'lucide-react';
@@ -38,7 +35,6 @@ import { useAppStore, useCurrentUser } from '../../../store/useAppStore';
 import { resolveBusinessMode } from '../../../lib/companyBusinessMode';
 import { filterCustomersForBusinessMode } from '../../../lib/customerClassification';
 import { cn } from '../../../utils/cn';
-import { MobileTimelinePreview } from '../shared/MobileTimelinePreview';
 import { useProjects } from '../../../features/projects/hooks/useProjects';
 import { useEngineeringDesigns } from '../../../features/engineering/hooks/useEngineeringDesigns';
 import { quotationItemsFromEngineering, synchronizeQuotationProjectLink, updateQuotation } from '../../../lib/quotationWorkflow';
@@ -250,7 +246,6 @@ export function MobileQuotationWorkspace({ mode }: { mode: Mode }) {
   const [editingQuotation, setEditingQuotation] = useState<Quotation | null>(null);
   const [form, setForm] = useState<QuotationForm>({ ...FORM0 });
   const [items, setItems] = useState<QuoteItem[]>([{ ...ITEM0 }]);
-  const [viewQuotation, setViewQuotation] = useState<Quotation | null>(null);
   const [dirty, setDirty] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -264,7 +259,7 @@ export function MobileQuotationWorkspace({ mode }: { mode: Mode }) {
   const createParam = params.get('create');
   const projectParam = params.get('projectId') || '';
   const designParam = params.get('designId') || '';
-  const openParam = params.get('open') || '';
+  // openParam removed — quotations now open via /quotations/:id route
 
   useEffect(() => {
     if (mode === 'create') setFormOpen(true);
@@ -324,19 +319,7 @@ export function MobileQuotationWorkspace({ mode }: { mode: Mode }) {
     });
   }, [quotations]);
 
-  useEffect(() => {
-    if (!openParam || viewQuotation?.id === openParam) return;
-    const requested = (quotations as Quotation[]).find((quotation) => quotation.id === openParam);
-    if (requested) setViewQuotation(requested);
-  }, [openParam, quotations, viewQuotation?.id]);
-
-  function closeViewQuotation() {
-    setViewQuotation(null);
-    if (!openParam) return;
-    const next = new URLSearchParams(params);
-    next.delete('open');
-    setParams(next, { replace: true });
-  }
+  // closeViewQuotation removed — quotations now open via /quotations/:id route
 
   function changePage(nextPage: number) {
     setPage(nextPage);
@@ -556,7 +539,8 @@ export function MobileQuotationWorkspace({ mode }: { mode: Mode }) {
       void qc.invalidateQueries({ queryKey: keys.projectsRoot });
       toast.success(editingQuotation ? 'Quotation updated' : 'Quotation created');
       closeForm();
-      setViewQuotation(quotation as Quotation);
+      // Navigate to workspace on create/edit success
+      if (quotation?.id) navigate(`/quotations/${encodeURIComponent(quotation.id)}`);
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -570,7 +554,6 @@ export function MobileQuotationWorkspace({ mode }: { mode: Mode }) {
       toast.success(`Deleted ${selectedRows.length || 1} quotation${selectedRows.length === 1 ? '' : 's'}`);
       setSelected(new Set());
       setDeleteOpen(false);
-      setViewQuotation(null);
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -742,7 +725,7 @@ export function MobileQuotationWorkspace({ mode }: { mode: Mode }) {
             selected={selected.has(quotation.id)}
             currencySymbol={company?.currencySymbol || '₹'}
             onSelect={() => toggleSelect(quotation.id)}
-            onView={() => setViewQuotation(quotation)}
+            onView={() => navigate(`/quotations/${encodeURIComponent(quotation.id)}`)}
           />
         ))}
       </div>
@@ -750,39 +733,6 @@ export function MobileQuotationWorkspace({ mode }: { mode: Mode }) {
       {!isLoading && filteredQuotations.length > 0 && (
         <Pagination page={page} total={filteredQuotations.length} perPage={PER_PAGE} onChange={changePage} />
       )}
-
-      <QuotationViewModal
-        quotation={viewQuotation}
-        customers={customers as any[]}
-        orders={orders as any[]}
-        invoices={invoices as any[]}
-        currencySymbol={company?.currencySymbol || '₹'}
-        canEdit={canEdit}
-        canDelete={canDelete}
-        canConvert={perms.canCreate('orders')}
-        converting={convertToOrder.isPending}
-        onClose={closeViewQuotation}
-        onEdit={(quotation) => {
-          setViewQuotation(null);
-          openEdit(quotation);
-        }}
-        onDelete={(quotation) => {
-          setSelected(new Set([quotation.id]));
-          setViewQuotation(null);
-          setDeleteOpen(true);
-        }}
-        onDuplicate={(quotation) => {
-          setViewQuotation(null);
-          setDuplicateQuotation(quotation);
-        }}
-        onNote={(quotation) => {
-          setViewQuotation(null);
-          setNoteQuotation(quotation);
-        }}
-        onPrint={printQuotation}
-        onConvert={(quotation) => convertToOrder.mutate(quotation)}
-        onSendEmail={() => sendEmail(viewQuotation!, 'quotation')}
-      />
 
       <QuotationDialogs
         formOpen={formOpen}
@@ -1125,146 +1075,6 @@ function QuotationDialogs({ formOpen, form, items, products, customers, orders, 
   );
 }
 
-function QuotationViewModal({ quotation, customers, orders, invoices, currencySymbol, canEdit, canDelete, canConvert, converting, onClose, onEdit, onDelete, onDuplicate, onNote, onPrint, onConvert, onSendEmail }: {
-  quotation: Quotation | null;
-  customers: any[];
-  orders: any[];
-  invoices: any[];
-  currencySymbol: string;
-  canEdit: boolean;
-  canDelete: boolean;
-  canConvert: boolean;
-  converting: boolean;
-  onClose: () => void;
-  onEdit: (quotation: Quotation) => void;
-  onDelete: (quotation: Quotation) => void;
-  onDuplicate: (quotation: Quotation) => void;
-  onNote: (quotation: Quotation) => void;
-  onPrint: (quotation: Quotation) => void;
-  onConvert: (quotation: Quotation) => void;
-  onSendEmail: () => void;
-}) {
-  if (!quotation) return null;
-  const phone = quotePhone(quotation, customers);
-  const email = quoteEmail(quotation, customers);
-  const activity = quotation.activityLog || [];
-  const relatedOrders = orders.filter((order) => order.quotationId === quotation.id || order.sourceQuotationId === quotation.id || quotation.convertedOrderId === order.id);
-  const relatedInvoices = invoices.filter((invoice) => invoice.quotationId === quotation.id || invoice.customerId === quotation.customerId);
-  return (
-    <Modal open={!!quotation} onClose={onClose} title={quoteNumber(quotation)} size="full">
-      <div className="space-y-4">
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            {statusBadge(quotation.status || 'Draft')}
-            {quotation.convertedOrderId ? <Badge variant="success">Converted</Badge> : null}
-            {isExpired(quotation) ? <Badge variant="danger">Expired</Badge> : null}
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Detail label="Customer" value={quoteCustomer(quotation)} />
-            <Detail label="Total" value={fmtCurrency(Number(quotation.total) || 0, currencySymbol)} />
-          </div>
-        </section>
-
-        <Section title="Quotation Information">
-          <Detail label="Quotation Number" value={quoteNumber(quotation)} />
-          <Detail label="Date" value={quotation.date ? fmtDate(quotation.date) : 'Not set'} />
-          <Detail label="Expiry Date" value={quotation.validUntil ? fmtDate(quotation.validUntil) : 'Not set'} />
-          <Detail label="Assigned To" value={quotation.assignedToName || 'Unassigned'} />
-        </Section>
-
-        <Section title="Customer Information">
-          <Detail label="Customer" value={quoteCustomer(quotation)} />
-          <Detail label="GST" value={quotation.customerGst || 'Not available'} />
-          <Detail label="State" value={quotation.customerState || 'Not available'} />
-        </Section>
-
-        <Section title="Contact Details">
-          <Detail label="Mobile" value={phone || 'Not available'} />
-          <Detail label="Email" value={email || 'Not available'} />
-        </Section>
-
-        <Section title="Items / Products">
-          {quotation.items?.length ? (
-            <div className="space-y-2">
-              {quotation.items.map((item: any, index: number) => (
-                <div key={index} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{item.product || item.productId || `Item ${index + 1}`}</p>
-                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{Number(item.qty) || 0} x {fmtCurrency(Number(item.price) || 0, currencySymbol)} · Tax {Number(item.tax) || 0}%</p>
-                </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-[var(--color-text-muted)]">No products added.</p>}
-        </Section>
-
-        <Section title="Pricing Summary">
-          <TotalRow label="Subtotal" value={fmtCurrency(Number(quotation.subtotal) || 0, currencySymbol)} />
-          <TotalRow label="Tax Details" value={fmtCurrency(Number(quotation.taxTotal) || 0, currencySymbol)} />
-          <TotalRow label="Discounts" value={fmtCurrency(Number(quotation.specialDiscount || quotation.totalDiscount) || 0, currencySymbol)} />
-          <TotalRow label="Grand Total" value={fmtCurrency(Number(quotation.total) || 0, currencySymbol)} strong />
-        </Section>
-
-        <Section title="Terms & Conditions">
-          <p className="whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">{quotation.terms || 'No terms recorded.'}</p>
-        </Section>
-
-        <Section title="Notes">
-          <p className="whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">{quotation.notes || 'No notes recorded.'}</p>
-        </Section>
-
-        <Section title="Attachments">
-          <p className="text-sm text-[var(--color-text-muted)]">{quotation.attachmentName || quotation.fileName || 'No attachments available.'}</p>
-        </Section>
-
-        <Section title="Timeline">
-          <MobileTimelinePreview title={`${quoteNumber(quotation)} Timeline`} entries={activity} />
-        </Section>
-
-        <Section title="Activities">
-          <Detail label="Calls" value={quotation.callCount ? String(quotation.callCount) : 'No calls logged'} />
-          <Detail label="Meetings" value={quotation.meetingCount ? String(quotation.meetingCount) : 'No meetings logged'} />
-          <Detail label="Emails / WhatsApp" value={quotation.messageCount ? String(quotation.messageCount) : 'No messages logged'} />
-        </Section>
-
-        <RelatedSection title="Related Orders" rows={relatedOrders} empty="No related orders." labelFor={(row) => row.orderNumber || row.id} />
-        <RelatedSection title="Related Invoices" rows={relatedInvoices} empty="No related invoices." labelFor={(row) => row.invoiceNumber || row.id} />
-
-        <Section title="Audit Information">
-          <Detail label="Created By" value={quotation.createdByName || quotation.createdBy || 'System'} />
-          <Detail label="Updated" value={quotation.updatedAt ? fmtDate(quotation.updatedAt) : 'Not available'} />
-        </Section>
-
-        <div className="grid grid-cols-2 gap-2">
-          {phone ? <a className={linkButtonClass} href={`tel:${phone}`}><Phone className="h-4 w-4" />Call</a> : null}
-          {phone ? <a className={linkButtonClass} href={whatsappHref(phone)} target="_blank" rel="noreferrer"><MessageCircle className="h-4 w-4" />WhatsApp</a> : null}
-          {email ? <Button variant="outline" icon={<Mail className="h-4 w-4" />} onClick={() => onSendEmail()}>Send Email</Button> : null}
-          <Button variant="outline" icon={<FileText className="h-4 w-4" />} onClick={() => onPrint(quotation)}>Print</Button>
-          {canEdit ? <Button variant="outline" icon={<Copy className="h-4 w-4" />} onClick={() => onDuplicate(quotation)}>Duplicate</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Calendar className="h-4 w-4" />} onClick={() => onNote(quotation)}>Add Note</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Edit2 className="h-4 w-4" />} onClick={() => onEdit(quotation)}>Edit</Button> : null}
-          {canConvert && quotation.status !== 'Rejected' ? <Button variant="success" icon={<ShoppingCart className="h-4 w-4" />} loading={converting} onClick={() => onConvert(quotation)}>Convert</Button> : null}
-          {canDelete ? <Button variant="danger" icon={<Trash2 className="h-4 w-4" />} onClick={() => onDelete(quotation)}>Delete</Button> : null}
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function RelatedSection({ title, rows, empty, labelFor }: { title: string; rows: any[]; empty: string; labelFor: (row: any) => string }) {
-  return (
-    <Section title={title}>
-      {rows.length ? (
-        <div className="space-y-2">
-          {rows.slice(0, 5).map((row) => (
-            <div key={row.id} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-              <p className="text-sm font-semibold text-[var(--color-text)]">{labelFor(row)}</p>
-              <p className="mt-1 text-xs text-[var(--color-text-muted)]">{row.status || fmtDate(row.createdAt)}</p>
-            </div>
-          ))}
-        </div>
-      ) : <p className="text-sm text-[var(--color-text-muted)]">{empty}</p>}
-    </Section>
-  );
-}
 
 function TotalRow({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
   return (
@@ -1275,7 +1085,6 @@ function TotalRow({ label, value, strong = false }: { label: string; value: stri
   );
 }
 
-const linkButtonClass = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-medium text-[var(--color-text)]';
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -1283,15 +1092,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <h3 className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)]">{title}</h3>
       <div className="mt-3 space-y-3">{children}</div>
     </section>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)]">{label}</p>
-      <p className="mt-1 break-words text-sm font-semibold text-[var(--color-text)]">{value}</p>
-    </div>
   );
 }
 

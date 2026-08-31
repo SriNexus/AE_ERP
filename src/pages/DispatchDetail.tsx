@@ -39,6 +39,7 @@ import { COLLECTIONS } from '../lib/firebase';
 import toast from 'react-hot-toast';
 import { usePermissions } from '../lib/permissions';
 import { useAppStore } from '../store/useAppStore';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import { queryKeys } from '../lib/queryKeys';
 import { cn } from '../utils/cn';
 import { PageHeader } from '../components/ui/Card';
@@ -110,6 +111,7 @@ function StatusBadge({ status }: { status?: string }) {
 // ── Tracking Tab Content ───────────────────────────────────
 
 function TrackingTab({ dispatch }: { dispatch?: Record<string, unknown> }) {
+  const resolveUserName = useUserNameResolver();
   const trackingUpdates = (dispatch as any)?.trackingUpdates as Array<Record<string, unknown>> | undefined;
 
   if (!trackingUpdates || trackingUpdates.length === 0) {
@@ -142,7 +144,7 @@ function TrackingTab({ dispatch }: { dispatch?: Record<string, unknown> }) {
                 <td className="px-4 py-3">{String(update.location || update.currentLocation || '—')}</td>
                 <td className="px-4 py-3">{String(update.status || '—')}</td>
                 <td className="px-4 py-3">{String(update.remarks || update.notes || '—')}</td>
-                <td className="px-4 py-3">{String(update.updatedBy || '—')}</td>
+                <td className="px-4 py-3">{resolveUserName(update.updatedBy as string)}</td>
               </tr>
             ))}
           </tbody>
@@ -238,6 +240,7 @@ export default function DispatchDetail() {
   const navigate = useNavigate();
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const qkeys = queryKeys.forCompany(activeCompanyId);
+  const resolveUserName = useUserNameResolver();
 
   // ── Data queries ─────────────────────────────────────────
   const dispatchQuery = useQuery({
@@ -514,7 +517,7 @@ export default function DispatchDetail() {
 
       {/* Metadata */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <OverviewField label="Created By" value={String(dispatch?.createdBy || '—')} icon={User} />
+        <OverviewField label="Created By" value={resolveUserName(dispatch?.createdBy)} icon={User} />
         <OverviewField label="Assigned To" value={String(dispatch?.assignedToName || dispatch?.assignedToId || '—')} icon={User} />
         <OverviewField label="Last Updated" value={fmtDateSafe(dispatch.updatedAt || dispatch.createdAt)} icon={Clock} />
         <OverviewField label="Company" value={String(dispatch?.companyName || dispatch?.company || '—')} icon={Building2} />

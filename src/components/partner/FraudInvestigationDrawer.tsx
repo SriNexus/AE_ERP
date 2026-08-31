@@ -48,6 +48,7 @@ import type {
   FraudRiskLevel,
 } from '../../features/channel-partner/types/fraud';
 import { FRAUD_RULE_LABELS } from '../../features/channel-partner/types/fraud';
+import { useUserNameResolver } from '../../hooks/useUserNameResolver';
 
 interface Props {
   investigation: FraudInvestigation | null;
@@ -65,6 +66,7 @@ const STATUS_ACTIONS: { label: string; value: InvestigationStatus; color: string
 
 export function FraudInvestigationDrawer({ investigation, onClose, onUpdated }: Props) {
   const user = useAppStore((s) => s.user);
+  const resolveUserName = useUserNameResolver();
   const companyId = resolveWriteCompanyId();
 
   const [noteText, setNoteText] = useState('');
@@ -380,7 +382,7 @@ export function FraudInvestigationDrawer({ investigation, onClose, onUpdated }: 
               [...investigation.notes].reverse().map((note) => (
                 <div key={note.id} className="p-2.5 rounded-lg bg-[var(--color-bg-sunken)]">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] font-semibold">{note.createdByName || note.createdBy}</span>
+                    <span className="text-[10px] font-semibold">{resolveUserName(note.createdByName || note.createdBy)}</span>
                     <span className="text-[9px] text-[var(--color-text-muted)]">{fmtDate(note.createdAt)}</span>
                   </div>
                   <p className="text-xs">{note.text}</p>
@@ -421,7 +423,7 @@ export function FraudInvestigationDrawer({ investigation, onClose, onUpdated }: 
             </div>
             <div>
               <p className="text-[10px] text-[var(--color-text-muted)]">Created By</p>
-              <p className="font-semibold">{investigation.createdBy || 'System'}</p>
+              <p className="font-semibold">{resolveUserName(investigation.createdBy)}</p>
             </div>
             <div>
               <p className="text-[10px] text-[var(--color-text-muted)]">Resolved By</p>

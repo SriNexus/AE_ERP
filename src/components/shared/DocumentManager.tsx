@@ -346,10 +346,10 @@ export default function DocumentManager({
   const atLimit = typeof maxDocuments === 'number' && docs.length >= maxDocuments;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* ── Header ──────────────────────────────────────── */}
-      <div className="flex shrink-0 items-center justify-between gap-3 pb-4">
-        <div>
+    <div className="flex min-h-0 w-full max-w-full flex-col lg:h-full">
+      {/* ── Header — wraps on narrow widths so both actions stay in-viewport ── */}
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 pb-4">
+        <div className="min-w-0">
           <h3 className="text-sm font-bold text-[var(--color-text)]">{title}</h3>
           <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">
             {docs.length} document{docs.length === 1 ? '' : 's'}
@@ -357,25 +357,25 @@ export default function DocumentManager({
           </p>
         </div>
         {isEditing && (
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto">
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={uploading || atLimit}
               title={atLimit ? `Maximum of ${maxDocuments} documents reached` : undefined}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3.5 py-2 text-[12px] font-semibold text-white shadow-sm transition-all hover:-translate-y-0.5 hover:bg-[var(--color-primary-hover)] hover:shadow-md active:translate-y-0 active:shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:shadow-none"
+              className="inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-2 text-[12px] font-semibold text-white shadow-sm transition-all hover:-translate-y-0.5 hover:bg-[var(--color-primary-hover)] hover:shadow-md active:translate-y-0 active:shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:shadow-none sm:flex-none"
             >
-              {uploading ? <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <UploadCloud className="h-3.5 w-3.5" />}
-              {uploading ? 'Uploading...' : 'Upload Document'}
+              {uploading ? <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <UploadCloud className="h-3.5 w-3.5 shrink-0" />}
+              <span className="truncate">{uploading ? 'Uploading...' : 'Upload Document'}</span>
             </button>
             {(captureMode === 'camera' || captureMode === 'both') && (
               <button
                 onClick={() => captureInputRef.current?.click()}
                 disabled={uploading || atLimit}
                 title="Take a photo with the camera"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 py-2 text-[12px] font-semibold text-[var(--color-text)] shadow-sm transition-all hover:-translate-y-0.5 hover:bg-[var(--color-surface-hover)] hover:shadow-md active:translate-y-0 active:shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:shadow-none"
+                className="inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-[12px] font-semibold text-[var(--color-text)] shadow-sm transition-all hover:-translate-y-0.5 hover:bg-[var(--color-surface-hover)] hover:shadow-md active:translate-y-0 active:shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:shadow-none sm:flex-none"
               >
-                <MapPin className="h-3.5 w-3.5" />
-                Capture Photo
+                <MapPin className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">Capture Photo</span>
               </button>
             )}
           </div>
@@ -408,9 +408,9 @@ export default function DocumentManager({
         // items-start (not the default `stretch`): the Preview column must
         // size to its own content — a small image should not be stretched
         // tall just because the document List column happens to be taller.
-        <div className="flex min-h-0 flex-1 items-start gap-5">
+        <div className="flex min-h-0 w-full max-w-full flex-col items-stretch gap-4 lg:flex-1 lg:flex-row lg:items-start lg:gap-5">
           {/* List column */}
-          <div className="w-full max-w-[300px] shrink-0 space-y-2 overflow-y-auto pr-1">
+          <div className="w-full min-w-0 space-y-2 pr-1 lg:max-w-[300px] lg:shrink-0 lg:overflow-y-auto">
             {docs.map(doc => {
               const active = doc.id === selectedId;
               return (
@@ -460,7 +460,7 @@ export default function DocumentManager({
           </div>
 
           {/* Preview column */}
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)]">
+          <div className="flex w-full min-w-0 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] lg:flex-1">
             {selectedDoc && (
               <>
                 <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] bg-[var(--color-surface)] px-4 py-3">

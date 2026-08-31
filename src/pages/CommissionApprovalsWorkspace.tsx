@@ -33,6 +33,7 @@ import { getOne, getAll, fmtDate, fmtCurrency } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';
 import { usePermissions } from '../lib/permissions';
 import { useAppStore } from '../store/useAppStore';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import { cn } from '../utils/cn';
 import { PageHeader } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -106,6 +107,7 @@ export default function CommissionApprovalsWorkspace() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
+  const resolveUserName = useUserNameResolver();
 
   // ── Modal state ─────────────────────────────────────────
   const [approveAmount, setApproveAmount] = useState('');
@@ -344,7 +346,7 @@ export default function CommissionApprovalsWorkspace() {
           <OverviewField label="Generated Date" value={fmtDateSafe(record.generatedDate || record.createdAt)} icon={Calendar} />
           <OverviewField label="Approved At" value={record?.approvedAt ? fmtDateSafe(record.approvedAt) : '—'} icon={Calendar} />
           <OverviewField label="Approved By" icon={User}>
-            {record?.approvedBy ? String(record.approvedBy) : '—'}
+            {record?.approvedBy ? resolveUserName(record.approvedBy) : '—'}
           </OverviewField>
           <OverviewField label="Rejection Reason" icon={AlertTriangle}>
             {record?.rejectionReason ? String(record.rejectionReason) : '—'}
@@ -370,7 +372,7 @@ export default function CommissionApprovalsWorkspace() {
 
       {/* Section 6 — Metadata */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <OverviewField label="Created By" value={String(record?.createdBy || '—')} icon={User} />
+        <OverviewField label="Created By" value={resolveUserName(record?.createdBy)} icon={User} />
         <OverviewField label="Created At" value={fmtDateSafe(record?.createdAt)} icon={Calendar} />
         <OverviewField label="Company" icon={Building2}>
           {record?.companyId ? String(record.companyId) : '—'}

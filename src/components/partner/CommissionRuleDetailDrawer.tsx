@@ -14,6 +14,7 @@ import { fmtDate, fmtDateTime } from '../../lib/firestore';
 import { DocumentViewer, useDocumentViewer, formatFileSize } from '../shared/DocumentViewer';
 import type { DocumentViewerFile } from '../shared/DocumentViewer';
 import type { CommissionRule } from '../../features/channel-partner/types';
+import { useUserNameResolver } from '../../hooks/useUserNameResolver';
 
 interface CommissionRuleDetailDrawerProps {
   rule: CommissionRule | null;
@@ -65,6 +66,7 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
 
 export function CommissionRuleDetailDrawer({ rule, open, onClose, onEdit, onDuplicate }: CommissionRuleDetailDrawerProps) {
   const [activeTab, setActiveTab] = useState<string>('overview');
+  const resolveUserName = useUserNameResolver();
   const { doc: viewerDoc, open: viewerOpen, viewDocument, closeViewer } = useDocumentViewer();
 
   // Document attachments — moved BEFORE early return to preserve hook order
@@ -264,7 +266,7 @@ export function CommissionRuleDetailDrawer({ rule, open, onClose, onEdit, onDupl
                   </div>
                   <div>
                     <p className="text-sm font-medium text-[var(--color-text)]">Created</p>
-                    <p className="text-xs text-[var(--color-text-muted)]">{rule.createdAt ? fmtDateTime(rule.createdAt) : '—'}{rule.createdBy ? ` by ${rule.createdBy}` : ''}</p>
+                    <p className="text-xs text-[var(--color-text-muted)]">{rule.createdAt ? fmtDateTime(rule.createdAt) : '—'}{rule.createdBy ? ` by ${resolveUserName(rule.createdBy)}` : ''}</p>
                   </div>
                 </div>
                 {rule.updatedAt && (
@@ -274,7 +276,7 @@ export function CommissionRuleDetailDrawer({ rule, open, onClose, onEdit, onDupl
                     </div>
                     <div>
                       <p className="text-sm font-medium text-[var(--color-text)]">Last Modified</p>
-                      <p className="text-xs text-[var(--color-text-muted)]">{fmtDateTime(rule.updatedAt)}{rule.updatedBy ? ` by ${rule.updatedBy}` : ''}</p>
+                      <p className="text-xs text-[var(--color-text-muted)]">{fmtDateTime(rule.updatedAt)}{rule.updatedBy ? ` by ${resolveUserName(rule.updatedBy)}` : ''}</p>
                     </div>
                   </div>
                 )}

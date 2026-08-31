@@ -98,7 +98,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { ArrowRight, Plus, Loader2 } from 'lucide-react';
+
 import { statusBadge } from '../../../../components/ui/Badge';
 import quotationIllustration from '../../../../assets/customer-workspace/quotation.png';
 import orderIllustration from '../../../../assets/customer-workspace/order.png';
@@ -119,8 +119,11 @@ import { useWarehouses } from '../../../warehouses/hooks/useWarehouses';
 import { useGeneratePIFromOrder } from '../../../orders/hooks/useOrders';
 import { useSavePayment, PAYMENT_FORM_DEFAULT, type PaymentForm } from '../../../sales/hooks/useSales';
 import { useCustomerBillingContext } from '../../hooks/useCustomerBillingContext';
+import { dispatchCustomer, dispatchWarehouse, dispatchAssigned } from '../../../dispatch/utils/dispatchWorkspaceUtils';
 import { mostRecentByDate } from './CustomerWorkspaceKpis';
 import { hasActiveBatch } from './CustomerWorkspaceHeader';
+import WorkflowCard from './WorkflowCard';
+import type { RecordFact } from './RecordFacts';
 import type { CustomerCenterWorkflow } from '../../hooks/useCustomerCenterWorkflow';
 
 interface Props {
@@ -128,215 +131,7 @@ interface Props {
   workflow: CustomerCenterWorkflow;
 }
 
-interface StageAction {
-  label: string;
-  onClick: () => void;
-  /** Whether this action is currently available given the real business
-   * state (and permission). The button is ALWAYS rendered — Final UX
-   * Parity + B2B Production Readiness mission — never hidden; only its
-   * active/inactive visual state changes, so the complete 5-stage
-   * workflow stays visible at all times. */
-  active: boolean;
-  loading?: boolean;
-}
 
-/** A stage's real business state, derived from data already computed by the
- * caller (never invented here) — drives the icon tint, the card's left
- * accent, and whether the primary action gets the "do this next" treatment.
- *   blocked    — a prior stage hasn't happened yet (e.g. no Order yet)
- *   actionable — unblocked, no record yet: the clear next step
- *   done       — a record already exists for this stage */
-type StageState = 'blocked' | 'actionable' | 'done';
-
-/** Rail node color only — the illustration inside the card now carries the
- * stage's visual identity, so the external rail no longer needs its own
- * icon bubble, just a small state-tinted dot marking the step. */
-const STAGE_NODE_TONE: Record<StageState, string> = {
-  blocked: 'bg-[var(--color-border)]',
-  actionable: 'bg-[var(--color-primary)]',
-  done: 'bg-[var(--color-success)]',
-};
-
-const STAGE_ACCENT: Record<StageState, string> = {
-  blocked: 'border-l-[var(--color-border)]',
-  actionable: 'border-l-[var(--color-primary)]',
-  done: 'border-l-[var(--color-success)]',
-};
-
-/** The one Create/Record/Generate/Request button component every stage
- * uses — Final UI/UX Refinement mission: previously each stage's primary
- * action was styled inline at its own call site (and, before that, lived in
- * different positions per state). Now there is exactly one component, used
- * identically for Create Quotation / Create Order / Generate Invoice /
- * Record Payment / Request Dispatch — same height, padding, radius, type
- * scale, icon treatment, and hover/focus/pressed/disabled states. Only the
- * label text (and whether it's active) ever differs. Lives permanently in
- * the card header's top-right slot (see StageCard) — always rendered, so
- * blocked/actionable/done all keep the exact same header skeleton; only its
- * active/muted look changes. */
-function CreateActionButton({ action }: { action: StageAction }) {
-  return (
-    <button
-      type="button"
-      onClick={action.onClick}
-      disabled={!action.active || action.loading}
-      title={action.active ? undefined : 'Not available yet'}
-      className={[
-        'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[11.5px] font-semibold transition-colors active:scale-[0.98] disabled:cursor-not-allowed',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1',
-        action.active
-          ? 'border-[var(--color-primary-muted)] bg-[var(--color-primary-light)] text-[var(--color-primary-text)] hover:bg-[var(--color-primary-muted)]'
-          : 'border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] text-[var(--color-text-disabled)]',
-      ].join(' ')}
-    >
-      {action.loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-      {action.loading ? 'Working…' : action.label}
-    </button>
-  );
-}
-
-/** Shared, connected stage card — every one of the 5 stages renders through
- * this exact component so the pipeline reads as one process, not five
- * unrelated boxes. `last` suppresses the connector rail below the final card.
- *
- * Final UI/UX Refinement mission — card anatomy is now a deliberate
- * sequence, not a header-plus-body template with a button wherever there was
- * room: illustration → stage → status → context/metadata → primary action →
- * View Latest.
- *   - Illustration + stage name + status badge sit together as one identity
- *     group on the header's left (the illustration is a compact visual cue,
- *     not the main content — h-11, object-contain, never stretched).
- *   - The Create/Record/Generate/Request button (CreateActionButton, one
- *     shared component — see above) sits in the header's top-right, always
- *     in the same slot for all 5 stages and all 3 states; only its active/
- *     muted look changes. This is what makes it read as "structurally part
- *     of the header" rather than a floating action.
- *   - Below the header, the body carries exactly the context the current
- *     state calls for — nothing more:
- *       blocked    — the dependency message only (why this isn't available
- *                    yet); no second button competing with the header's).
- *       actionable — the invitation message, plus a quiet "View Latest" on
- *                    the right ONLY when a real fallback record exists (an
- *                    older order's Invoice/Payment/Dispatch, before the
- *                    current order has its own — see the file's repeat-
- *                    business note). Never a dead link next to an invitation.
- *       done       — the record itself, as a single clickable row (real
- *                    number/amount/date, trailing chevron), not text next to
- *                    a separate chip pointing at it. Repeat business
- *                    (Quotation/Order) is handled by the SAME header button
- *                    simply staying active — no second "create another"
- *                    control duplicating it in the body anymore.
- *
- * Rail: now a small state-tinted dot, not an icon bubble — the illustration
- * inside the card carries the stage's identity, so the external rail only
- * needs to mark the step and connect it to the next one. */
-function StageCard({ illustration, stage, state, badge, summary, primaryAction, viewLatest, last }: {
-  illustration: string;
-  stage: string;
-  state: StageState;
-  badge: React.ReactNode;
-  summary: React.ReactNode;
-  primaryAction: StageAction;
-  viewLatest: StageAction;
-  last?: boolean;
-}) {
-  return (
-    <div className="flex gap-3.5">
-      {/* Connector rail — a stepper node per stage, linked by a thin line so
-          the five cards read as one connected flow rather than five
-          unrelated boxes. Purely structural, not decorative. */}
-      <div className="flex shrink-0 flex-col items-center">
-        <span className={['mt-8 h-2.5 w-2.5 shrink-0 rounded-full transition-colors', STAGE_NODE_TONE[state]].join(' ')} />
-        {!last && <span className="mt-1 w-px flex-1 bg-[var(--color-border)]" />}
-      </div>
-
-      <div className={[
-        // Final Customer Module Polish mission: the card's own hover-lift
-        // ("alive, not a static rectangle") was lost in an earlier pass —
-        // restored here, restrained (small translate + shadow bump only,
-        // no color/scale exaggeration). focus-within gets the same subtle
-        // ring so keyboard focus on any button inside reads as "this card
-        // is active," not just the button in isolation.
-        'mb-2.5 flex min-w-0 flex-1 overflow-hidden rounded-xl border border-[var(--color-border)] border-l-[3px] bg-[var(--color-surface)] shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:ring-1 hover:ring-[var(--color-border-strong)] focus-within:ring-1 focus-within:ring-[var(--color-primary-muted)]',
-        STAGE_ACCENT[state],
-      ].join(' ')}>
-        {/* Illustration rail — a full-height left strip (not a small inline
-            icon): the stage's visual identity occupies its own column,
-            2px inset from the card's top/left/bottom edges, with the
-            header/body content starting exactly where it ends. Width is a
-            share of the card (~13%), floored/ceilinged so it stays
-            proportionate as the Center column narrows (30:55:20 ratio
-            mission) — the ceiling was trimmed slightly (84px→76px) so the
-            content column keeps its share of the freed-up horizontal room
-            rather than the illustration eating a fixed chunk regardless of
-            the card's own width. */}
-        <div className="w-[13%] min-w-[52px] max-w-[76px] shrink-0 self-stretch p-0.5">
-          <div className="flex h-full w-full items-center justify-center">
-            <img src={illustration} alt="" aria-hidden="true" className="h-full w-full object-contain" />
-          </div>
-        </div>
-
-        <div className="min-w-0 flex-1 p-4">
-          {/* HEADER — stage + status on the left, the one Create action
-              permanently in the top-right slot. Tightened gaps (not
-              padding/height) so the row keeps fitting on one line as the
-              Center column narrows — using the width efficiently instead
-              of squeezing the card vertically. */}
-          <div className="flex items-center justify-between gap-2.5">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <h4 className="text-[13px] font-bold text-[var(--color-text)]">{stage}</h4>
-              {badge}
-            </div>
-            <CreateActionButton action={primaryAction} />
-          </div>
-
-          {/* BODY — exactly the context this state calls for. */}
-          <div className="mt-3">
-            {state === 'blocked' && (
-              <p className="text-xs text-[var(--color-text-disabled)] leading-snug">{summary}</p>
-            )}
-
-            {state === 'actionable' && (
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="min-w-0 flex-1 text-xs text-[var(--color-text-secondary)] leading-snug">{summary}</p>
-                {/* Only shown when a real fallback record exists to view (an
-                    older order's record, before the current one has any) —
-                    never a dead click next to the invitation. */}
-                {viewLatest.active && (
-                  <button
-                    type="button"
-                    onClick={viewLatest.onClick}
-                    className="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1"
-                  >
-                    {viewLatest.label} <ArrowRight className="h-3 w-3" />
-                  </button>
-                )}
-              </div>
-            )}
-
-            {state === 'done' && (
-              /* The record IS the content — a single clickable row (real
-                 number/amount/date), not text sitting next to a separate
-                 "View Latest" chip. -mx-2 lets the hover fill bleed to the
-                 card's own padding edge, so it reads as part of the card. */
-              <button
-                type="button"
-                onClick={viewLatest.onClick}
-                disabled={!viewLatest.active}
-                className="group -mx-2 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-sunken)] disabled:cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1"
-              >
-                <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]">{summary}</span>
-                {viewLatest.active && (
-                  <ArrowRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)] transition-transform group-hover:translate-x-0.5 group-hover:text-[var(--color-primary-text)]" />
-                )}
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /** Record Payment — small local modal, same pattern as the Dispatch request
  * flow below: real mutation (useSavePayment), no parallel business logic.
@@ -435,6 +230,13 @@ export default function CustomerB2BWorkflowPipeline({ customer, workflow }: Prop
   const {
     quotations, orders, invoices, payments, dispatches,
   } = useCustomerBillingContext(customer);
+
+  // Display-only lookup so Quotation / Invoice / Payment facts can show the
+  // human order number their list rows show (built from the same `orders`
+  // already loaded above — no extra query).
+  const orderNumberById = new Map<string, string>(
+    (orders as any[]).map((o: any) => [String(o.id), o.orderNumber || o.orderNo || o.id]),
+  );
 
   const canCreateQuotations = perms.canCreate('quotations');
   const canCreateOrders = perms.canCreate('orders');
@@ -552,40 +354,53 @@ export default function CustomerB2BWorkflowPipeline({ customer, workflow }: Prop
 
   return (
     <div>
-      <StageCard
+      <WorkflowCard
+        title="Quotation"
         illustration={quotationIllustration}
-        stage="Quotation"
-        state={latestQuotation ? 'done' : 'actionable'}
         badge={latestQuotation ? statusBadge(latestQuotation.status || 'Draft') : statusBadge('Not Started')}
         summary={latestQuotation
           ? <>{latestQuotation.quotationNumber || latestQuotation.quoteNumber || latestQuotation.id} · {fmtCurrency(latestQuotation.total)} · {fmtDate(latestQuotation.date)}</>
           : 'No quotation yet for this customer.'}
-        primaryAction={{ label: 'Create Quotation', onClick: workflow.goToQuotation, active: canCreateQuotations }}
-        viewLatest={{
+        facts={latestQuotation ? [
+          { label: 'Quotation', value: latestQuotation.quotationNumber || latestQuotation.quoteNumber || latestQuotation.id },
+          { label: 'Order', value: latestQuotation.orderId ? orderNumberById.get(String(latestQuotation.orderId)) : null },
+          { label: 'Date', value: fmtDate(latestQuotation.date) },
+          { label: 'Valid Until', value: fmtDate(latestQuotation.validUntil) },
+          { label: 'Items', value: `${(latestQuotation.items || []).length} items` },
+          { label: 'Total', value: fmtCurrency(latestQuotation.total) },
+        ] : undefined}
+        action={{ label: 'Create Quotation', onClick: workflow.goToQuotation, active: canCreateQuotations }}
+        viewAction={{
           label: 'View Latest', active: !!latestQuotation,
-          // The retired standalone quotation popup's '?open=' path — B2B
-          // quotations open their /quotations/:id detail page instead.
           onClick: () => latestQuotation && navigate(`/quotations/${encodeURIComponent(latestQuotation.id)}`),
         }}
       />
-      <StageCard
+      <WorkflowCard
+        title="Order"
         illustration={orderIllustration}
-        stage="Order"
-        state={latestOrder ? 'done' : 'actionable'}
         badge={latestOrder ? statusBadge(latestOrder.status || 'Pending') : statusBadge('Not Started')}
         summary={latestOrder
           ? <>{latestOrder.orderNumber || latestOrder.orderNo || latestOrder.id} · {fmtCurrency(latestOrder.total)} · {fmtDate(latestOrder.date)}{isActiveBatch && <> · <span className="text-[var(--color-primary-text)] font-semibold">Active batch (ordered within 30 days)</span></>}</>
           : 'No order yet for this customer.'}
-        primaryAction={{ label: 'Create Order', onClick: () => void workflow.goToOrder(), active: canCreateOrders, loading: workflow.orderCheckLoading }}
-        viewLatest={{
+        facts={latestOrder ? [
+          { label: 'Order', value: latestOrder.orderNumber || latestOrder.orderNo || latestOrder.id },
+          { label: 'Type', value: latestOrder.orderType || 'B2C' },
+          { label: 'Date', value: fmtDate(latestOrder.date || latestOrder.createdAt) },
+          { label: 'Delivery', value: fmtDate(latestOrder.deliveryDate) },
+          { label: 'Items', value: `${(latestOrder.items || []).length} items` },
+          { label: 'Total', value: fmtCurrency(latestOrder.total) },
+          { label: 'Payment', value: latestOrder.paymentStatus || 'Pending' },
+          { label: 'Batch', value: isActiveBatch ? 'Active · within 30 days' : null },
+        ] : undefined}
+        action={{ label: 'Create Order', onClick: () => void workflow.goToOrder(), active: canCreateOrders, loading: workflow.orderCheckLoading }}
+        viewAction={{
           label: 'View Latest', active: !!latestOrder,
           onClick: () => latestOrder && navigate(`/orders/${encodeURIComponent(latestOrder.id)}`),
         }}
       />
-      <StageCard
+      <WorkflowCard
+        title="Invoice"
         illustration={invoiceIllustration}
-        stage="Invoice"
-        state={!hasOrder ? 'blocked' : invoiceForLatestOrder ? 'done' : 'actionable'}
         badge={
           !hasOrder ? statusBadge('Not Available Yet')
           : invoiceForLatestOrder ? statusBadge(invoiceForLatestOrder.paymentStatus || invoiceForLatestOrder.status || 'Pending')
@@ -597,7 +412,16 @@ export default function CustomerB2BWorkflowPipeline({ customer, workflow }: Prop
             ? <>{invoiceForLatestOrder.invoiceNumber || invoiceForLatestOrder.piNumber || invoiceForLatestOrder.id} · {fmtCurrency(invoiceForLatestOrder.total)} · {fmtDate(invoiceForLatestOrder.date)}</>
             : <>Order {latestOrder.orderNumber || latestOrder.orderNo || latestOrder.id} has no invoice yet.</>
         }
-        primaryAction={{
+        facts={invoiceForLatestOrder ? [
+          { label: 'Invoice', value: invoiceForLatestOrder.invoiceNumber || invoiceForLatestOrder.piNumber || invoiceForLatestOrder.id },
+          { label: 'Order', value: orderNumberById.get(String(invoiceForLatestOrder.orderId)) || (latestOrder && (latestOrder.orderNumber || latestOrder.orderNo)) },
+          { label: 'Date', value: fmtDate(invoiceForLatestOrder.date || invoiceForLatestOrder.createdAt) },
+          { label: 'Due', value: fmtDate(invoiceForLatestOrder.dueDate) },
+          { label: 'Tax', value: invoiceForLatestOrder.taxAmount != null ? fmtCurrency(invoiceForLatestOrder.taxAmount) : null },
+          { label: 'Total', value: fmtCurrency(invoiceForLatestOrder.total) },
+          { label: 'Payment', value: invoiceForLatestOrder.paymentStatus || 'Pending' },
+        ] : undefined}
+        action={{
           label: 'Generate Invoice',
           active: hasOrder && !invoiceForLatestOrder && canGenerateInvoice,
           loading: generateInvoice.isPending,
@@ -608,15 +432,14 @@ export default function CustomerB2BWorkflowPipeline({ customer, workflow }: Prop
             },
           }),
         }}
-        viewLatest={{
+        viewAction={{
           label: 'View Latest', active: !!invoiceViewTarget,
           onClick: () => invoiceViewTarget && navigate(`/invoices/${encodeURIComponent(invoiceViewTarget.id)}`),
         }}
       />
-      <StageCard
+      <WorkflowCard
+        title="Payment"
         illustration={paymentIllustration}
-        stage="Payment"
-        state={!hasOrder ? 'blocked' : latestPaymentForOrder ? 'done' : 'actionable'}
         badge={
           !hasOrder ? statusBadge('Not Available Yet')
           : latestPaymentForOrder ? statusBadge(latestOrder.paymentStatus || latestPaymentForOrder.status || 'Pending')
@@ -628,17 +451,23 @@ export default function CustomerB2BWorkflowPipeline({ customer, workflow }: Prop
             ? <>{fmtCurrency(latestPaymentForOrder.amount)} · {latestPaymentForOrder.mode} · {fmtDate(latestPaymentForOrder.date)}</>
             : <>Order {latestOrder.orderNumber || latestOrder.orderNo || latestOrder.id} is awaiting payment.</>
         }
-        primaryAction={{ label: 'Record Payment', onClick: () => setShowPaymentForm(true), active: hasOrder && canRecordPayment }}
-        viewLatest={{
+        facts={latestPaymentForOrder ? [
+          { label: 'Pay ID', value: latestPaymentForOrder.paymentNumber || latestPaymentForOrder.id },
+          { label: 'Date', value: fmtDate(latestPaymentForOrder.date || latestPaymentForOrder.createdAt) },
+          { label: 'Order', value: latestPaymentForOrder.orderId ? (orderNumberById.get(String(latestPaymentForOrder.orderId)) || latestPaymentForOrder.orderId) : null },
+          { label: 'Amount', value: fmtCurrency(latestPaymentForOrder.amount) },
+          { label: 'Mode', value: latestPaymentForOrder.mode },
+          { label: 'Reference', value: latestPaymentForOrder.reference },
+        ] : undefined}
+        action={{ label: 'Record Payment', onClick: () => setShowPaymentForm(true), active: hasOrder && canRecordPayment }}
+        viewAction={{
           label: 'View Latest', active: !!paymentViewTarget,
           onClick: () => paymentViewTarget && navigate(`/payments/${encodeURIComponent(paymentViewTarget.id)}`),
         }}
       />
-      <StageCard
-        last
+      <WorkflowCard
+        title="Dispatch"
         illustration={dispatchIllustration}
-        stage="Dispatch"
-        state={!hasOrder ? 'blocked' : dispatchForLatestOrder ? 'done' : 'actionable'}
         badge={
           !hasOrder ? statusBadge('Not Available Yet')
           : dispatchForLatestOrder ? statusBadge(dispatchForLatestOrder.status || 'Pending Verification')
@@ -650,12 +479,20 @@ export default function CustomerB2BWorkflowPipeline({ customer, workflow }: Prop
             ? <>{dispatchForLatestOrder.dispatchNumber || dispatchForLatestOrder.dispatchId || dispatchForLatestOrder.id} · {dispatchForLatestOrder.vehicleNo}{dispatchForLatestOrder.driverName ? ` · ${dispatchForLatestOrder.driverName}` : ''}</>
             : <>Order {latestOrder.orderNumber || latestOrder.orderNo || latestOrder.id} has not been dispatched yet.</>
         }
-        primaryAction={{
+        facts={dispatchForLatestOrder ? [
+          { label: 'Dispatch', value: dispatchForLatestOrder.dispatchNumber || dispatchForLatestOrder.dispatchNo || dispatchForLatestOrder.dispatchId || dispatchForLatestOrder.id },
+          { label: 'Warehouse', value: dispatchWarehouse(dispatchForLatestOrder) },
+          { label: 'Vehicle', value: dispatchForLatestOrder.vehicleNo },
+          { label: 'Driver', value: dispatchForLatestOrder.driverName },
+          { label: 'Assigned', value: dispatchAssigned(dispatchForLatestOrder) },
+          { label: 'Date', value: fmtDate(dispatchForLatestOrder.date || dispatchForLatestOrder.createdAt) },
+        ] : undefined}
+        action={{
           label: 'Request Dispatch',
           active: canRequestDispatchNow && canRequestDispatch,
           onClick: () => { if (!canRequestDispatchNow) return; loadOrderForDispatch(latestOrder.id); setShowRequestForm(true); },
         }}
-        viewLatest={{
+        viewAction={{
           label: 'View Latest', active: !!dispatchViewTarget,
           onClick: () => dispatchViewTarget && navigate(`/dispatch/${encodeURIComponent(dispatchViewTarget.id)}`),
         }}

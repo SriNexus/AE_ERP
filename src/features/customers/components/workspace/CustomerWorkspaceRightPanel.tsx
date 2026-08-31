@@ -69,7 +69,13 @@ export default function CustomerWorkspaceRightPanel({ customer, workflow, compan
         createdById={user.id}
         createdByName={user.name}
       />
-      <CustomerLinkedRecords customerId={customer.id} companyId={companyId} />
+      {/* Linked Records — DESKTOP ONLY here (unchanged). On mobile this
+          would duplicate the collapsed-by-default "Linked Records" row in
+          CustomerWorkspaceSections (centre column), so it is hidden below
+          `lg` and the centre row is the single mobile surface. */}
+      <div className="hidden lg:block">
+        <CustomerLinkedRecords customerId={customer.id} companyId={companyId} />
+      </div>
     </div>
   );
 }

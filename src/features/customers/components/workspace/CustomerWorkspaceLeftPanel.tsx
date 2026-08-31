@@ -66,9 +66,14 @@ interface Props {
    * clicks "Cancel Editing" would still have hasUnsaved=true and the edit
    * would be silently persisted by a later Save. */
   onCancelEdit?: () => void;
+  /** When true the panel is rendered inside a section whose header already
+   * says "Customer Information" (the collapsible section in the centre
+   * column) — so this component drops its own title and just renders the
+   * Edit toggle + body. */
+  embedded?: boolean;
 }
 
-export default function CustomerWorkspaceLeftPanel({ customer, draft, onFieldChange, canEdit = false, isEditing, onToggleEdit, onCancelEdit }: Props) {
+export default function CustomerWorkspaceLeftPanel({ customer, draft, onFieldChange, canEdit = false, isEditing, onToggleEdit, onCancelEdit, embedded = false }: Props) {
   function handleToggleEdit() {
     if (isEditing) {
       onCancelEdit?.();
@@ -79,8 +84,8 @@ export default function CustomerWorkspaceLeftPanel({ customer, draft, onFieldCha
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Customer Information</h3>
+      <div className={`flex items-center ${embedded ? 'justify-end' : 'justify-between'} mb-2`}>
+        {!embedded && <h3 className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Customer Information</h3>}
         {canEdit && onFieldChange && (
           isEditing ? (
             <button

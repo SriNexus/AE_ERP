@@ -42,7 +42,12 @@ const attendancePageCode = stripComments(attendancePage);
 
 describe('useFaceEnrollmentStatus — reads the real, existing server-authoritative status endpoint', () => {
   it('calls GET /api/biometrics/status — the new, minimal projection endpoint, never a second/parallel one', () => {
-    expect(useFaceEnrollmentStatusCode).toContain("fetch('/api/biometrics/status'");
+    // The URL is a variable as of the Employee-View "Register Face" follow-up
+    // (it conditionally appends ?targetUserId=), but it is built from, and
+    // only ever from, this exact literal path — never a second endpoint.
+    expect(useFaceEnrollmentStatusCode).toContain("/api/biometrics/status?targetUserId=");
+    expect(useFaceEnrollmentStatusCode).toContain("'/api/biometrics/status'");
+    expect(useFaceEnrollmentStatusCode).toContain('fetch(url');
     expect(useFaceEnrollmentStatusCode).toContain("method: 'GET'");
   });
 
@@ -51,13 +56,18 @@ describe('useFaceEnrollmentStatus — reads the real, existing server-authoritat
     expect(useFaceEnrollmentStatusCode).toContain('getIdToken()');
   });
 
-  it('never sends a request body / never carries any identity field on this GET call', () => {
+  it('never sends a request body on this GET call — an optional target identity is carried in the query string only, and only for the Employee-View on-behalf-of case, never a raw client-trusted write', () => {
     expect(useFaceEnrollmentStatusCode).not.toMatch(/body:\s*JSON\.stringify/);
-    expect(useFaceEnrollmentStatusCode).not.toMatch(/\btargetUserId\b|\bemployeeId\b(?!Status)/);
+    // targetUserId is now a deliberate, server-authorized (resolveEnrollmentTarget)
+    // capability — see api/biometrics/status.ts's own tests for the
+    // authorization boundary. What must still never appear is a body, or any
+    // OTHER client-chosen identity field (companyId/groupId) bypassing that.
+    expect(useFaceEnrollmentStatusCode).not.toMatch(/\bemployeeId\b(?!Status)|\bcompanyId\b|\bgroupId\b/);
   });
 
-  it('uses the query key ["biometricFaceReference"] — the EXACT key useFaceEnrollment.ts already invalidates on a successful enrollment, so no additional invalidation wiring was needed anywhere', () => {
-    expect(useFaceEnrollmentStatusCode).toContain("queryKey: ['biometricFaceReference']");
+  it('uses the query key ["biometricFaceReference"] as the default (self) case — the EXACT key useFaceEnrollment.ts already invalidates on a successful self-enrollment — and a distinct, additional key for an explicit target', () => {
+    expect(useFaceEnrollmentStatusCode).toContain(": ['biometricFaceReference']");
+    expect(useFaceEnrollmentStatusCode).toContain("['biometricFaceReference', targetUserId]");
     const enrollmentHook = readFileSync(join(hooksDir, 'useFaceEnrollment.ts'), 'utf-8');
     expect(enrollmentHook).toContain("queryKey: ['biometricFaceReference']");
   });
@@ -76,9 +86,11 @@ describe('api/biometrics/status.ts — minimal, self-only, never leaks the embed
     expect(statusRoute).toContain('sendSuccess(res, { status })');
   });
 
-  it('reads the CALLER\'S OWN erpUserId via the existing referenceStore — never a client-suppliable target id', () => {
-    expect(statusRoute).toContain('store.getReference(user.erpUserId)');
-    expect(statusRoute).not.toMatch(/\btargetUserId\b/);
+  it('reads the reference for the RESOLVED target (self by default) — an explicit ?targetUserId= is only ever honored after resolveEnrollmentTarget() re-derives and authorizes it server-side, never trusted as a raw client-suppliable id', () => {
+    expect(statusRoute).toContain('store.getReference(target.targetUserId)');
+    expect(statusRoute).toContain('resolveEnrollmentTarget(user, requestedTargetUserId,');
+    // Never a direct, unauthorized use of the raw query param.
+    expect(statusRoute).not.toMatch(/store\.getReference\(requestedTargetUserId\)/);
   });
 
   it('reuses the existing createDefaultBiometricReferenceStore() — never a second storage model/collection', () => {

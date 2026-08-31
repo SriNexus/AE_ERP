@@ -11,6 +11,15 @@
  * The one thing this route must never do — return the embedding or any
  * field beyond `{status}` — is asserted directly against the exact response
  * body shape, not just "no error thrown".
+ *
+ * Final completion pass: this route now optionally accepts `?targetUserId=`
+ * (Employee-View "Register Face" follow-up) — authorized via the REAL,
+ * unmocked `resolveEnrollmentTarget()` (the exact same function
+ * `enroll.ts` already uses for on-behalf-of enrollment), so `getAdminDb()`
+ * is mocked with a CONFIGURABLE `readUser`-backing stub (unlike
+ * `enrollVerifyHandlers.test.ts`, which mocks the whole orchestration
+ * function away — `status.ts` has no such orchestration layer of its own,
+ * so `resolveEnrollmentTarget()` genuinely runs here).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
@@ -27,6 +36,14 @@ vi.mock('../../_lib/rateLimit', () => ({
 const mockGetReference = vi.fn();
 vi.mock('../../_lib/biometrics/referenceStore', () => ({
   createDefaultBiometricReferenceStore: () => ({ getReference: (...args: any[]) => mockGetReference(...args) }),
+}));
+
+// Backs resolveEnrollmentTarget()'s `readUser()` dependency for the
+// on-behalf-of (targetUserId) case — never called at all for the self case
+// (resolveEnrollmentTarget short-circuits before touching Firestore).
+const mockUserDocGet = vi.fn();
+vi.mock('../../_lib/firebase', () => ({
+  getAdminDb: () => ({ collection: () => ({ doc: () => ({ get: (...args: any[]) => mockUserDocGet(...args) }) }) }),
 }));
 
 // Imported AFTER the mocks above so the handler module picks them up.
@@ -46,11 +63,13 @@ function mockRequest(overrides: Partial<VercelRequest> = {}): VercelRequest {
     method: 'GET',
     headers: { authorization: 'Bearer real-token' },
     socket: { remoteAddress: '127.0.0.1' },
+    query: {},
     ...overrides,
   } as unknown as VercelRequest;
 }
 
 const AUTH_USER = { uid: 'uid-1', erpUserId: 'user-1', email: 'a@b.com', name: 'A', role: 'Employee', companyId: 'company-1', isSuperAdmin: false };
+const ADMIN_USER = { uid: 'uid-admin', erpUserId: 'admin-1', email: 'admin@b.com', name: 'Admin', role: 'Admin', companyId: 'company-1', isSuperAdmin: false };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -131,11 +150,9 @@ describe('GET /api/biometrics/status — HTTP layer', () => {
     expect(Object.keys(call.data)).toEqual(['status']);
   });
 
-  it('always reads the CALLER OWN erpUserId — never a client-suppliable target field (no such field exists on the request shape at all)', async () => {
+  it('a request body smuggling a target field is ignored — targeting is query-string only (?targetUserId=), never read from the body', async () => {
     mockGetReference.mockResolvedValue(null);
     const res = mockResponse();
-    // Even a request body that TRIES to smuggle a target field is ignored —
-    // this route reads no body at all.
     await statusHandler(mockRequest({ body: { targetUserId: 'someone-else' } } as any), res);
     expect(mockGetReference).toHaveBeenCalledWith('user-1');
     expect(mockGetReference).not.toHaveBeenCalledWith('someone-else');
@@ -148,5 +165,67 @@ describe('GET /api/biometrics/status — HTTP layer', () => {
     expect(res.status).toHaveBeenCalledWith(500);
     const call = (res.json as any).mock.calls[0][0];
     expect(JSON.stringify(call)).not.toContain('on fire');
+  });
+});
+
+describe('GET /api/biometrics/status?targetUserId= — Employee-View "Register Face" on-behalf-of status check', () => {
+  it('an explicit targetUserId equal to the caller\'s own id is still self — readUser (Firestore) is never touched', async () => {
+    mockGetReference.mockResolvedValue(null);
+    const res = mockResponse();
+    await statusHandler(mockRequest({ query: { targetUserId: 'user-1' } }), res);
+    expect(mockUserDocGet).not.toHaveBeenCalled();
+    expect(mockGetReference).toHaveBeenCalledWith('user-1');
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it('Admin checking another active, same-company employee\'s status succeeds and reads THAT employee\'s reference', async () => {
+    mockVerifyAuthToken.mockResolvedValue(ADMIN_USER);
+    mockUserDocGet.mockResolvedValue({ exists: true, data: () => ({ companyId: 'company-1', status: 'Active' }) });
+    mockGetReference.mockResolvedValue(null);
+    const res = mockResponse();
+    await statusHandler(mockRequest({ query: { targetUserId: 'employee-9' } }), res);
+    expect(mockUserDocGet).toHaveBeenCalled();
+    expect(mockGetReference).toHaveBeenCalledWith('employee-9');
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { status: 'none' } });
+  });
+
+  it('a plain Employee (not Admin/HR/SuperAdmin) checking someone else\'s status is rejected 403 NOT_AUTHORIZED, store never touched', async () => {
+    mockVerifyAuthToken.mockResolvedValue(AUTH_USER); // role: 'Employee'
+    const res = mockResponse();
+    await statusHandler(mockRequest({ query: { targetUserId: 'employee-9' } }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    const call = (res.json as any).mock.calls[0][0];
+    expect(call.error.code).toBe('NOT_AUTHORIZED');
+    expect(mockGetReference).not.toHaveBeenCalled();
+  });
+
+  it('Admin checking an employee in a DIFFERENT company is rejected 403 CROSS_TENANT_DENIED, store never touched', async () => {
+    mockVerifyAuthToken.mockResolvedValue(ADMIN_USER); // companyId: 'company-1'
+    mockUserDocGet.mockResolvedValue({ exists: true, data: () => ({ companyId: 'company-2', status: 'Active' }) });
+    const res = mockResponse();
+    await statusHandler(mockRequest({ query: { targetUserId: 'employee-9' } }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    const call = (res.json as any).mock.calls[0][0];
+    expect(call.error.code).toBe('CROSS_TENANT_DENIED');
+    expect(mockGetReference).not.toHaveBeenCalled();
+  });
+
+  it('Admin checking a target employee that does not exist is rejected, store never touched', async () => {
+    mockVerifyAuthToken.mockResolvedValue(ADMIN_USER);
+    mockUserDocGet.mockResolvedValue({ exists: false });
+    const res = mockResponse();
+    await statusHandler(mockRequest({ query: { targetUserId: 'ghost-employee' } }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(mockGetReference).not.toHaveBeenCalled();
+  });
+
+  it('the response shape for a target lookup is still exactly {status} — never leaks the target embedding either', async () => {
+    mockVerifyAuthToken.mockResolvedValue(ADMIN_USER);
+    mockUserDocGet.mockResolvedValue({ exists: true, data: () => ({ companyId: 'company-1', status: 'Active' }) });
+    mockGetReference.mockResolvedValue({ id: 'employee-9', userId: 'employee-9', companyId: 'company-1', status: 'active', embedding: [0.9, 0.1] });
+    const res = mockResponse();
+    await statusHandler(mockRequest({ query: { targetUserId: 'employee-9' } }), res);
+    const call = (res.json as any).mock.calls[0][0];
+    expect(Object.keys(call.data)).toEqual(['status']);
   });
 });

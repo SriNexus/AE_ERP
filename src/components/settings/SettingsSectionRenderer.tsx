@@ -25,6 +25,7 @@ import { EmailSection } from './sections/EmailSection';
 import { ThemeAppearanceSection } from './sections/ThemeAppearanceSection';
 import { AboutErpSection } from './sections/AboutErpSection';
 import { AttendanceSettingsSection } from './sections/AttendanceSettingsSection';
+import { RecycleBinSection } from './sections/RecycleBinSection';
 
 interface SettingsSectionRendererProps {
   sectionId: SettingsSectionId;
@@ -77,6 +78,8 @@ export function SettingsSectionRenderer({ sectionId }: SettingsSectionRendererPr
       return <UsersPermissionsSection />;
     case 'attendance':
       return <AttendanceSettingsSection />;
+    case 'recycle-bin':
+      return <RecycleBinSection />;
     // Placeholder sections
     default:
       return (

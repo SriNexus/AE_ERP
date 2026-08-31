@@ -51,9 +51,10 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Info } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Modal } from '../components/ui/Modal';
+import { CollapsedRow } from '../components/shared/WorkspaceSectionCards';
 import { EmptyState } from '../components/shared';
 import { usePermissions } from '../lib/permissions';
 import { useAppStore, useCurrentUser } from '../store/useAppStore';
@@ -147,6 +148,8 @@ function CustomerWorkspaceContent() {
   // Save/Save & Next at all — one flag, not two independently-toggled UIs
   // that happen to look related. ──
   const [isEditingCustomer, setIsEditingCustomer] = useState(false);
+  // Customer Information section — collapsed by default, opened on demand.
+  const [infoOpen, setInfoOpen] = useState(false);
 
   // ── Save — Tier A only (§2). Validates, checks conflict, persists via
   // saveCustomerWorkspace (reuses updateCustomerProjectionWithPhoneLock),
@@ -253,6 +256,7 @@ function CustomerWorkspaceContent() {
     loadedUpdatedAtRef.current = null;
     setPendingNav(null);
     setIsEditingCustomer(false);
+    setInfoOpen(false);
     // centerWorkflow/setPendingNav are recreated every render (not memoized
     // by their source hooks) — only `id` should actually retrigger this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -327,7 +331,11 @@ function CustomerWorkspaceContent() {
     // safety gutter. Height must be explicitly grown by 2x the cancelled
     // padding because negative margins alone don't expand `h-full`'s fixed
     // pixel height.
-    <div className="-m-5 p-2 flex h-full min-h-0 flex-col gap-2 overflow-hidden bg-[var(--color-bg)]" style={{ height: 'calc(100% + 2.5rem)' }}>
+    <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden bg-[var(--color-bg)] p-2 lg:-m-5 lg:h-[calc(100%_+_2.5rem)]">
+      {/* Full-screen operating screen on BOTH platforms — fixed header, one
+          scrolling middle, fixed footer. Desktop adds `-m-5` + the 3-column
+          body; mobile is one column inside the chrome-less MobileShell (see
+          MobileShell.isFullScreenRoute). Mirrors LeadWorkspace exactly. */}
       <CustomerWorkspaceHeader
         customer={customer}
         actions={[]}
@@ -350,31 +358,27 @@ function CustomerWorkspaceContent() {
           center weighting because each workspace's own source-of-truth side
           is genuinely different). Center is the flex-1 remainder — whatever
           is left over after both fixed sides, not a hardcoded share. ──── */}
-      <div className="flex min-h-0 flex-1 gap-2 overflow-hidden">
-        {/* Left Panel — permanent (Customer Information + Documents,
-            regardless of the active tab — mirrors Lead Workspace's own
-            permanent Left Panel). `key={customer.id}` forces a clean remount
-            on customer change so no local UI state (e.g. the Edit toggle)
-            leaks between customers.
-
-            Left/Center/Right/Header Surface Unification mission: every
-            major workspace surface now shares the same rounded-xl/border/
-            shadow-sm treatment (previously only single-side border-r/border-l
-            flush dividers, no radius, no shadow — the Center's own internal
-            cards were the only things that looked "real"). A small gap
-            between columns lets the page's own background show through as
-            the separator, instead of the surfaces reading as one flat strip. */}
-        <div className="w-[25%] shrink-0 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm p-4">
-          <CustomerWorkspaceLeftPanel
-            key={customer.id}
-            customer={customer}
-            draft={cwState.draft}
-            canEdit={canEditCustomer}
-            isEditing={isEditingCustomer}
-            onToggleEdit={() => setIsEditingCustomer((v) => !v)}
-            onFieldChange={(field, value) => cwDispatch({ type: 'SET_DRAFT_FIELD', payload: { field, value } })}
-            onCancelEdit={handleCancelEdit}
-          />
+      {/* Mobile: one column, one vertical scroll (this div). Desktop: the
+          25/flex/19 three-column layout, each column with its own contained
+          scroll. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1.5 lg:flex-row lg:gap-2 lg:overflow-hidden lg:pr-0">
+        {/* Left Panel — DESKTOP ONLY, unchanged: Customer Information always
+            visible in the 25% column. On mobile, Customer Information is a
+            collapsed-by-default section at the top of the centre flow
+            instead (see below) — desktop layout/format is untouched. */}
+        <div className="hidden w-full shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm lg:block lg:w-[25%] lg:overflow-hidden">
+          <div className="p-4 lg:h-full lg:overflow-y-auto">
+            <CustomerWorkspaceLeftPanel
+              key={customer.id}
+              customer={customer}
+              draft={cwState.draft}
+              canEdit={canEditCustomer}
+              isEditing={isEditingCustomer}
+              onToggleEdit={() => setIsEditingCustomer((v) => !v)}
+              onFieldChange={(field, value) => cwDispatch({ type: 'SET_DRAFT_FIELD', payload: { field, value } })}
+              onCancelEdit={handleCancelEdit}
+            />
+          </div>
         </div>
 
         {/* Center Panel — Premium UX Redesign mission: the old page-width tab
@@ -388,10 +392,40 @@ function CustomerWorkspaceContent() {
             "Invoices" tab (confirmed dead — WorkspaceTabs.tsx's content()
             has no case for it) and the fake denormalized-count/KPI tiles
             described in each section's own file comment. */}
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm">
-          <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="flex min-w-0 flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm lg:flex-1 lg:overflow-hidden">
+          {/* Literal `overflow-y-auto` so usePreserveScroll's `.overflow-y-auto`
+              lookup resolves here on desktop; on mobile this div is
+              content-height and never actually scrolls (the page body does). */}
+          <div className="overflow-y-auto lg:h-full lg:min-h-0 lg:flex-1">
             <Suspense fallback={<div className="flex justify-center py-16 text-sm text-[var(--color-text-muted)]">Loading...</div>}>
-              <div className="p-4 space-y-4">
+              <div className="p-3 space-y-3 sm:p-4 sm:space-y-4">
+                {/* Customer Information — MOBILE ONLY: collapsed by default,
+                    expands to the organized B2B/B2C read-only info view
+                    (CustomerContextPanel via CustomerWorkspaceLeftPanel). The
+                    Edit toggle inside opens the existing staged-draft editor
+                    — clicking the section is a view expansion, not an edit
+                    interaction. On desktop this is the always-visible left
+                    panel above; this row is hidden there. */}
+                <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 shadow-sm lg:hidden">
+                  <CollapsedRow
+                    label="Customer Information"
+                    icon={<Info className="h-3.5 w-3.5" />}
+                    open={infoOpen}
+                    onToggle={() => setInfoOpen((v) => !v)}
+                  >
+                    <CustomerWorkspaceLeftPanel
+                      embedded
+                      customer={customer}
+                      draft={cwState.draft}
+                      canEdit={canEditCustomer}
+                      isEditing={isEditingCustomer}
+                      onToggleEdit={() => { setInfoOpen(true); setIsEditingCustomer((v) => !v); }}
+                      onFieldChange={(field, value) => cwDispatch({ type: 'SET_DRAFT_FIELD', payload: { field, value } })}
+                      onCancelEdit={handleCancelEdit}
+                    />
+                  </CollapsedRow>
+                </div>
+
                 {/* B2C Center Panel Restructure mission: "Work on This
                     Customer" always renders, for both B2B and B2C. B2B's body
                     stays CustomerB2BWorkflowPipeline (Quotation → Order →
@@ -408,8 +442,8 @@ function CustomerWorkspaceContent() {
                     from the workflow body, a slightly larger radius, and a
                     two-layer shadow for a touch of real depth — restrained,
                     not decorative; no gradients, no glow. */}
-                  <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_2px_8px_rgba(0,0,0,0.04)]">
-                    <div className="flex items-center justify-between mb-3.5 pb-3 border-b border-[var(--color-border-subtle)]">
+                  <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_2px_8px_rgba(0,0,0,0.04)] sm:p-5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-3.5 pb-3 border-b border-[var(--color-border-subtle)]">
                       <h3 className="text-sm font-semibold text-[var(--color-text)]">Work on This Customer</h3>
                     </div>
                     {/* B2B's own body is CustomerB2BWorkflowPipeline (Quotation
@@ -460,7 +494,8 @@ function CustomerWorkspaceContent() {
             same centerWorkflow the Center Panel itself uses — no competing
             workflow system. `key={customer.id}` for the same per-customer
             local-state-isolation reason as the Left Panel above. */}
-        <div className="w-[19%] shrink-0 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm">
+        <div className="w-full shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm lg:w-[19%] lg:overflow-hidden">
+          <div className="lg:h-full lg:overflow-y-auto">
           <CustomerWorkspaceRightPanel
             key={customer.id}
             customer={customer}
@@ -469,6 +504,7 @@ function CustomerWorkspaceContent() {
             sourceLeadId={sourceLeadId}
             onViewSourceLead={sourceLeadId ? () => requestNavigation(`/leads/workspace/${encodeURIComponent(sourceLeadId)}`) : undefined}
           />
+          </div>
         </div>
       </div>
 

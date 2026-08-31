@@ -34,10 +34,7 @@ import { usePermissions } from '../../../lib/permissions';
 import { queryKeys } from '../../../lib/queryKeys';
 import { useAppStore, useCurrentUser } from '../../../store/useAppStore';
 import { NotificationType } from '../../../types';
-import { DocumentViewer, useDocumentViewer, formatFileSize } from '../../shared';
-import type { DocumentViewerFile } from '../../shared';
 import { cn } from '../../../utils/cn';
-import { MobileTimelinePreview } from '../shared/MobileTimelinePreview';
 
 const PER_PAGE = 10;
 const ALL = 'All';
@@ -231,8 +228,6 @@ export function MobileCustomerWorkspace({ mode }: { mode: Mode }) {
 
     const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(() => Math.max(1, Number(params.get('page')) || 1));
-  const [viewCustomer, setViewCustomer] = useState<Customer | null>(null);
-  const openId = params.get('open') || '';
   const [createOpen, setCreateOpen] = useState(false);
   const [createType, setCreateType] = useState<'B2B' | 'B2C' | null>(null);
   const [b2bForm, setB2bForm] = useState({ ...B2B_FORM0 });
@@ -293,10 +288,6 @@ export function MobileCustomerWorkspace({ mode }: { mode: Mode }) {
     if (page > maxPage) setPage(maxPage);
   }, [filteredCustomers.length, page]);
 
-  // Guards against race condition: when user closes the detail modal, this ref
-  // prevents the URL-sync useEffect from immediately reopening it.
-  const userClosedRef = useRef(false);
-
   useEffect(() => {
     setSelected((current) => {
       const available = new Set((customers as Customer[]).map((customer) => customer.id));
@@ -305,33 +296,10 @@ export function MobileCustomerWorkspace({ mode }: { mode: Mode }) {
     });
   }, [customers]);
 
-  // Sync viewCustomer with URL 'open' param
-  useEffect(() => {
-    if (userClosedRef.current) {
-      userClosedRef.current = false;
-      return;
-    }
-    if (!openId || isLoading) return;
-    const target = (customers as Customer[]).find((customer) => customer.id === openId);
-    if (target && !viewCustomer) {
-      setViewCustomer(target);
-    }
-  }, [openId, isLoading, customers, viewCustomer]);
-
+  // Opening a customer navigates to the shared Customer Details page
+  // (CustomerWorkspace) — the same implementation desktop uses, no popup.
   function openMobileDetail(customer: Customer) {
-    userClosedRef.current = false;
-    setViewCustomer(customer);
-    const next = new URLSearchParams(params);
-    next.set('open', customer.id);
-    setParams(next, { replace: true });
-  }
-
-  function closeMobileDetail() {
-    userClosedRef.current = true;
-    setViewCustomer(null);
-    const next = new URLSearchParams(params);
-    next.delete('open');
-    setParams(next, { replace: true });
+    navigate(`/customers/${encodeURIComponent(customer.id)}`);
   }
 
   function changePage(nextPage: number) {
@@ -505,7 +473,6 @@ export function MobileCustomerWorkspace({ mode }: { mode: Mode }) {
       toast.success('Customer deleted');
       setSelected(new Set());
       setDeleteOpen(false);
-      setViewCustomer(null);
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -611,7 +578,7 @@ export function MobileCustomerWorkspace({ mode }: { mode: Mode }) {
     toast.success(`Exported ${rows.length} customer${rows.length > 1 ? 's' : ''}`);
   }
 
-  const deleteIds = selected.size ? Array.from(selected) : viewCustomer ? [viewCustomer.id] : [];
+  const deleteIds = Array.from(selected);
 
   if (mode === 'create') {
     return (
@@ -691,21 +658,6 @@ export function MobileCustomerWorkspace({ mode }: { mode: Mode }) {
           <Pagination page={page} total={filteredCustomers.length} perPage={PER_PAGE} onChange={changePage} />
         </div>
       )}
-
-      <CustomerViewModal
-        customer={viewCustomer}
-        canEdit={canEdit}
-        canDelete={canDelete}
-        leads={leads as any[]}
-        orders={orders as any[]}
-        quotations={quotations as any[]}
-        invoices={invoices as any[]}
-        onClose={closeMobileDetail}
-        onEdit={(customer) => { closeMobileDetail(); openEdit(customer); }}
-        onFollowup={(customer) => { closeMobileDetail(); setFollowupCustomer(customer); }}
-        onTransfer={(customer) => { closeMobileDetail(); setTransferCustomer(customer); }}
-        onDelete={(customer) => { setSelected(new Set([customer.id])); closeMobileDetail(); setDeleteOpen(true); }}
-      />
 
       <CustomerDialogs
         createOpen={createOpen}
@@ -1051,241 +1003,5 @@ function AssigneeSelect({ value, users, onChange }: { value: string; users: any[
   );
 }
 
-function CustomerViewModal({ customer, canEdit, canDelete, leads, orders, quotations, invoices, onClose, onEdit, onFollowup, onTransfer, onDelete }: {
-  customer: Customer | null;
-  canEdit: boolean;
-  canDelete: boolean;
-  leads: any[];
-  orders: any[];
-  quotations: any[];
-  invoices: any[];
-  onClose: () => void;
-  onEdit: (customer: Customer) => void;
-  onFollowup: (customer: Customer) => void;
-  onTransfer: (customer: Customer) => void;
-  onDelete: (customer: Customer) => void;
-}) {
-  // Hooks — called BEFORE early return to preserve hook order
-  const { doc: custViewerDoc, open: custViewerOpen, viewDocument: custViewDocument, closeViewer: closeCustViewer } = useDocumentViewer();
-  const custDocuments = useMemo(() => {
-    if (!customer) return [];
-    const docs: { label: string; doc: DocumentViewerFile; metadata: { date?: string; size?: number } }[] = [];
-    if (customer?.billUploadName) {
-      docs.push({ label: 'Bill Upload', doc: { name: customer.billUploadName, url: customer.billUploadUrl || '', mimeType: customer.billUploadMimeType, size: customer.billUploadSize }, metadata: { date: customer.billUploadDate || customer.createdAt, size: customer.billUploadSize } });
-    }
-    if (customer?.electricityBillFileName) {
-      docs.push({ label: 'Electricity Bill', doc: { name: customer.electricityBillFileName, url: customer.electricityBillUrl || '', mimeType: customer.electricityBillMimeType, size: customer.electricityBillSize }, metadata: { date: customer.electricityBillDate || customer.createdAt, size: customer.electricityBillSize } });
-    }
-    if (customer?.aadhaarFileName) {
-      docs.push({ label: 'Aadhaar Card', doc: { name: customer.aadhaarFileName, url: customer.aadhaarUrl || '', mimeType: customer.aadhaarMimeType, size: customer.aadhaarSize }, metadata: { date: customer.aadhaarDate || customer.createdAt, size: customer.aadhaarSize } });
-    }
-    if (customer?.panFileName) {
-      docs.push({ label: 'PAN Card', doc: { name: customer.panFileName, url: customer.panUrl || '', mimeType: customer.panMimeType, size: customer.panSize }, metadata: { date: customer.panDate || customer.createdAt, size: customer.panSize } });
-    }
-    if (customer?.agreementFileName) {
-      docs.push({ label: 'Agreement', doc: { name: customer.agreementFileName, url: customer.agreementUrl || '', mimeType: customer.agreementMimeType, size: customer.agreementSize }, metadata: { date: customer.agreementDate || customer.createdAt, size: customer.agreementSize } });
-    }
-    if (customer?.gstFileName) {
-      docs.push({ label: 'GST Certificate', doc: { name: customer.gstFileName, url: customer.gstUrl || '', mimeType: customer.gstMimeType, size: customer.gstSize }, metadata: { date: customer.gstDate || customer.createdAt, size: customer.gstSize } });
-    }
-    if (customer?.attachmentName || customer?.fileName) {
-      docs.push({ label: 'Attachment', doc: { name: customer.attachmentName || customer.fileName, url: customer.attachmentUrl || customer.fileUrl || '', mimeType: customer.attachmentMimeType, size: customer.attachmentSize }, metadata: { date: customer.attachmentDate || customer.createdAt, size: customer.attachmentSize } });
-    }
-    return docs.filter((d) => d.doc?.name);
-  }, [customer]);
-
-  if (!customer) return null;
-
-  const phone = customerPhone(customer);
-  const email = customerEmail(customer);
-  const relatedLeads = leads.filter((lead) => lead.convertedCustomerId === customer.id || customer.sourceLeadId === lead.id);
-  const relatedOrders = orders.filter((order) => order.customerId === customer.id || order.customerName === customerName(customer));
-  const relatedQuotations = quotations.filter((quotation) => quotation.customerId === customer.id || quotation.customerName === customerName(customer));
-  const relatedInvoices = invoices.filter((invoice) => invoice.customerId === customer.id || invoice.customerName === customerName(customer));
-  const activity = customer.activityLog || [];
-  return (
-    <Modal open={!!customer} onClose={onClose} title={customerName(customer)} size="full">
-      <div className="space-y-4">
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            {statusBadge(customer.status || 'Active')}
-            {customer.type ? <Badge variant={customer.type === 'B2C' ? 'info' : 'purple'}>{customer.type}</Badge> : null}
-            {customer.sourceLeadId ? <Badge variant="gray">Lead</Badge> : <Badge variant="gray">Direct</Badge>}
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Detail label="Assigned To" value={customer.assignedToName || 'Unassigned'} />
-            <Detail label="Created" value={formatCustomerDate(customer.createdAt)} />
-          </div>
-        </section>
-
-        <Section title="Customer Information">
-          <Detail label="Customer Name" value={customerName(customer)} />
-          <Detail label="Customer Type" value={customer.type || 'Not available'} />
-          <Detail label="Status" value={customer.status || 'Active'} />
-        </Section>
-
-        <Section title="Company Information">
-          <Detail label="Company" value={customerCompany(customer) || 'Not available'} />
-          <Detail label="GST" value={customer.gst || 'Not available'} />
-          <Detail label="PAN" value={customer.pan || 'Not available'} />
-        </Section>
-
-        <Section title="Contact Details">
-          <Detail label="Mobile" value={phone || 'Not available'} />
-          <Detail label="Email" value={email || 'Not available'} />
-        </Section>
-
-        <Section title="Address">
-          <p className="text-sm text-[var(--color-text-secondary)]">{customerAddress(customer) || 'Not available'}</p>
-        </Section>
-
-        <Section title="Notes">
-          <p className="whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">{customer.last_note || customer.notes || 'No notes recorded.'}</p>
-        </Section>
-
-        <Section title="Timeline">
-          <MobileTimelinePreview title={`${customerName(customer)} Timeline`} entries={activity} />
-        </Section>
-
-        <Section title="Activities">
-          <Detail label="Calls" value={customer.callCount ? String(customer.callCount) : 'No calls logged'} />
-          <Detail label="Meetings" value={customer.meetingCount ? String(customer.meetingCount) : 'No meetings logged'} />
-          <Detail label="Emails / WhatsApp" value={customer.messageCount ? String(customer.messageCount) : 'No messages logged'} />
-        </Section>
-
-        <Section title="Activity Log">
-          {activity.length > 0 ? (
-            <div className="space-y-2">
-              {[...activity].reverse().slice(0, 10).map((log: any, idx: number) => (
-                <div key={log.id || idx} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{log.type || 'Activity'}</p>
-                  <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">{log.desc || 'No details'}</p>
-                  <p className="mt-0.5 text-[10px] text-[var(--color-text-disabled)]">
-                    {log.date ? fmtDate(log.date) : ''}{log.userName ? ` · by ${log.userName}` : ''}
-                  </p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-[var(--color-text-muted)]">No activity recorded.</p>
-          )}
-        </Section>
-
-        <Section title="Attachments">
-          {custDocuments.length > 0 ? (
-            <div className="space-y-2">
-              {custDocuments.map((item, idx) => (
-                <div key={idx} className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] px-3 py-2.5">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <File className="h-4 w-4 shrink-0 text-[var(--color-primary-text)]" />
-                      <p className="truncate text-sm font-semibold text-[var(--color-text)]">{item.label}</p>
-                    </div>
-                    <p className="mt-0.5 truncate text-xs text-[var(--color-text-muted)]">{item.doc.name}</p>
-                    <p className="mt-0.5 text-[10px] text-[var(--color-text-disabled)]">
-                      {item.metadata.date ? fmtDate(item.metadata.date) : ''}
-                      {item.metadata.size ? ` · ${formatFileSize(item.metadata.size)}` : ''}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2" data-action>
-                    {item.doc.url ? (
-                      <Button
-                        size="xs" variant="outline"
-                        icon={<FileText className="h-3 w-3" />}
-                        onClick={() => custViewDocument(item.doc)}
-                      >
-                        View
-                      </Button>
-                    ) : (
-                      <span className="text-xs text-[var(--color-text-muted)]">Reference only</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-[var(--color-text-muted)]">No attachments available.</p>
-          )}
-        </Section>
-
-        <RelatedSection title="Related Leads" rows={relatedLeads} empty="No related leads." labelFor={(row) => row.name || row.id} />
-        <RelatedSection title="Related Quotations" rows={relatedQuotations} empty="No related quotations." labelFor={(row) => row.quotationNumber || row.id} />
-        <RelatedSection title="Related Orders" rows={relatedOrders} empty="No related orders." labelFor={(row) => row.orderNumber || row.id} />
-        <RelatedSection title="Related Invoices" rows={relatedInvoices} empty="No related invoices." labelFor={(row) => row.invoiceNumber || row.id} />
-
-        <Section title="History">
-          {customer.transferHistory?.length ? (
-            <div className="space-y-2">
-              {customer.transferHistory.map((entry: any, index: number) => (
-                <div key={index} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{entry.fromUserName || 'Unknown'} to {entry.toUserName || 'Unknown'}</p>
-                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{entry.note || 'No note'} {entry.transferredAt ? `· ${fmtDate(entry.transferredAt)}` : ''}</p>
-                </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-[var(--color-text-muted)]">No transfer history recorded.</p>}
-        </Section>
-
-        <Section title="Audit Information">
-          <Detail label="Created By" value={customer.createdByName || customer.createdBy || 'System'} />
-          <Detail label="Updated" value={customer.updatedAt ? fmtDate(customer.updatedAt) : 'Not available'} />
-        </Section>
-
-        <div className="grid grid-cols-2 gap-2">
-          {phone ? <a className={linkButtonClass} href={`tel:${phone}`}><Phone className="h-4 w-4" />Call</a> : null}
-          {phone ? <a className={linkButtonClass} href={whatsappHref(phone)} target="_blank" rel="noreferrer"><MessageCircle className="h-4 w-4" />WhatsApp</a> : null}
-          {email ? <a className={linkButtonClass} href={`mailto:${email}`}><Mail className="h-4 w-4" />Email</a> : null}
-          {canEdit ? <Button variant="outline" icon={<Calendar className="h-4 w-4" />} onClick={() => onFollowup(customer)}>Follow-up</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<CornerUpRight className="h-4 w-4" />} onClick={() => onTransfer(customer)}>Assign</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Edit2 className="h-4 w-4" />} onClick={() => onEdit(customer)}>Edit</Button> : null}
-          {canDelete ? <Button variant="danger" icon={<Trash2 className="h-4 w-4" />} onClick={() => onDelete(customer)}>Delete</Button> : null}
-        </div>
-      </div>
-      <DocumentViewer
-        document={custViewerDoc}
-        open={custViewerOpen}
-        onClose={closeCustViewer}
-        fullScreen
-      />
-    </Modal>
-  );
-}
-
-function RelatedSection({ title, rows, empty, labelFor }: { title: string; rows: any[]; empty: string; labelFor: (row: any) => string }) {
-  return (
-    <Section title={title}>
-      {rows.length ? (
-        <div className="space-y-2">
-          {rows.slice(0, 5).map((row) => (
-            <div key={row.id} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-              <p className="text-sm font-semibold text-[var(--color-text)]">{labelFor(row)}</p>
-              <p className="mt-1 text-xs text-[var(--color-text-muted)]">{row.status || row.paymentStatus || formatCustomerDate(row.createdAt)}</p>
-            </div>
-          ))}
-        </div>
-      ) : <p className="text-sm text-[var(--color-text-muted)]">{empty}</p>}
-    </Section>
-  );
-}
-
-const linkButtonClass = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-medium text-[var(--color-text)]';
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-      <h3 className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)]">{title}</h3>
-      <div className="mt-3 space-y-3">{children}</div>
-    </section>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)]">{label}</p>
-      <p className="mt-1 break-words text-sm font-semibold text-[var(--color-text)]">{value}</p>
-    </div>
-  );
-}
 
 export default MobileCustomerWorkspace;

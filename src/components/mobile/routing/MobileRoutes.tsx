@@ -29,6 +29,9 @@ import { AppWorkspace } from '../app/AppWorkspace';
 import { MobileLeadWorkspace } from '../leads/MobileLeadWorkspace';
 import { MobileCustomerWorkspace } from '../customers/MobileCustomerWorkspace';
 import { MobileQuotationWorkspace } from '../quotations/MobileQuotationWorkspace';
+import QuotationsWorkspace from '../../../pages/QuotationsWorkspace';
+import OrdersWorkspace from '../../../pages/OrdersWorkspace';
+import InvoiceDetail from '../../../pages/InvoiceDetail';
 import { MobileOrderWorkspace } from '../orders/MobileOrderWorkspace';
 import { MobileInvoiceWorkspace } from '../invoices/MobileInvoiceWorkspace';
 import { MobileProductWorkspace } from '../products/MobileProductWorkspace';
@@ -88,6 +91,7 @@ import { MobileSalesDocuments } from '../sales-documents/MobileSalesDocuments';
 import { MobilePurchaseOrderWorkspace } from '../purchase-orders/MobilePurchaseOrderWorkspace';
 import { MobileGoodsReceiptWorkspace } from '../goods-receipts/MobileGoodsReceiptWorkspace';
 import { MobileLoanApplicationWorkspace } from '../loan-applications/MobileLoanApplicationWorkspace';
+import LoanApplicationWorkspace from '../../../pages/LoanApplicationWorkspace';
 import { MobileAuditWorkspace } from '../audit/MobileAuditWorkspace';
 
 /** Lazy-loaded pages shared with desktop */
@@ -97,6 +101,14 @@ const MobileInstallationsWorkspace = lazy(() => import('../installations/MobileI
 const NotificationsPage = lazy(() => import('../../../pages/Notifications'));
 const RolesPage = lazy(() => import('../../../pages/Roles'));
 const SettingsPage = lazy(() => import('../../../pages/Settings'));
+// Lead Details on mobile reuses the SAME desktop Lead Details page
+// (LeadWorkspace) — one implementation, responsive presentation. The old
+// MobileLeadWorkspace detail popup is no longer used for Lead Details.
+const LeadWorkspace = lazy(() => import('../../../pages/LeadWorkspace'));
+// Customer Details on mobile reuses the SAME desktop CustomerWorkspace page —
+// same source of truth, responsive full-screen presentation. The old
+// MobileCustomerWorkspace detail popup is no longer used for Customer Details.
+const CustomerWorkspace = lazy(() => import('../../../pages/CustomerWorkspace'));
 
 /*
  * Module path tracking for the App tab is handled by the
@@ -179,8 +191,13 @@ export function MobileRoutes() {
             match the equivalent desktop route in app/router/routes.tsx
             exactly, so enforcement is identical on both platforms. */}
         <Route path="leads"      element={<RoleRoute module="leads"><MobileLeadWorkspace mode="records" /></RoleRoute>} />
+        {/* Lead Details — same LeadWorkspace page as desktop, responsive layout. */}
+        <Route path="leads/workspace/:leadId" element={<RoleRoute module="leads"><MobileSuspense><LeadWorkspace /></MobileSuspense></RoleRoute>} />
         <Route path="customers"  element={<RoleRoute module="customers"><MobileCustomerWorkspace mode="records" /></RoleRoute>} />
+        {/* Customer Details — same CustomerWorkspace page as desktop, full-screen responsive layout. */}
+        <Route path="customers/:id" element={<RoleRoute module="customers"><MobileSuspense><CustomerWorkspace /></MobileSuspense></RoleRoute>} />
         <Route path="loan-applications" element={<RoleRoute module="loan_applications"><MobileLoanApplicationWorkspace mode="records" /></RoleRoute>} />
+        <Route path="loan-applications/:id" element={<RoleRoute module="loan_applications"><MobileSuspense><LoanApplicationWorkspace /></MobileSuspense></RoleRoute>} />
         <Route path="registrations" element={<Navigate to="/loan-applications" replace />} />
         <Route path="projects"   element={<RoleRoute module="projects"><MobileProjectList mode="records" /></RoleRoute>} />
         <Route path="projects/:id" element={<RoleRoute module="projects"><MobileProjectWorkspace /></RoleRoute>} />
@@ -190,8 +207,11 @@ export function MobileRoutes() {
         <Route path="purchase-orders" element={<RoleRoute module="purchase_orders"><MobilePurchaseOrderWorkspace /></RoleRoute>} />
         <Route path="goods-receipts" element={<RoleRoute module="purchase_orders"><MobileGoodsReceiptWorkspace /></RoleRoute>} />
         <Route path="quotations" element={<RoleRoute module="quotations"><MobileQuotationWorkspace mode="records" /></RoleRoute>} />
+        <Route path="quotations/:id" element={<RoleRoute module="quotations"><QuotationsWorkspace /></RoleRoute>} />
         <Route path="orders"     element={<RoleRoute module="orders"><MobileOrderWorkspace mode="records" /></RoleRoute>} />
+        <Route path="orders/:id" element={<RoleRoute module="orders"><OrdersWorkspace /></RoleRoute>} />
         <Route path="invoices"   element={<RoleRoute module="invoices"><MobileInvoiceWorkspace mode="records" /></RoleRoute>} />
+        <Route path="invoices/:id" element={<RoleRoute module="invoices"><InvoiceDetail /></RoleRoute>} />
         <Route path="sales-documents" element={<RoleRoute module="leads"><MobileSalesDocuments /></RoleRoute>} />
 
         {/* Inventory module placeholders */}

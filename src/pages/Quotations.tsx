@@ -46,7 +46,7 @@ import { useEngineeringDesigns } from '../features/engineering/hooks/useEngineer
 import { quotationItemsFromEngineering, synchronizeQuotationProjectLink, createQuotation, updateQuotation } from '../lib/quotationWorkflow';
 import { quotationDisplayNumber, sendQuotationEmail } from '../features/quotations/utils/quotationEmail';
 import { QuotationItemsEditor } from '../features/quotations/components/QuotationItemsEditor';
-import { QuotationDetailModal } from '../features/quotations/components/QuotationDetailModal';
+
 import { useSettingsSection } from '../features/settings/hooks/useSettingsSection';
 import { normalizeEmailSettings } from '../features/settings/emailRuntime';
 
@@ -149,7 +149,6 @@ export default function Quotations() {
   const projectScope = searchParams.get('projectId') || '';
   const designScope = searchParams.get('designId') || '';
   const createParam = searchParams.get('create') || '';
-  const openParam = searchParams.get('open') || '';
   const { company } = useAppStore();
   const activeCompanyId = useAppStore(s => s.activeCompanyId);
   const qkeys = queryKeys.forCompany(activeCompanyId);
@@ -171,12 +170,6 @@ export default function Quotations() {
   const [delId, setDelId] = useState<string | null>(null);
   const [showBulkStatus, setShowBulkStatus] = useState(false);
   const [bulkStatus, setBulkStatus] = useState('');
-  // Preview popup — mirrors InvoicesWorkspace.tsx's viewItem/openInvoice/
-  // closeInvoiceDetails pattern exactly. Row click / View now opens this
-  // popup instead of navigating away (see openQuotationDetails() below,
-  // which is kept as the explicit "Open Project Workspace" escape hatch).
-  const [viewItem, setViewItem] = useState<any>(null);
-  const userClosedRef = useRef(false);
   const emailSettingsQuery = useSettingsSection('email');
   const emailSettings = useMemo(() => normalizeEmailSettings(emailSettingsQuery.data as Record<string, unknown> | undefined), [emailSettingsQuery.data]);
 
@@ -193,8 +186,6 @@ export default function Quotations() {
     if (kpi) next.set('kpi', kpi); else next.delete('kpi');
     if (nextPage > 1) next.set('page', String(nextPage)); else next.delete('page');
     if (nextPerPage !== PER_PAGE) next.set('perPage', String(nextPerPage)); else next.delete('perPage');
-    // Note: 'open' param is NOT touched here — only openQuotationPreview()/
-    // closeQuotationDetails() manage it directly (mirrors InvoicesWorkspace.tsx).
     setSearchParams(next, { replace: true });
   }
   const { data: quotations = [], isLoading, refetch, loadMore, hasMore, loadingMore } = useQuotations();
@@ -512,42 +503,22 @@ export default function Quotations() {
       navigate(`/projects/${encodeURIComponent(q.projectId)}`);
     }
   }
-  /** Row click / View — matches Invoices.tsx's openInvoice()/closeInvoiceDetails()
-   * pattern exactly: opens the QuotationDetailModal preview popup instead of
-   * navigating away. No automatic navigation to Project Workspace happens
-   * here anymore — that is now an explicit action inside the popup. */
-  function openQuotationPreview(q: any) {
-    userClosedRef.current = false;
-    setViewItem(q);
+  /** Row click / View — navigates to the Quotation Workspace page.
+   * The retired popup is replaced by the full-page workspace at /quotations/:id. */
+  function openQuotationWorkspace(q: any) {
     if (!q?.id) return;
-    const next = new URLSearchParams(searchParams);
-    next.set('open', q.id);
-    setSearchParams(next, { replace: true });
+    navigate(`/quotations/${encodeURIComponent(q.id)}`);
   }
-  function closeQuotationDetails() {
-    userClosedRef.current = true;
-    const next = new URLSearchParams(searchParams);
-    next.delete('open');
-    setSearchParams(next, { replace: true });
-    setViewItem(null);
-  }
-  useEffect(() => {
-    if (userClosedRef.current) return;
-    if (!openParam || isLoading) return;
-    const target = (quotations as any[]).find((q: any) => q.id === openParam);
-    if (!target) return;
-    setViewItem(target);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openParam, isLoading, quotations]);
+
   function handleRowClick(e: React.MouseEvent<HTMLTableRowElement>, quotation: any) {
     if (isRowOpenIgnored(e.target)) return;
-    openQuotationPreview(quotation);
+    openQuotationWorkspace(quotation);
   }
   function handleRowKeyDown(e: React.KeyboardEvent<HTMLTableRowElement>, quotation: any) {
     if (isRowOpenIgnored(e.target)) return;
     if (e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
-    openQuotationPreview(quotation);
+    openQuotationWorkspace(quotation);
   }
   function exportSelected() {
     const rows = (quotations as any[]).filter((q) => selected.has(q.id));
@@ -602,7 +573,7 @@ export default function Quotations() {
       <WorkspaceHero
         title="Quotations"
         icon={<ClipboardList className="h-6 w-6" />}
-        breadcrumbs={['Home', 'Sales', 'Quotations']}
+
         statusText="Last sync · Realtime Connected"
         statusDotColor="var(--color-success)"
         className="gap-3"
@@ -813,7 +784,7 @@ export default function Quotations() {
                         <Td className="py-3"><span data-interactive onClick={(e) => e.stopPropagation()}>{statusBadge(q.status || 'Draft')}</span></Td>
 
                         {/* Actions */}
-                        <Td className="py-3" align="right"><QuotationActionStrip onView={() => openQuotationPreview(q)} /></Td>
+                        <Td className="py-3" align="right"><QuotationActionStrip onView={() => openQuotationWorkspace(q)} /></Td>
                       </Tr>
                     ))
                 }
@@ -955,22 +926,6 @@ export default function Quotations() {
           
         </form>
       </Modal>
-
-      <QuotationDetailModal
-        open={!!viewItem}
-        quotation={viewItem}
-        currencySymbol={company.currencySymbol}
-        orderNumberById={orderNumberById}
-        canDelete={canDo('delete', 'quotations')}
-        canConvert={canDo('create', 'orders') && !viewItem?.projectId}
-        onClose={closeQuotationDetails}
-        onEdit={() => { closeQuotationDetails(); openEdit(viewItem); }}
-        onSend={() => { if (viewItem) sendQuotationEmail(viewItem, customers, { company, emailSettings }); }}
-        onDownload={() => viewItem && doPrint(viewItem, company)}
-        onConvert={() => { if (viewItem?.id) navigate(`/orders?create=1&quotationId=${encodeURIComponent(viewItem.id)}`); }}
-        onOpenProject={viewItem?.projectId ? () => { closeQuotationDetails(); openQuotationDetails(viewItem); } : undefined}
-        onDelete={() => { if (viewItem?.id) { setDelId(viewItem.id); closeQuotationDetails(); } }}
-      />
 
       <Modal open={showBulkStatus} onClose={() => { setShowBulkStatus(false); setBulkStatus(''); }} title="Change Status" size="sm">
         <div className="space-y-4">

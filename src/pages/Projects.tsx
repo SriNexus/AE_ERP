@@ -28,6 +28,7 @@ import { createCustomerProjection } from '../features/customers/hooks/useCustome
 import type { ProjectRecord } from '../features/projects/types';
 import { PROJECT_FORM_DEFAULT, type ProjectFormValues } from '../features/projects/types';
 import { ProjectForm } from '../features/projects/components/ProjectForm';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import { ProjectDetailModal } from '../features/projects/components/ProjectDetailModal';
 import { useArchiveProject, useProjects, useSaveProject } from '../features/projects/hooks/useProjects';
 import {
@@ -113,6 +114,7 @@ export default function Projects() {
   const qc = useQueryClient();
   const user = useCurrentUser();
   const activeCompanyId = useAppStore((state) => state.activeCompanyId);
+  const resolveUserName = useUserNameResolver();
   const businessMode = resolveBusinessMode(useAppStore((state) => state.company));
   const [searchParams, setSearchParams] = useSearchParams();
   const openParam = searchParams.get('open') || '';
@@ -542,7 +544,6 @@ export default function Projects() {
       <WorkspaceHero
         className="gap-3"
         icon={<LayoutDashboard className="h-4 w-4" />}
-        breadcrumbs={['Home', 'Projects']}
         title="Projects"
         statusText="Projects Status"
         statusDotColor="bg-[var(--color-success)]"
@@ -581,32 +582,22 @@ export default function Projects() {
         {/* CARD HEADER — SEARCH + FILTERS */}
         <div className="flex flex-wrap items-center gap-2 px-6 py-3">
           <div data-tour="projects-filters" className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-            {/* Search */}
-            <div className="relative min-w-[160px] flex-1">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--color-text-muted)]" />
-              <input
-                data-tour="projects-search"
-                className="h-8 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] pl-8 pr-3 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
-                placeholder="Search projects..."
-                value={search}
-                onChange={(e) => { setSearch(e.target.value); setPage(1); syncQueueParams({ q: e.target.value, page: 1 }); }}
-              />
-            </div>
+            {/* Search — styled like the Customer page search */}
+            <input
+              data-tour="projects-search"
+              aria-label="Search projects"
+              placeholder="Search by project or customer name..."
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); syncQueueParams({ q: e.target.value, page: 1 }); }}
+              className="min-w-[160px] flex-1 h-9 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] outline-none transition-colors focus:ring-2 focus:ring-[var(--color-focus-ring)]"
+            />
 
             {/* Stage filter */}
             <UiSelect
               value={stageF}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => { const v = e.target.value; setStageF(v); setPage(1); syncQueueParams({ stage: v, page: 1 }); }}
               options={[...PROJECT_STAGE_OPTIONS]}
-              className="h-8 min-w-[120px]"
-            />
-
-            {/* Customer filter */}
-            <UiSelect
-              value={customerF}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => { const v = e.target.value; setCustomerF(v); setPage(1); syncQueueParams({ customer: v, page: 1 }); }}
-              options={customerFilterOptions}
-              className="h-8 min-w-[140px]"
+              className="h-9 min-w-[120px]"
             />
 
             {/* Owner filter */}
@@ -614,23 +605,7 @@ export default function Projects() {
               value={ownerF}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => { const v = e.target.value; setOwnerF(v); setPage(1); syncQueueParams({ owner: v, page: 1 }); }}
               options={[{ label: 'All Owners', value: '' }]}
-              className="h-8 min-w-[120px]"
-            />
-
-            {/* Manager filter */}
-            <UiSelect
-              value={managerF}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => { const v = e.target.value; setManagerF(v); setPage(1); syncQueueParams({ manager: v, page: 1 }); }}
-              options={[{ label: 'All Managers', value: '' }]}
-              className="h-8 min-w-[120px]"
-            />
-
-            {/* Created By filter */}
-            <UiSelect
-              value={createdByF}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => { const v = e.target.value; setCreatedByF(v); setPage(1); syncQueueParams({ createdBy: v, page: 1 }); }}
-              options={[{ label: 'All Created By', value: '' }]}
-              className="h-8 min-w-[120px]"
+              className="h-9 min-w-[120px]"
             />
 
             {/* Status filter */}
@@ -638,7 +613,7 @@ export default function Projects() {
               value={statusF}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => { const v = e.target.value; setStatusF(v); setPage(1); syncQueueParams({ status: v, page: 1 }); }}
               options={[{ label: 'All Status', value: '' }, { label: 'Active', value: 'Active' }, { label: 'Archived', value: 'Archived' }]}
-              className="h-8 min-w-[110px]"
+              className="h-9 min-w-[110px]"
             />
 
             {/* Date range filter */}
@@ -655,7 +630,7 @@ export default function Projects() {
                 }
               }}
               options={[...DATE_RANGE_OPTIONS]}
-              className="h-8 min-w-[120px]"
+              className="h-9 min-w-[120px]"
             />
 
             {/* Custom date inputs */}
@@ -819,8 +794,8 @@ export default function Projects() {
                         </Td>
                         <Td><Badge variant={projectStageBadgeVariant(project.currentStage)}>{projectStageLabel(project.currentStage)}</Badge></Td>
                         <Td className="text-sm font-semibold text-[var(--color-text)]">{projectCapacityLabel(project.capacityKw)}</Td>
-                        <Td className="max-w-[120px] truncate text-xs text-[var(--color-text-secondary)]">{project.salesOwner || '—'}</Td>
-                        <Td className="max-w-[120px] truncate text-xs text-[var(--color-text-secondary)]">{project.assignedSurveyor || '—'}</Td>
+                        <Td className="max-w-[120px] truncate text-xs text-[var(--color-text-secondary)]">{resolveUserName(project.salesOwner)}</Td>
+                        <Td className="max-w-[120px] truncate text-xs text-[var(--color-text-secondary)]">{resolveUserName(project.assignedSurveyor)}</Td>
                         <Td className="max-w-[140px] truncate text-xs text-[var(--color-text-secondary)]">{projectSiteAddressSummary(project.siteAddress)}</Td>
                         <Td className="text-xs font-semibold text-[var(--color-text)]">{paymentDisplay(project, project.customerId)}</Td>
                         <Td className="text-xs text-[var(--color-text-muted)]">{formatCreated(project.createdAt)}</Td>

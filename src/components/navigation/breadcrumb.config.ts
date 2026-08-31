@@ -20,7 +20,7 @@ export const BREADCRUMB_CONFIG: Record<string, BreadcrumbEntry> = {
   // ── Sales ─────────────────────────────────────────────────
   '/leads':        { label: 'Leads',      section: 'Sales' },
   '/customers':    { label: 'Customers',  section: 'Sales' },
-  '/projects':     { label: 'Projects',   section: 'Sales' },
+  '/projects':     { label: 'Projects' },
   '/quotations':   { label: 'Quotations', section: 'Sales' },
   '/orders':       { label: 'Orders',     section: 'Sales' },
   '/invoices':     { label: 'Invoices',   section: 'Sales' },

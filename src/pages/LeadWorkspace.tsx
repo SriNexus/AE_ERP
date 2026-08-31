@@ -27,9 +27,10 @@
  */
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, useMutation } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { useLeads } from '../features/leads/hooks/useLeads';
+import { useLeads, useLeadsUsers } from '../features/leads/hooks/useLeads';
+import { logActivity } from '../lib/workflow';
 import { queryKeys } from '../lib/queryKeys';
 import { useAppStore, useCurrentUser } from '../store/useAppStore';
 import { Modal } from '../components/ui/Modal';
@@ -165,6 +166,37 @@ function WorkspaceContent() {
   const loadedUpdatedAtRef = useRef<string | null>(null);
   const [conflictPending, setConflictPending] = useState(false);
   const lastLeadIdRef = useRef<string | null>(null);
+  // Mobile: the single scrolling middle. Used to bring the Lead Information
+  // form into view when the header Edit action opens it (it mounts at the
+  // top of this column, which may be scrolled past).
+  const bodyScrollRef = useRef<HTMLDivElement>(null);
+  // Quick Action "Convert" scrolls the Call Outcome card (which hosts the
+  // conversion form) into view.
+  const callOutcomeRef = useRef<HTMLDivElement>(null);
+  // Bumped by the "Follow-up" Quick Action — LeadWorkspaceSections watches it
+  // to open + scroll to the existing Follow-ups section.
+  const [followupFocusNonce, setFollowupFocusNonce] = useState(0);
+
+  useEffect(() => {
+    if (isEditing) bodyScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [isEditing]);
+
+  const scrollIntoViewSmooth = useCallback((el: HTMLElement | null) => {
+    if (!el) return;
+    // A rAF lets any just-dispatched state (e.g. the conversion form
+    // mounting) render before we measure/scroll.
+    requestAnimationFrame(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }, []);
+
+  // ── Transfer Lead — assignment change ONLY (never a status change). ──
+  const { data: workspaceUsers = [] } = useLeadsUsers();
+  const eligibleTransferUsers = useMemo(() =>
+    (workspaceUsers as any[])
+      .filter((u) => ['Sales', 'Executive', 'BDE', 'BDM', 'Manager', 'TL'].includes(u.role) && u.status !== 'Inactive' && !u.isDeleted)
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))),
+    [workspaceUsers]);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferUserId, setTransferUserId] = useState('');
 
   // ── (Documents handled by LeadWorkspaceDocumentsSection) ─
 
@@ -214,6 +246,39 @@ function WorkspaceContent() {
   const handleDocsSaved = useCallback(() => {
     qc.invalidateQueries({ queryKey: editKeys.leadsRoot });
   }, [qc, editKeys.leadsRoot]);
+
+  // Transfer = reassign ownership ONLY. It reuses the same
+  // LeadDomainService.update assignment write the inline editor and the Leads
+  // list bulk-assign use, plus the existing logActivity audit trail. It must
+  // never touch `status` (previously the Transfer Quick Action wrongly
+  // dispatched SET_CONNECTED_STATUS 'qualified').
+  const transferMutation = useMutation({
+    mutationFn: async (userId: string) => {
+      const target = eligibleTransferUsers.find((u) => u.id === userId);
+      if (!target) throw new Error('Select a sales person to transfer to');
+      if (!lead?.id) throw new Error('Lead not loaded');
+      await LeadDomainService.update(lead.id, {
+        assignedToId: target.id,
+        assignedToName: target.name,
+        updatedBy: user.id,
+      });
+      await logActivity('Leads', 'Lead Transferred', lead.id, {
+        entityName: lead.name || lead.phone || lead.id,
+        actionLabel: `Transferred to ${target.name}`,
+      });
+      return target.name as string;
+    },
+    onSuccess: (name) => {
+      qc.invalidateQueries({ queryKey: editKeys.leadsRoot });
+      // This write is our own — re-baseline the multi-user conflict check so
+      // the next workspace Save doesn't flag it as an external change.
+      loadedUpdatedAtRef.current = null;
+      toast.success(`Lead transferred to ${name}`);
+      setTransferOpen(false);
+      setTransferUserId('');
+    },
+    onError: (e: any) => toast.error(e?.message || 'Transfer failed'),
+  });
 
 
 
@@ -527,10 +592,42 @@ function WorkspaceContent() {
   }, [dirty]);
 
   // ── Merged timeline ─────────────────────────────────────
+  // Single source of truth for this lead's chronological activity, ordered
+  // latest → oldest. `activityLog` is already reversed (newest-first) and each
+  // entry carries a real ISO `date`; session `wsTimeline` entries are all from
+  // this session (so, newest) and carry no date. We sort on a numeric
+  // timestamp, with a stable secondary sort on entry id when timestamps tie —
+  // never relying on Firestore insertion order.
   const mergedTimeline = useMemo(() => {
-    const entries = [...wsTimeline, ...activityLog.map((l: any) => ({ id: l.id, time: '', type: l.type, desc: l.desc, userName: l.userName }))];
+    const persisted = activityLog
+      .filter((l: any) => l && (l.desc || l.type) && l.type !== 'Creation')
+      .map((l: any) => ({
+        id: l.id,
+        ts: l.date ? new Date(l.date).getTime() : 0,
+        time: '',
+        date: l.date,
+        type: l.type,
+        desc: l.desc,
+        userName: l.userName,
+      }));
+    const persistedIds = new Set(persisted.map((e) => e.id).filter(Boolean));
+    const session = wsTimeline
+      .filter((t: any) => t.type !== 'Creation' && !persistedIds.has(t.id))
+      .map((t: any, i: number) => ({
+        id: t.id,
+        // Session entries are the newest events; keep their relative order.
+        ts: Number.MAX_SAFE_INTEGER - (wsTimeline.length - i),
+        time: t.time,
+        date: undefined as string | undefined,
+        type: t.type,
+        desc: t.desc,
+        userName: user?.name,
+      }));
+    const entries = [...persisted, ...session].sort((a, b) =>
+      b.ts !== a.ts ? b.ts - a.ts : String(b.id || '').localeCompare(String(a.id || '')),
+    );
     return { entries, annotations: [] };
-  }, [wsTimeline, activityLog]);
+  }, [wsTimeline, activityLog, user?.name]);
 
   // ── Tab counts ──────────────────────────────────────────
   const followupCount = activityLog.filter((l: any) => l.type === 'Follow-up').length;
@@ -543,7 +640,7 @@ function WorkspaceContent() {
   if (queueIsEmpty && wsState.completedLeadIds.includes(leadId)) {
     const todayCalls = wsState.callsMade;
     return (
-      <div className="-m-5 flex h-full min-h-0 flex-col items-center justify-center bg-[var(--color-bg)] p-12" style={{ height: 'calc(100% + 2.5rem)' }}>
+      <div className="flex h-full min-h-[60vh] flex-col items-center justify-center bg-[var(--color-bg)] p-8 sm:p-12 lg:-m-5 lg:h-[calc(100%_+_2.5rem)] lg:min-h-0">
         <div className="mx-auto max-w-lg text-center">
           <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-50 to-emerald-100 dark:from-emerald-900/30 dark:to-emerald-900/10 shadow-lg shadow-emerald-500/10">
             <Trophy className="h-10 w-10 text-emerald-500" />
@@ -598,7 +695,7 @@ function WorkspaceContent() {
   // Loading state
   if (isLoading) {
     return (
-      <div className="-m-5 p-2 flex h-full min-h-0 animate-pulse flex-col gap-2 overflow-hidden bg-[var(--color-bg)]" style={{ height: 'calc(100% + 2.5rem)' }}>
+      <div className="flex h-full min-h-[60vh] animate-pulse flex-col gap-2 overflow-hidden bg-[var(--color-bg)] p-2 lg:-m-5 lg:h-[calc(100%_+_2.5rem)] lg:min-h-0">
         <div className="flex shrink-0 items-center gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm px-6 py-4">
           <div className="h-8 w-8 rounded-lg bg-[var(--color-bg-sunken)]" />
           <div className="h-10 w-10 rounded-full bg-[var(--color-bg-sunken)]" />
@@ -610,14 +707,14 @@ function WorkspaceContent() {
             {[...Array(4)].map((_, i) => <div key={i} className="h-8 w-20 rounded-lg bg-[var(--color-bg-sunken)]" />)}
           </div>
         </div>
-        <div className="flex min-h-0 flex-1 gap-2 overflow-hidden">
-          <div className="w-[25%] shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm p-5 space-y-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:min-h-0 lg:flex-1 lg:gap-2 lg:overflow-hidden">
+          <div className="w-full shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm p-5 space-y-3 lg:w-[25%]">
             {[...Array(6)].map((_, i) => <div key={i} className="h-10 rounded-lg bg-[var(--color-bg-sunken)]" />)}
           </div>
-          <div className="flex-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm p-6 space-y-4">
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm p-6 space-y-4 lg:flex-1">
             {[...Array(3)].map((_, i) => <div key={i} className="h-32 rounded-2xl bg-[var(--color-bg-sunken)]" />)}
           </div>
-          <div className="w-[19%] shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm p-3 space-y-3">
+          <div className="w-full shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm p-3 space-y-3 lg:w-[19%]">
             {[...Array(4)].map((_, i) => <div key={i} className="h-14 rounded-lg bg-[var(--color-bg-sunken)]" />)}
           </div>
         </div>
@@ -638,7 +735,7 @@ function WorkspaceContent() {
 
   if (!lead) {
     return (
-      <div className="-m-5 flex h-full min-h-0 items-center justify-center p-8" style={{ height: 'calc(100% + 2.5rem)' }}>
+      <div className="flex h-full min-h-[60vh] items-center justify-center p-8 lg:-m-5 lg:h-[calc(100%_+_2.5rem)] lg:min-h-0">
         <EmptyState title="Lead not found" description="The lead does not exist or is outside your visibility scope."
           action={<Link to="/leads"><Button variant="outline" icon={<ArrowLeft className="h-4 w-4" />}>Back to Leads</Button></Link>} />
       </div>
@@ -779,8 +876,20 @@ function WorkspaceContent() {
                 decouples the image's height from the Step-0 row's own
                 content height, which is what naturally makes THAT state
                 ~15-20% shorter, not any content being compressed or hidden. */}
-            <div data-tour="lead-ws-call-outcome" className="flex overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md">
-              <div className="min-w-0 flex-1 pl-6 pr-5 pt-5 pb-5">
+            <div ref={callOutcomeRef} data-tour="lead-ws-call-outcome" className="relative flex scroll-mt-3 overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md">
+              {/* Mobile: the Desktop Call Outcome illustration reused as a
+                  faint background visual (absolutely positioned — never
+                  changes the section's dimensions or pushes content). The
+                  Desktop side-rail below stays `sm:block`, so this is
+                  strictly the `< sm` counterpart of it. */}
+              <img
+                src={callOutcomeIllustration}
+                alt=""
+                aria-hidden="true"
+                draggable={false}
+                className="pointer-events-none absolute inset-y-0 right-0 h-full w-4/5 select-none object-contain object-right opacity-[0.08] sm:hidden dark:opacity-[0.14]"
+              />
+              <div className="relative z-10 min-w-0 flex-1 pl-6 pr-5 pt-5 pb-5">
                 <div className="flex items-center justify-between mb-4 pb-3 border-b border-[var(--color-border-subtle)]">
                   <div className="flex items-center gap-2.5">
                     <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary-light)]">
@@ -837,26 +946,39 @@ function WorkspaceContent() {
                 </div>
               )}
 
-              {/* ── Outcome selected: badge + change link ──────── */}
-              {callLogStarted && wsState.outcome && (
-                <div className="flex items-center gap-3 mb-5">
-                  <span className={[
-                    'inline-flex items-center gap-2 rounded-full px-4 py-2 text-[12px] font-semibold shadow-sm',
-                    wsState.outcome === 'connected'
-                      ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
-                      : 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 border border-amber-200 dark:border-amber-800',
-                  ].join(' ')}>
-                    <span className={['h-2 w-2 rounded-full', wsState.outcome === 'connected' ? 'bg-emerald-500' : 'bg-amber-500'].join(' ')} />
-                    {wsState.outcome === 'connected' ? 'Connected' : 'Not Connected'}
-                  </span>
-                  <button
-                    onClick={() => dispatch({ type: 'SET_OUTCOME', payload: null })}
-                    className="text-[11px] font-medium text-[var(--color-text-muted)] underline decoration-dashed underline-offset-2 hover:text-[var(--color-text-secondary)] transition-colors"
-                  >
-                    Change outcome
-                  </button>
-                </div>
-              )}
+              {/* ── Outcome selected: badge + change link ────────
+                  Once a sub-outcome (connected status / not-connected reason)
+                  is chosen the badge shows the COMPLETE result — e.g.
+                  "Connected — Interested", not just the parent category. */}
+              {callLogStarted && wsState.outcome && (() => {
+                const subLabel = wsState.outcome === 'connected'
+                  ? (wsState.connectedStatus ? CONNECTED_STATUS_LABELS[wsState.connectedStatus] || wsState.connectedStatus : '')
+                  : (wsState.notConnectedReason ? NOT_CONNECTED_REASON_LABELS[wsState.notConnectedReason] || wsState.notConnectedReason : '');
+                const hasSub = !!subLabel;
+                return (
+                  <div className="flex items-center gap-3 mb-5 flex-wrap">
+                    <span className={[
+                      'inline-flex items-center gap-2 rounded-full px-4 py-2 text-[12px] font-semibold shadow-sm',
+                      wsState.outcome === 'connected'
+                        ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
+                        : 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 border border-amber-200 dark:border-amber-800',
+                    ].join(' ')}>
+                      <span className={['h-2 w-2 rounded-full', wsState.outcome === 'connected' ? 'bg-emerald-500' : 'bg-amber-500'].join(' ')} />
+                      {wsState.outcome === 'connected' ? 'Connected' : 'Not Connected'}{hasSub ? ` — ${subLabel}` : ''}
+                    </span>
+                    <button
+                      onClick={() => dispatch(
+                        hasSub
+                          ? { type: wsState.outcome === 'connected' ? 'SET_CONNECTED_STATUS' : 'SET_NOT_CONNECTED_REASON', payload: null }
+                          : { type: 'SET_OUTCOME', payload: null },
+                      )}
+                      className="text-[11px] font-medium text-[var(--color-text-muted)] underline decoration-dashed underline-offset-2 hover:text-[var(--color-text-secondary)] transition-colors"
+                    >
+                      {hasSub ? 'Change' : 'Change outcome'}
+                    </button>
+                  </div>
+                );
+              })()}
 
               {/* ══════════════════════════════════════════════════
                   CONNECTED FLOW — inside the same card
@@ -879,6 +1001,23 @@ function WorkspaceContent() {
                       {label}
                     </button>
                   ))}
+                </div>
+              )}
+
+              {/* ── Connected status recorded — no further inline input.
+                  Confirms the full outcome and points the operator at the
+                  (now-active) Notes section below for optional context. ── */}
+              {callLogStarted && wsState.outcome === 'connected'
+                && ['interested', 'qualified', 'rejected', 'duplicate', 'wrong-number'].includes(wsState.connectedStatus || '') && (
+                <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg)] px-4 py-3">
+                  <p className="text-xs font-semibold text-[var(--color-text)]">
+                    Outcome recorded — Connected — {CONNECTED_STATUS_LABELS[wsState.connectedStatus || ''] || wsState.connectedStatus}
+                  </p>
+                  {['interested', 'qualified'].includes(wsState.connectedStatus || '') && (
+                    <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+                      Add an optional note in the Notes section below to capture what the customer said.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -987,6 +1126,13 @@ function WorkspaceContent() {
               mergedTimeline={mergedTimeline}
               activeCompanyId={activeCompanyId}
               onDocsSaved={handleDocsSaved}
+              followupFocusNonce={followupFocusNonce}
+              notesOutcomeContext={
+                callLogStarted && wsState.outcome === 'connected'
+                  && ['interested', 'need-followup', 'qualified', 'converted'].includes(wsState.connectedStatus || '')
+                  ? `Connected — ${CONNECTED_STATUS_LABELS[wsState.connectedStatus || ''] || wsState.connectedStatus}`
+                  : null
+              }
             />
           </div>
   );
@@ -999,33 +1145,47 @@ function WorkspaceContent() {
     // unlike width (auto-width self-compensates for negative margins),
     // `h-full` resolves to a fixed pixel height that negative margins alone
     // don't expand.
-    <div className="-m-5 p-2 flex h-full min-h-0 flex-col gap-2 overflow-hidden bg-[var(--color-bg)]" style={{ height: 'calc(100% + 2.5rem)' }}>
-      {/* ── HEADER — Left/Center/Right/Header Surface Unification mission:
-          every major workspace surface (Header/Left/Center/Right/Footer)
-          now shares the same rounded-xl/border/shadow-sm treatment, matching
-          CustomerWorkspace.tsx exactly, instead of flush single-side
-          border-b/border-r/border-l dividers with no radius/shadow — see
-          that file's own comment for the full rationale. ────────────── */}
-      <div data-tour="lead-ws-header" className="flex shrink-0 items-center gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm px-6 py-4">
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-hover)] text-lg font-bold text-white shadow-sm ring-2 ring-[var(--color-primary-muted)]">
-          {(lead.name || '?')[0].toUpperCase()}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2.5 flex-wrap">
-            <h1 className="truncate text-xl font-bold text-[var(--color-text)]">{lead.name || 'Unnamed'}</h1>
-            <span data-interactive data-tour="lead-ws-status" key={currentStatus}>{statusBadge(currentStatus)}</span>
+    <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden bg-[var(--color-bg)] p-2 lg:-m-5 lg:h-[calc(100%_+_2.5rem)]">
+      {/* Full-screen operating screen on BOTH platforms: fixed header, a
+          single scrolling middle, fixed footer. Desktop adds `-m-5` to cancel
+          the shell's 1.25rem padding and splits the middle into 3 columns;
+          mobile keeps one column and the mobile shell hides its own top/
+          bottom chrome for this route (see MobileShell.isFullScreenRoute). */}
+      {/* ── HEADER — base-less treatment matching Customer Workspace. */}
+      <div data-tour="lead-ws-header" className="flex shrink-0 flex-col px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3 sm:gap-y-2 sm:px-6 sm:py-4">
+        {/* Mobile back arrow — visible only below lg. */}
+        <button
+          type="button"
+          onClick={() => requestNavigation('/leads')}
+          className="flex items-center gap-1.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors lg:hidden"
+          title="Back to Leads"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          <span className="text-[11px] font-semibold">Back</span>
+        </button>
+
+        {/* Identity + Actions row — wraps together so actions stay top-right. */}
+        <div className="flex flex-1 items-center gap-3 sm:flex-wrap sm:gap-x-3 sm:gap-y-2">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-hover)] text-lg font-bold text-white shadow-sm ring-2 ring-[var(--color-primary-muted)] sm:h-12 sm:w-12">
+            {(lead.name || '?')[0].toUpperCase()}
           </div>
-          <div className="flex items-center gap-3 mt-1 flex-wrap">
-            {lead.phone && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><Phone className="h-3 w-3" />{lead.phone}</span>}
-            {lead.email && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1 hidden sm:flex"><Mail className="h-3 w-3" />{lead.email}</span>}
-            {lead.city && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><Building2 className="h-3 w-3" />{lead.city}</span>}
-            <span className="h-3 w-px bg-[var(--color-border-subtle)] hidden sm:block" />
-            {lead.source && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><Activity className="h-3 w-3" />{lead.source}</span>}
-            {lead.assignedToName && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><User className="h-3 w-3" />{lead.assignedToName}</span>}
-            {lead.createdByName && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1 hidden lg:flex"><User className="h-3 w-3" />Created: {lead.createdByName}</span>}
+          <div className="min-w-0">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <h1 className="min-w-0 break-words text-base font-bold text-[var(--color-text)] sm:truncate sm:text-xl">{lead.name || 'Unnamed'}</h1>
+              <span data-interactive data-tour="lead-ws-status" key={currentStatus}>{statusBadge(currentStatus)}</span>
+            </div>
+            <div className="flex items-center gap-x-3 gap-y-0.5 mt-1 flex-wrap">
+              {lead.phone && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><Phone className="h-3 w-3" />{lead.phone}</span>}
+              {lead.email && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1 hidden sm:flex"><Mail className="h-3 w-3" />{lead.email}</span>}
+              {lead.city && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><Building2 className="h-3 w-3" />{lead.city}</span>}
+              <span className="h-3 w-px bg-[var(--color-border-subtle)] hidden sm:block" />
+              {lead.source && <span className="text-[11px] text-[var(--color-text-muted)] hidden sm:flex items-center gap-1"><Activity className="h-3 w-3" />{lead.source}</span>}
+              {lead.assignedToName && <span className="text-[11px] text-[var(--color-text-muted)] hidden sm:flex items-center gap-1"><User className="h-3 w-3" />{lead.assignedToName}</span>}
+              {lead.createdByName && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1 hidden lg:flex"><User className="h-3 w-3" />Created: {lead.createdByName}</span>}
+            </div>
           </div>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex flex-wrap items-center justify-end gap-1.5 sm:shrink-0">
           <a href={`tel:${lead.phone}`}
             className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm">
             <Phone className="h-3.5 w-3.5" /> Call
@@ -1040,13 +1200,29 @@ function WorkspaceContent() {
               <Mail className="h-3.5 w-3.5" /> Email
             </a>
           )}
+          {/* "Leads" back button — desktop only. On mobile this is a
+              full-screen focused workspace (no global chrome); the OS/browser
+              back gesture returns to the list, and Previous/Next in the footer
+              moves through the queue. */}
           <button
             onClick={() => requestNavigation('/leads')}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 sm:px-3 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm"
+            className="hidden lg:inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 sm:px-3 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm"
             title="Back to Leads"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Leads</span>
+            <span>Leads</span>
+          </button>
+          {/* Mobile only: Edit Lead Information — opens the Lead Information
+              section in edit mode in the content area below (desktop edits it
+              from the always-visible left panel's own Edit control). */}
+          <button
+            type="button"
+            onClick={startEditing}
+            aria-label="Edit lead information"
+            title="Edit lead information"
+            className="lg:hidden inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm"
+          >
+            <Edit2 className="h-3.5 w-3.5" /> Edit
           </button>
         </div>
       </div>
@@ -1056,14 +1232,35 @@ function WorkspaceContent() {
           Customer Workspace's own right panel width, its source of truth,
           instead of the previously narrower 15%. Center absorbs the
           difference automatically since it has no fixed width of its own. */}
-      <div className="flex min-h-0 flex-1 gap-2 overflow-hidden">
-        <div className="w-[25%] shrink-0 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm p-5">
-          {leftContent}
+      {/* THE scrollable middle. Mobile: one vertical scroll for the whole
+          column — Header stays fixed above, Footer fixed below. Order when
+          not editing: Call Outcome → Notes → Follow-ups → Documents →
+          Timeline → Metrics/Quick Actions. Lead Information is hidden until
+          the header Edit action opens it (temporarily, above Call Outcome).
+          Desktop (lg+): the 25/flex/19 three-column layout, each column with
+          its own contained scroll. */}
+      <div ref={bodyScrollRef} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1.5 lg:flex-row lg:gap-2 lg:overflow-hidden lg:pr-0">
+        {/* Each desktop panel: rounded/border/shadow shell with
+            `lg:overflow-hidden`, and an inner `lg:overflow-y-auto` scroll
+            layer — the shell clips the scrollbar to the rounded rectangle so
+            the thumb stays visually contained inside the card. On mobile the
+            panels are plain full-width cards with natural height. */}
+        <div className={`w-full shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm lg:block lg:w-[25%] lg:overflow-hidden ${isEditing ? '' : 'hidden'}`}>
+          <div className="p-4 lg:h-full lg:overflow-y-auto lg:p-5">
+            {leftContent}
+          </div>
         </div>
-        <main className="min-w-0 flex-1 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm p-4">
-          {centerContent}
+        <main className="min-w-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm lg:flex-1 lg:overflow-hidden">
+          {/* Literal `overflow-y-auto` (not `lg:`) so usePreserveScroll's
+              `.overflow-y-auto` lookup resolves to this element on desktop.
+              On mobile the div is content-height, so it never actually
+              scrolls — the single page scroll is the parent body. */}
+          <div className="overflow-y-auto p-3 sm:p-4 lg:h-full">
+            {centerContent}
+          </div>
         </main>
-        <div className="w-[19%] shrink-0 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm">
+        <div className="w-full shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm lg:w-[19%] lg:overflow-hidden">
+          <div className="lg:h-full lg:overflow-y-auto">
           {/* ── Lead Status — removed (queue info lives in footer) ── */}
           {/* ── Lead Health ──────────────────────────────────── */}
           <LeadHealthCard
@@ -1102,46 +1299,42 @@ function WorkspaceContent() {
               </div>
             </div>
           )}
-          {/* ── Quick Actions ── Center workspace launchers — Customer +
-              Lead Workspace UX Parity mission: compact icon-over-label
-              tiles (same Call/WhatsApp/Email chip language as the header),
-              2-column grid, sized for the 15% Right Panel. ── */}
+          {/* ── Quick Actions ── Center workspace launchers. Mobile: four
+              buttons in one evenly-distributed row. Desktop: the existing
+              2 × 2 grid in the right rail. ── */}
           <div className="border-b border-[var(--color-border-subtle)] px-4 py-4">
             <h3 className="mb-3 text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Quick Actions</h3>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-4 gap-1.5 sm:gap-2 lg:grid-cols-2">
+              {/* Convert — scrolls to the Call Outcome card (hosts the
+                  conversion form) and opens it in the Converted state. */}
               <button
                 disabled={lead.status === 'Converted'}
                 onClick={() => {
                   setCallLogStarted(true);
                   dispatch({ type: 'SET_OUTCOME', payload: 'connected' });
                   dispatch({ type: 'SET_CONNECTED_STATUS', payload: 'converted' });
+                  scrollIntoViewSmooth(callOutcomeRef.current);
                 }}
-                className="flex flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-primary-muted)] bg-[var(--color-primary-light)]/50 px-1.5 py-2.5 text-center shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)] transition-all hover:-translate-y-0.5 hover:bg-[var(--color-primary-light)] hover:shadow-[0_6px_14px_rgba(0,0,0,0.08),0_2px_4px_rgba(0,0,0,0.05)] active:translate-y-0 active:scale-[0.98] active:shadow-[0_1px_1px_rgba(0,0,0,0.04)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)]"
+                className="flex min-w-0 flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-primary-muted)] bg-[var(--color-primary-light)]/50 px-1 py-2.5 text-center shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)] transition-all hover:-translate-y-0.5 hover:bg-[var(--color-primary-light)] hover:shadow-[0_6px_14px_rgba(0,0,0,0.08),0_2px_4px_rgba(0,0,0,0.05)] active:translate-y-0 active:scale-[0.98] active:shadow-[0_1px_1px_rgba(0,0,0,0.04)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)]"
               >
-                <UserCheck className="h-4 w-4 text-[var(--color-primary-text)]" />
+                <UserCheck className="h-4 w-4 shrink-0 text-[var(--color-primary-text)]" />
                 <span className="text-[10px] font-semibold leading-tight text-[var(--color-primary-text)]">Convert</span>
               </button>
+              {/* Transfer — reassignment ONLY. Opens the Transfer dialog; it
+                  never changes the Lead status. */}
               <button
-                onClick={() => {
-                  setCallLogStarted(true);
-                  dispatch({ type: 'SET_OUTCOME', payload: 'connected' });
-                  dispatch({ type: 'SET_CONNECTED_STATUS', payload: 'qualified' });
-                  dispatch({ type: 'SET_NOTES', payload: `Transfer: reassign to new salesperson` });
-                }}
-                className="flex flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-2.5 text-center shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)] transition-all hover:-translate-y-0.5 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-hover)] hover:shadow-[0_6px_14px_rgba(0,0,0,0.08),0_2px_4px_rgba(0,0,0,0.05)] active:translate-y-0 active:scale-[0.98] active:shadow-[0_1px_1px_rgba(0,0,0,0.04)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1"
+                onClick={() => { setTransferUserId(''); setTransferOpen(true); }}
+                className="flex min-w-0 flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-2.5 text-center shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)] transition-all hover:-translate-y-0.5 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-hover)] hover:shadow-[0_6px_14px_rgba(0,0,0,0.08),0_2px_4px_rgba(0,0,0,0.05)] active:translate-y-0 active:scale-[0.98] active:shadow-[0_1px_1px_rgba(0,0,0,0.04)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1"
               >
-                <CornerUpRight className="h-4 w-4 text-[var(--color-text-secondary)]" />
+                <CornerUpRight className="h-4 w-4 shrink-0 text-[var(--color-text-secondary)]" />
                 <span className="text-[10px] font-semibold leading-tight text-[var(--color-text-secondary)]">Transfer</span>
               </button>
+              {/* Follow-up — scrolls to the existing Follow-ups section. */}
               <button
-                onClick={() => {
-                  setCallLogStarted(true);
-                  dispatch({ type: 'SET_OUTCOME', payload: 'connected' });
-                  dispatch({ type: 'SET_CONNECTED_STATUS', payload: 'need-followup' });
-                }}
-                className="flex flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-2.5 text-center shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)] transition-all hover:-translate-y-0.5 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-hover)] hover:shadow-[0_6px_14px_rgba(0,0,0,0.08),0_2px_4px_rgba(0,0,0,0.05)] active:translate-y-0 active:scale-[0.98] active:shadow-[0_1px_1px_rgba(0,0,0,0.04)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1"
+                onClick={() => setFollowupFocusNonce((n) => n + 1)}
+                className="flex min-w-0 flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-2.5 text-center shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)] transition-all hover:-translate-y-0.5 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-hover)] hover:shadow-[0_6px_14px_rgba(0,0,0,0.08),0_2px_4px_rgba(0,0,0,0.05)] active:translate-y-0 active:scale-[0.98] active:shadow-[0_1px_1px_rgba(0,0,0,0.04)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1"
               >
-                <Calendar className="h-4 w-4 text-[var(--color-text-secondary)]" />
+                <Calendar className="h-4 w-4 shrink-0 text-[var(--color-text-secondary)]" />
                 <span className="text-[10px] font-semibold leading-tight text-[var(--color-text-secondary)]">Follow-up</span>
               </button>
               <button
@@ -1150,16 +1343,19 @@ function WorkspaceContent() {
                   setCallLogStarted(true);
                   dispatch({ type: 'SET_OUTCOME', payload: 'not-connected' });
                   dispatch({ type: 'SET_NOT_CONNECTED_REASON', payload: 'invalid-number' });
+                  scrollIntoViewSmooth(callOutcomeRef.current);
                 }}
-                className="flex flex-col items-center justify-center gap-1 rounded-lg border border-red-200 bg-[var(--color-surface)] px-1.5 py-2.5 text-center shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)] transition-all hover:-translate-y-0.5 hover:bg-red-50 hover:shadow-[0_6px_14px_rgba(0,0,0,0.08),0_2px_4px_rgba(0,0,0,0.05)] active:translate-y-0 active:scale-[0.98] active:shadow-[0_1px_1px_rgba(0,0,0,0.04)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1 dark:border-red-800 dark:hover:bg-red-900/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)]"
+                className="flex min-w-0 flex-col items-center justify-center gap-1 rounded-lg border border-red-200 bg-[var(--color-surface)] px-1 py-2.5 text-center shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)] transition-all hover:-translate-y-0.5 hover:bg-red-50 hover:shadow-[0_6px_14px_rgba(0,0,0,0.08),0_2px_4px_rgba(0,0,0,0.05)] active:translate-y-0 active:scale-[0.98] active:shadow-[0_1px_1px_rgba(0,0,0,0.04)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] focus-visible:ring-offset-1 dark:border-red-800 dark:hover:bg-red-900/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-[0_1px_2px_rgba(0,0,0,0.045),0_1px_1px_rgba(0,0,0,0.03)]"
               >
-                <Trash2 className="h-4 w-4 text-red-600 dark:text-red-400" />
+                <Trash2 className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
                 <span className="text-[10px] font-semibold leading-tight text-red-600 dark:text-red-400">Mark Lost</span>
               </button>
             </div>
           </div>
-          {/* ── Recent Activity ──────────────────────────────── */}
-          <div className="px-4 py-4">
+          {/* ── Recent Activity — desktop-only. On mobile the Timeline
+              section in the centre column is the single activity history,
+              so this compact side preview is hidden to avoid duplication. ── */}
+          <div className="hidden px-4 py-4 lg:block">
             <h3 className="mb-3 text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Recent Activity</h3>
             {wsTimeline.length > 0 ? (
               <div className="space-y-2">
@@ -1184,54 +1380,110 @@ function WorkspaceContent() {
             )}
 
           </div>
+          </div>
         </div>
       </div>
 
-      {/* ── FOOTER ── Production ERP Operator Toolbar ────── */}
-      <div className="flex shrink-0 items-center justify-between rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm px-4 py-0.5">
-        {/* LEFT: Previous / Next always visible */}
-        <div className="flex items-center gap-2">
+      {/* ── FOOTER ── Production ERP Operator Toolbar ──────
+          Fixed at the bottom of the viewport on both platforms (last
+          `shrink-0` row of the full-height flex column). Navigation row:
+          Previous far-left, position/progress centered, Next far-right.
+          Save / Save & Next sit BELOW that row on mobile (and to the right
+          on desktop), only while there are unsaved changes. */}
+      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm px-3 py-2 sm:px-4 lg:flex-row lg:flex-wrap lg:items-center lg:gap-3 lg:py-0.5">
+        {/* Navigation row — Previous | position/progress | Next */}
+        <div className="flex w-full items-center justify-between gap-2 sm:gap-3 lg:flex-1">
           <FooterActionButton icon={<ChevronLeft className="h-4 w-4" />}
             disabled={!prevLead}
             onClick={() => { if (prevLead) requestNavigation(`/leads/workspace/${encodeURIComponent(prevLead.id)}`); }}
             title="Alt+P">Previous</FooterActionButton>
+
+          <div className="flex min-w-0 flex-1 items-center justify-center gap-2 sm:gap-3 text-[10px] font-mono text-[var(--color-text-muted)]">
+            <div className="hidden h-1 w-14 shrink-0 overflow-hidden rounded-full bg-[var(--color-bg-sunken)] min-[420px]:block sm:w-16">
+              <div className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-emerald-500 transition-all duration-700 ease-out"
+                style={{ width: totalLeads > 0 ? `${Math.round((wsState.completedLeadIds.length / totalLeads) * 100)}%` : '0%' }} />
+            </div>
+            <span className="shrink-0 font-semibold">{wsState.completedToday}/{totalLeads}</span>
+            <span className="hidden shrink-0 sm:inline">Lead <span className="font-semibold text-[var(--color-text)]">{currentIndex + 1}</span> of {totalLeads}</span>
+          </div>
+
           <FooterActionButton icon={<ChevronRight className="h-4 w-4" />}
             disabled={!nextLead}
             onClick={() => { if (nextLead) requestNavigation(`/leads/workspace/${encodeURIComponent(nextLead.id)}`); }}
             title="Alt+N">Next</FooterActionButton>
         </div>
 
-        {/* CENTER: Queue Progress — compact */}
-        <div className="flex items-center gap-3 text-[10px] font-mono text-[var(--color-text-muted)]">
-          <div className="flex items-center gap-2">
-            <div className="w-16 h-1 rounded-full bg-[var(--color-bg-sunken)] overflow-hidden">
-              <div className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-emerald-500 transition-all duration-700 ease-out"
-                style={{ width: totalLeads > 0 ? `${Math.round((wsState.completedLeadIds.length / totalLeads) * 100)}%` : '0%' }} />
-            </div>
-            <span className="font-semibold">{wsState.completedToday}/{totalLeads}</span>
+        {/* Save / Save & Next — below the nav row on mobile, right side on
+            desktop; only while there are unsaved changes. */}
+        {wsState.hasUnsaved ? (
+          <div className="flex w-full items-center justify-center gap-2 border-t border-[var(--color-border-subtle)] pt-2 lg:w-auto lg:justify-end lg:border-t-0 lg:pt-0">
+            <FooterActionButton tone="primary" icon={<Save className="h-4 w-4" />} title="Alt+S" dataTour="lead-ws-save"
+              loading={saving}
+              disabled={saving}
+              onClick={() => void handleSave()}>Save</FooterActionButton>
+            <FooterActionButton tone="primary" icon={<ChevronRight className="h-4 w-4" />}
+              loading={saving}
+              disabled={!nextLead || currentLeadCompleted || saving}
+              onClick={() => void handleSaveAndNext()}
+              title="Alt+N">Save &amp; Next</FooterActionButton>
           </div>
-          <span className="hidden sm:inline">Lead <span className="font-semibold text-[var(--color-text)]">{currentIndex + 1}</span> of {totalLeads}</span>
-        </div>
+        ) : (
+          <span className="hidden text-[10px] text-[var(--color-text-muted)] opacity-60 lg:inline">Alt+S · Alt+N</span>
+        )}
+      </div>
 
-        {/* RIGHT: Save / Save & Next — only when unsaved */}
-        <div className="flex items-center gap-2">
-          {wsState.hasUnsaved ? (
-            <>
-              <FooterActionButton tone="primary" icon={<Save className="h-4 w-4" />} title="Alt+S" dataTour="lead-ws-save"
-                loading={saving}
-                disabled={saving}
-                onClick={() => void handleSave()}>Save</FooterActionButton>
-              <FooterActionButton tone="primary" icon={<ChevronRight className="h-4 w-4" />}
-                loading={saving}
-                disabled={!nextLead || currentLeadCompleted || saving}
-                onClick={() => void handleSaveAndNext()}
-                title="Alt+N">Save &amp; Next</FooterActionButton>
-            </>
+      {/* ── Transfer Lead — reassignment only (never a status change) ── */}
+      <Modal open={transferOpen} onClose={() => setTransferOpen(false)} title="Transfer Lead" size="sm">
+        <p className="text-sm text-[var(--color-text-secondary)]">
+          Select a sales person to transfer this lead to.
+        </p>
+        <div className="mt-4 max-h-[45vh] space-y-1.5 overflow-y-auto">
+          {eligibleTransferUsers.length === 0 ? (
+            <p className="py-6 text-center text-sm text-[var(--color-text-muted)]">
+              No eligible sales people are available.
+            </p>
           ) : (
-            <span className="text-[10px] text-[var(--color-text-muted)] opacity-60">Alt+S · Alt+N</span>
+            eligibleTransferUsers.map((u) => (
+              <label
+                key={u.id}
+                className={[
+                  'flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 text-sm transition-colors',
+                  transferUserId === u.id
+                    ? 'border-[var(--color-primary)] bg-[var(--color-primary-light)]'
+                    : 'border-[var(--color-border-subtle)] hover:bg-[var(--color-surface-hover)]',
+                ].join(' ')}
+              >
+                <input
+                  type="radio"
+                  name="transfer-user"
+                  value={u.id}
+                  checked={transferUserId === u.id}
+                  onChange={() => setTransferUserId(u.id)}
+                  className="h-4 w-4 shrink-0 accent-[var(--color-primary)]"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium text-[var(--color-text)]">{u.name}</span>
+                  {u.role && <span className="block text-[11px] text-[var(--color-text-muted)]">{u.role}</span>}
+                </span>
+                {lead.assignedToId === u.id && (
+                  <span className="shrink-0 rounded-full bg-[var(--color-bg-elevated)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-muted)]">Current</span>
+                )}
+              </label>
+            ))
           )}
         </div>
-      </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={() => setTransferOpen(false)}>Cancel</Button>
+          <Button
+            size="sm"
+            loading={transferMutation.isPending}
+            disabled={!transferUserId || transferUserId === lead.assignedToId || transferMutation.isPending}
+            onClick={() => transferMutation.mutate(transferUserId)}
+          >
+            Transfer
+          </Button>
+        </div>
+      </Modal>
 
       {/* ── Unsaved Changes guard modal ─────────────────── */}
       <Modal open={!!pendingNav} onClose={handleGuardCancel} title="Unsaved Changes" size="sm">

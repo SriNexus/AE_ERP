@@ -33,6 +33,7 @@ import { getOne, getAll, fmtDate, fmtCurrency } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';
 import { usePermissions } from '../lib/permissions';
 import { useAppStore } from '../store/useAppStore';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import { queryKeys } from '../lib/queryKeys';
 import { cn } from '../utils/cn';
 import { PageHeader } from '../components/ui/Card';
@@ -149,6 +150,7 @@ export default function PaymentsWorkspace() {
   const navigate = useNavigate();
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const qkeys = queryKeys.forCompany(activeCompanyId);
+  const resolveUserName = useUserNameResolver();
 
   // ── Data queries ─────────────────────────────────────────
   const paymentQuery = useQuery({
@@ -380,9 +382,9 @@ export default function PaymentsWorkspace() {
             <span className="text-[var(--color-text)]">{receiptStatus}</span>
           ) : <span className="text-[var(--color-text-disabled)]">—</span>}
         </OverviewField>
-        <OverviewField label="Created By" value={String(payment?.createdBy || '—')} icon={User} />
+        <OverviewField label="Created By" value={resolveUserName(payment?.createdBy)} icon={User} />
         <OverviewField label="Approved By" icon={User}>
-          {payment?.approvedBy ? String(payment.approvedBy) : '—'}
+          {payment?.approvedBy ? resolveUserName(payment.approvedBy) : '—'}
         </OverviewField>
       </div>
 

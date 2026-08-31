@@ -16,6 +16,7 @@ import { DocumentViewer, useDocumentViewer, formatFileSize } from '../shared/Doc
 import type { DocumentViewerFile } from '../shared/DocumentViewer';
 import type { ChannelPartner } from '../../features/channel-partner/types';
 import { useAppStore } from '../../store/useAppStore';
+import { useUserNameResolver } from '../../hooks/useUserNameResolver';
 
 // ── Status styling map (matching Leads.tsx pattern) ────────
 
@@ -106,6 +107,7 @@ export function PartnerDetailDrawer({
   partner, open, onClose, onEdit, onApprove, onSuspend, onReactivate,
 }: PartnerDetailDrawerProps) {
   const [activeTab, setActiveTab] = useState<string>('overview');
+  const resolveUserName = useUserNameResolver();
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const { doc: viewerDoc, open: viewerOpen, viewDocument, closeViewer } = useDocumentViewer();
 
@@ -349,7 +351,7 @@ export function PartnerDetailDrawer({
                   <div className="space-y-1">
                     <p className="font-semibold text-[var(--color-text)]">{formatDate(partner.createdAt)}</p>
                     {partner.createdBy && (
-                      <p className="text-xs text-[var(--color-text-muted)]">by {partner.createdBy}</p>
+                      <p className="text-xs text-[var(--color-text-muted)]">by {resolveUserName(partner.createdBy)}</p>
                     )}
                   </div>
                 </DetailCard>

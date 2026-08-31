@@ -16,6 +16,7 @@ interface Props {
   customerName?: string;
   projectType?: string;
   users: any[];
+  customer?: Record<string, unknown> | null;
   canEdit: boolean;
   isEditing: boolean;
   editForm: ProjectFormValues;
@@ -28,13 +29,13 @@ interface Props {
 }
 
 export default function ProjectWorkspaceLeftPanel({
-  project, customerName, projectType, users, canEdit,
+  project, customerName, projectType, users, customer, canEdit,
   isEditing, editForm, saving, onStartEdit, onCancelEdit, onSaveEdit, onFieldChange, onAddressFieldChange,
 }: Props) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Project Information</h3>
+        <h3 className="text-[11px] font-extrabold uppercase tracking-widest text-[var(--color-text)] border-b-2 border-[var(--color-primary)] pb-1">Project Information</h3>
         {canEdit && (
           isEditing ? (
             <div className="flex items-center gap-1">
@@ -67,7 +68,7 @@ export default function ProjectWorkspaceLeftPanel({
       {isEditing ? (
         <ProjectWorkspaceEditor form={editForm} onFieldChange={onFieldChange} onAddressFieldChange={onAddressFieldChange} users={users} />
       ) : (
-        <ProjectContextPanel project={project} customerName={customerName} projectType={projectType} users={users} />
+        <ProjectContextPanel project={project} customerName={customerName} projectType={projectType} users={users} customer={customer} />
       )}
     </div>
   );

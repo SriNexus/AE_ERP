@@ -206,25 +206,26 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
       {step === 'form' && (
         <>
           {/* ── Customer Type Toggle ─────────────────────── */}
-          <div className="rounded-2xl border-2 border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-900/10 p-6 shadow-sm">
+          <div className="rounded-2xl border-2 border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-900/10 p-4 shadow-sm sm:p-6">
             <h3 className="text-[12px] font-bold uppercase tracking-wide text-emerald-600 dark:text-emerald-400 mb-4 flex items-center gap-1.5">
               <CheckCircle2 className="h-3.5 w-3.5" /> Convert to Customer
             </h3>
 
-            {/* Segmented Control — only shows the type(s) this company's Business Mode allows */}
-            <div className="flex rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-0.5 mb-4">
+            {/* Segmented Control — stacks on mobile so neither label is
+                clipped; only shows the type(s) this company's Business Mode allows */}
+            <div className="flex flex-col gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-1 mb-4 sm:flex-row sm:gap-0 sm:p-0.5">
               {allowedTypes.includes('B2B') && (
                 <button onClick={() => setCustomerType('b2b')}
-                  className={['flex flex-1 items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors',
+                  className={['flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-center text-xs font-semibold transition-colors',
                     customerType === 'b2b' ? 'bg-[var(--color-primary)] text-white shadow-sm' : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'].join(' ')}>
-                  <Building2 className="h-3.5 w-3.5" /> B2B — Material/Distribution Buyer
+                  <Building2 className="h-3.5 w-3.5 shrink-0" /> <span>B2B <span className="hidden sm:inline">— Material/Distribution Buyer</span></span>
                 </button>
               )}
               {allowedTypes.includes('B2C') && (
                 <button onClick={() => setCustomerType('b2c')}
-                  className={['flex flex-1 items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors',
+                  className={['flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-center text-xs font-semibold transition-colors',
                     customerType === 'b2c' ? 'bg-[var(--color-primary)] text-white shadow-sm' : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'].join(' ')}>
-                  <User className="h-3.5 w-3.5" /> B2C — Direct Installation Customer
+                  <User className="h-3.5 w-3.5 shrink-0" /> <span>B2C <span className="hidden sm:inline">— Direct Installation Customer</span></span>
                 </button>
               )}
             </div>
@@ -243,7 +244,7 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
                 <p className="text-[10px] font-semibold text-[var(--color-text-muted)] mb-1">
                   Lead: <span className="text-[var(--color-text)]">{lead.name}</span> · {lead.phone}
                 </p>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">Company Name *</p>
                     <input type="text" value={b2bForm.company} onChange={e => hB2b('company', e.target.value)} placeholder="e.g. Sharma Solar Pvt Ltd"
@@ -255,7 +256,7 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
                       className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-primary)] transition-colors" />
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">Contact Person</p>
                     <input type="text" value={b2bForm.contactPerson} onChange={e => hB2b('contactPerson', e.target.value)} placeholder="Primary contact name"
@@ -267,7 +268,7 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
                       className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-primary)] transition-colors" />
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">Business Phone</p>
                     <input type="tel" value={b2bForm.businessPhone} onChange={e => hB2b('businessPhone', e.target.value)} placeholder="Landline / alternate"
@@ -279,11 +280,11 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
                   <textarea value={b2bForm.address} onChange={e => hB2b('address', e.target.value)} placeholder="Registered office address"
                     className="w-full resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-xs text-[var(--color-text)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-primary)] transition-colors" rows={2} />
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">State</p>
                     <select value={b2bForm.state} onChange={e => hB2b('state', e.target.value)}
-                      className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] outline-none focus:border-[var(--color-primary)] transition-colors">
+                      className="w-full min-w-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] outline-none focus:border-[var(--color-primary)] transition-colors">
                       {STATE_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
                   </div>
@@ -304,7 +305,7 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
                 <p className="text-[10px] font-semibold text-[var(--color-text-muted)] mb-1">
                   Lead: <span className="text-[var(--color-text)]">{lead.name}</span> · {lead.phone} · {lead.email || ''} · {lead.city || ''}
                 </p>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">Alternate Mobile</p>
                     <input type="tel" value={b2cForm.altMobile} onChange={e => hB2c('altMobile', e.target.value)} placeholder="Alternate phone number"
@@ -321,11 +322,11 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
                   <textarea value={b2cForm.address} onChange={e => hB2c('address', e.target.value)} placeholder="Full installation site address"
                     className="w-full resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-xs text-[var(--color-text)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-primary)] transition-colors" rows={2} />
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">State</p>
                     <select value={b2cForm.state} onChange={e => hB2c('state', e.target.value)}
-                      className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] outline-none focus:border-[var(--color-primary)] transition-colors">
+                      className="w-full min-w-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] outline-none focus:border-[var(--color-primary)] transition-colors">
                       {STATE_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
                   </div>
@@ -335,7 +336,7 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
                       className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-primary)] transition-colors" />
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">Sanction Load (kW)</p>
                     <input type="number" value={b2cForm.sanctionLoad} onChange={e => hB2c('sanctionLoad', e.target.value)} placeholder="e.g. 5"
@@ -344,7 +345,7 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">Roof Type</p>
                     <select value={b2cForm.roofType} onChange={e => hB2c('roofType', e.target.value)}
-                      className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] outline-none focus:border-[var(--color-primary)] transition-colors">
+                      className="w-full min-w-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] outline-none focus:border-[var(--color-primary)] transition-colors">
                       <option value="">Select Roof Type</option>
                       {ROOF_TYPES.map(r => <option key={r} value={r}>{r}</option>)}
                     </select>

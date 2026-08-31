@@ -12,6 +12,14 @@
  * `useFaceEnrollment.ts` already invalidates on a successful enrollment —
  * so a successful enrollment automatically refreshes whatever is reading
  * this hook, with zero additional wiring required on either side.
+ *
+ * Employee-View "Register Face" follow-up: accepts an optional `targetUserId`
+ * so an Admin/HR viewer can check ANOTHER employee's status (Employee View
+ * popup) — forwarded as `?targetUserId=` to the server, which authorizes it
+ * via the SAME `resolveEnrollmentTarget()` boundary `enroll.ts` already uses
+ * (self, or Admin/HR/SuperAdmin same-company). Omitted (the default), this
+ * hook's behavior is byte-for-byte unchanged from before — self only, same
+ * query key, same cache.
  */
 
 import { useQuery } from '@tanstack/react-query';
@@ -25,12 +33,15 @@ interface StatusApiResponseBody {
   error?: { code?: string; message?: string };
 }
 
-async function fetchEnrollmentStatus(): Promise<BiometricEnrollmentStatus> {
+async function fetchEnrollmentStatus(targetUserId?: string): Promise<BiometricEnrollmentStatus> {
   const user = auth.currentUser;
   if (!user) return 'none';
 
   const idToken = await user.getIdToken();
-  const response = await fetch('/api/biometrics/status', {
+  const url = targetUserId
+    ? `/api/biometrics/status?targetUserId=${encodeURIComponent(targetUserId)}`
+    : '/api/biometrics/status';
+  const response = await fetch(url, {
     method: 'GET',
     headers: { Authorization: `Bearer ${idToken}` },
   });
@@ -49,11 +60,17 @@ async function fetchEnrollmentStatus(): Promise<BiometricEnrollmentStatus> {
   return body.data.status;
 }
 
-export function useFaceEnrollmentStatus() {
+export function useFaceEnrollmentStatus(targetUserId?: string, options?: { enabled?: boolean }) {
   const query = useQuery({
-    queryKey: ['biometricFaceReference'],
-    queryFn: fetchEnrollmentStatus,
-    enabled: !!auth.currentUser,
+    queryKey: targetUserId ? ['biometricFaceReference', targetUserId] : ['biometricFaceReference'],
+    queryFn: () => fetchEnrollmentStatus(targetUserId),
+    // `options.enabled` (default true) lets a caller that conditionally has
+    // a target — e.g. Employees.tsx's "Face Registration" card, only
+    // meaningful once an employee's detail popup is actually open — skip
+    // the fetch entirely rather than either crashing the Rules of Hooks (by
+    // calling this hook conditionally) or wastefully fetching the wrong
+    // (self) status while there is no real target yet.
+    enabled: (options?.enabled ?? true) && !!auth.currentUser,
     staleTime: 30_000,
   });
 

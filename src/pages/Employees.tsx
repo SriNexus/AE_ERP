@@ -51,7 +51,7 @@ import { Input, Select as InputSelect, Textarea, FormRow, FormSection } from '..
 import {
   Plus, Trash2, Phone, Calendar, RefreshCw,
   Download, User, Users, Building2, UserCog, Mail,
-  FileText, AlertTriangle, ListChecks, Eye, X,
+  FileText, AlertTriangle, ListChecks, Eye, X, ScanFace, ShieldAlert, Loader2, CheckCircle2,
 } from 'lucide-react';
 import {
   useEmployees, useSaveEmployee, useDeleteEmployee, exportEmployeesCSV,
@@ -59,6 +59,8 @@ import {
   DEPT_OPTIONS, ROLE_OPTIONS, EMPLOYEE_STATUS_OPTIONS,
 } from '../features/employees/hooks/useEmployees';
 import toast from 'react-hot-toast';
+import EmployeeFaceRegistrationFlow from '../components/attendance/EmployeeFaceRegistrationFlow';
+import { useFaceEnrollmentStatus } from '../features/attendance/hooks/useFaceEnrollmentStatus';
 
 const PER_PAGE = 10;
 
@@ -194,6 +196,9 @@ export default function Employees() {
   const [bulkStatusOpen, setBulkStatusOpen] = useState(false);
   const [bulkStatus, setBulkStatus] = useState('');
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  // Employee-View "Register Face" (final completion pass) — the camera
+  // modal launched from the Face Registration card below.
+  const [faceRegistrationOpen, setFaceRegistrationOpen] = useState(false);
 
   const openParam = searchParams.get('open') || '';
   const createParam = searchParams.get('create') || '';
@@ -204,6 +209,12 @@ export default function Employees() {
   const saveMut = useSaveEmployee(editId, closeForm);
   const deleteMut = useDeleteEmployee();
   const qc = useQueryClient();
+
+  // Face Registration status for the currently-open Employee View popup —
+  // called unconditionally (Rules of Hooks) but disabled whenever no
+  // popup/linked user identity is present, so it never fires a wasted (or,
+  // worse, wrongly self-scoped) request while `viewItem` is null.
+  const faceEnrollmentStatus = useFaceEnrollmentStatus(viewItem?.userId, { enabled: !!viewItem?.userId });
 
   // Phase 12: Employee -> User -> Warehouse/Reporting-Manager join. Cache
   // key matches Users.tsx's own ['users'] query so both share one fetch.
@@ -369,6 +380,7 @@ export default function Employees() {
   function openDetail(e: any) {
     setLeadDetailsTab('overview');
     setViewItem(e);
+    setFaceRegistrationOpen(false);
     userClosedRef.current = false;
     const next = new URLSearchParams(searchParams);
     next.set('open', e.id);
@@ -377,6 +389,7 @@ export default function Employees() {
 
   function closeDetail() {
     setViewItem(null);
+    setFaceRegistrationOpen(false);
     userClosedRef.current = true;
     if (openParam) {
       const next = new URLSearchParams(searchParams);
@@ -914,6 +927,69 @@ export default function Employees() {
                         </p>
                         <p className="text-xs text-[var(--color-text-muted)] mt-1">Monthly</p>
                       </DetailCard>
+
+                      {/* Face Registration — the PRIMARY, recommended path
+                          for enrolling an employee's face (Employee → View →
+                          Register Face), independent of Check In/Check Out. */}
+                      <DetailCard title="Face Registration">
+                        {!viewItem.userId ? (
+                          <p className="text-xs text-[var(--color-text-muted)]">
+                            This employee has no linked user account, so Face Registration is not available.
+                          </p>
+                        ) : faceEnrollmentStatus.status === undefined ? (
+                          <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Checking registration status…
+                          </div>
+                        ) : faceEnrollmentStatus.status === 'active' ? (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                              <CheckCircle2 className="h-4 w-4" style={{ color: 'var(--color-success)' }} />
+                              <span className="text-sm font-semibold text-[var(--color-success-text)]">Face Registered</span>
+                            </div>
+                            {perms.canEdit('employees') && (
+                              <Button variant="outline" size="sm" className="w-full justify-start"
+                                icon={<ScanFace className="h-3.5 w-3.5" />}
+                                onClick={() => setFaceRegistrationOpen(true)}>Re-register Face</Button>
+                            )}
+                          </div>
+                        ) : faceEnrollmentStatus.status === 'revoked' ? (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                              <ShieldAlert className="h-4 w-4" style={{ color: 'var(--color-danger)' }} />
+                              <span className="text-sm font-semibold" style={{ color: 'var(--color-danger)' }}>Revoked</span>
+                            </div>
+                            <p className="text-xs text-[var(--color-text-muted)]">
+                              This employee's biometric enrollment was revoked. Registering again re-enables Face Attendance.
+                            </p>
+                            {perms.canEdit('employees') && (
+                              <Button size="sm" className="w-full justify-start"
+                                icon={<ScanFace className="h-3.5 w-3.5" />}
+                                onClick={() => setFaceRegistrationOpen(true)}>Register Face</Button>
+                            )}
+                          </div>
+                        ) : faceEnrollmentStatus.isError ? (
+                          <div className="space-y-2">
+                            <p className="text-xs" style={{ color: 'var(--color-danger)' }}>
+                              {faceEnrollmentStatus.errorMessage || 'Could not determine face enrollment status.'}
+                            </p>
+                            <Button variant="outline" size="sm" icon={<RefreshCw className="h-3.5 w-3.5" />}
+                              onClick={() => faceEnrollmentStatus.refetch()}>Retry</Button>
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            <p className="text-xs text-[var(--color-text-muted)]">Not Registered</p>
+                            {perms.canEdit('employees') ? (
+                              <Button size="sm" className="w-full justify-start"
+                                icon={<ScanFace className="h-3.5 w-3.5" />}
+                                onClick={() => setFaceRegistrationOpen(true)}>Register Face</Button>
+                            ) : (
+                              <p className="text-xs text-[var(--color-text-muted)]">Only Admin or HR can register a face.</p>
+                            )}
+                          </div>
+                        )}
+                      </DetailCard>
+
                       <DetailCard title="Quick Actions">
                         <div className="space-y-2">
                           <Button variant="outline" size="sm" className="w-full justify-start"
@@ -1013,6 +1089,30 @@ export default function Employees() {
             </div>
           );
         })()}
+      </Modal>
+
+      {/* ── Face Registration Modal (Employee → View → Register Face) ────
+          Sized to match the desktop Face Attendance camera modal (Attendance.tsx),
+          per this pass's explicit requirement to keep the camera experience
+          visually consistent across both surfaces. Rendered as a sibling to
+          the Detail View modal (not nested) — opened from a button inside it,
+          renders on top since it mounts later in DOM order at the same
+          z-index. Closing/success both return to the Detail View, which
+          re-renders "Face Registered" immediately once the status query
+          (auto-invalidated by useFaceEnrollment's onSuccess) refetches. */}
+      <Modal
+        open={faceRegistrationOpen}
+        onClose={() => setFaceRegistrationOpen(false)}
+        title="Register Face"
+        size="lg"
+      >
+        {faceRegistrationOpen && viewItem?.userId && (
+          <EmployeeFaceRegistrationFlow
+            targetUserId={viewItem.userId}
+            onCancel={() => setFaceRegistrationOpen(false)}
+            onSuccess={() => setFaceRegistrationOpen(false)}
+          />
+        )}
       </Modal>
 
       {/* ── Create/Edit Form Modal ──────────────────────────────────────── */}

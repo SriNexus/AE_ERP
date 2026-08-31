@@ -11,17 +11,16 @@ export interface ProjectWorkspaceStage extends StageTimelineItem {
   emptyMessage?: string;
 }
 
+/** 12-stage Project Workspace lifecycle — Procurement and AMC are NOT
+ * Project Workspace stages (they are separate business modules). This
+ * is the single source of truth for stage rendering, numbering, progress
+ * calculation, and auto-scroll in the Project Details page. */
 const LIFECYCLE: Array<Omit<ProjectWorkspaceStage, 'status' | 'href'>> = [
-  // Phase 6: the Registration stage (SchemeRegistration — user-facing label
-  // exactly 'Registration', canonical index 1 between New and Survey). Its
-  // operational workspace lives INSIDE the Project Workspace, so like the
-  // Quotation→AMC in-workspace stages it opens at the Project.
   { id: 'registration', projectStage: 'SchemeRegistration', title: 'Registration', shortLabel: 'Registration', description: 'Scheme registration' },
   { id: 'survey', projectStage: 'Survey', title: 'Survey', shortLabel: 'Survey', description: 'Site survey and approval' },
   { id: 'engineering', projectStage: 'Engineering', title: 'Engineering', shortLabel: 'Design', description: 'System design and review' },
   { id: 'quotation', projectStage: 'Quotation', title: 'Quotation', shortLabel: 'Quote', description: 'Commercial proposal' },
   { id: 'order', projectStage: 'Order', title: 'Order', shortLabel: 'Order', description: 'Accepted sales order' },
-  { id: 'procurement', projectStage: 'Procurement', title: 'Procurement', shortLabel: 'Procure', description: 'Material procurement' },
   { id: 'dispatch', projectStage: 'Dispatch', title: 'Dispatch', shortLabel: 'Dispatch', description: 'Material movement' },
   { id: 'installation', projectStage: 'Installation', title: 'Installation', shortLabel: 'Install', description: 'On-site execution' },
   { id: 'qc', projectStage: 'QC', title: 'Quality Check', shortLabel: 'QC', description: 'Installation quality gate' },
@@ -29,7 +28,6 @@ const LIFECYCLE: Array<Omit<ProjectWorkspaceStage, 'status' | 'href'>> = [
   { id: 'net-metering', projectStage: 'NetMetering', title: 'Net Metering', shortLabel: 'Net Meter', description: 'DISCOM application' },
   { id: 'subsidy', projectStage: 'Subsidy', title: 'Subsidy', shortLabel: 'Subsidy', description: 'Government subsidy application' },
   { id: 'handover', projectStage: 'Handover', title: 'Handover', shortLabel: 'Handover', description: 'Customer handover package' },
-  { id: 'amc', projectStage: 'AMC', title: 'AMC / Service', shortLabel: 'AMC', description: 'Post-handover service' },
 ];
 
 function stageHref(stage: ProjectStage, project: ProjectRecord) {
@@ -54,7 +52,6 @@ function stageHref(stage: ProjectStage, project: ProjectRecord) {
   // their "Open in full workspace" target is the Project.
   if (stage === 'Quotation') return `/projects/${projectId}`;
   if (stage === 'Order') return `/projects/${projectId}`;
-  if (stage === 'Procurement') return `/projects/${projectId}`;
   if (stage === 'Dispatch') return `/projects/${projectId}`;
   if (stage === 'Installation') return `/projects/${projectId}`;
   if (stage === 'QC') return `/projects/${projectId}`;
@@ -62,15 +59,13 @@ function stageHref(stage: ProjectStage, project: ProjectRecord) {
   if (stage === 'NetMetering') return `/projects/${projectId}`;
   if (stage === 'Subsidy') return `/projects/${projectId}`;
   if (stage === 'Handover') return `/projects/${projectId}`;
-  if (stage === 'AMC') return `/projects/${projectId}`;
   return undefined;
 }
 
 export function resolveProjectWorkspaceStages(project: ProjectRecord): ProjectWorkspaceStage[] {
   // Phase 5: compared via the canonical stage order (projectStageIndex), not
-  // position within this component's own 13-item LIFECYCLE subset — the two
-  // scales aren't interchangeable (e.g. 'AMC' is last in LIFECYCLE but not
-  // last in the real 17-stage lifecycle), so both sides of every comparison
+  // position within this component's own 12-item LIFECYCLE subset — the two
+  // scales aren't interchangeable, so both sides of every comparison
   // must resolve through the same canonical index.
   const currentCanonicalIndex = projectStageIndex(project.currentStage);
   const completedStages = new Set((project.stageHistory || []).map((entry) => entry.stage));

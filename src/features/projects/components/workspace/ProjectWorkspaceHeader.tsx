@@ -16,6 +16,7 @@
  */
 import { ArrowLeft, Phone, Mail, MessageCircle, MapPin, User } from 'lucide-react';
 import { projectStageLabel, projectCapacityLabel } from '../../utils/projectDisplay';
+import { useUserNameResolver } from '../../../../hooks/useUserNameResolver';
 import type { ProjectRecord } from '../../types';
 
 export interface ProjectHeaderFields {
@@ -54,40 +55,46 @@ interface Props {
 
 export default function ProjectWorkspaceHeader({ project, customerName, customerPhone, customerEmail, onViewCustomer, onBack }: Props) {
   const { projectId, stageLabel, capacityLabel, projectType, city, salesOwner } = resolveProjectHeaderFields(project);
+  const resolveUserName = useUserNameResolver();
 
   return (
-    <div className="flex shrink-0 items-center gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm px-6 py-4">
-      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-hover)] text-lg font-bold text-white shadow-sm ring-2 ring-[var(--color-primary-muted)]">
-        {projectId[0]?.toUpperCase() || 'P'}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2.5 flex-wrap">
-          <h1 className="truncate text-xl font-bold text-[var(--color-text)]">{projectId}</h1>
-          {/* One status signal (stage) — matches Customer Workspace's own
-              "exactly one status pill" rule. Capacity is identity/spec, not
-              status, so it stays a neutral tag chip, never colored like the
-              stage pill. */}
-          <span className="inline-flex items-center rounded-full border border-[var(--color-primary-muted)] bg-[var(--color-primary-light)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--color-primary-text)]">
-            {stageLabel}
-          </span>
-          <span className="inline-flex items-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg-sunken)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">
-            {capacityLabel}
-          </span>
-          {projectType && (
-            <span className="inline-flex items-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg-sunken)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)]">
-              {projectType}
+    <div className="flex shrink-0 flex-col px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3 sm:gap-y-2 sm:px-6 sm:py-4">
+      {/* Mobile back arrow — visible only below lg. Desktop uses the
+          "Projects" button in the actions row. */}
+      <button
+        type="button"
+        onClick={onBack}
+        className="flex items-center gap-1.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors lg:hidden"
+        title="Back to Projects"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        <span className="text-[11px] font-semibold">Back</span>
+      </button>
+
+      {/* Identity + Actions row — wraps together so actions stay top-right. */}
+      <div className="flex flex-1 items-center gap-3 sm:flex-wrap sm:gap-x-3 sm:gap-y-2">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-hover)] text-lg font-bold text-white shadow-sm ring-2 ring-[var(--color-primary-muted)] sm:h-12 sm:w-12">
+          {projectId[0]?.toUpperCase() || 'P'}
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <h1 className="min-w-0 break-words text-base font-bold text-[var(--color-text)] sm:truncate sm:text-xl">
+              {customerName ? `${customerName} – ${capacityLabel}` : projectId}
+              {projectType && ` – ${projectType}`}
+            </h1>
+            <span className="inline-flex items-center rounded-full border border-[var(--color-primary-muted)] bg-[var(--color-primary-light)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--color-primary-text)]">
+              {stageLabel}
             </span>
+          </div>
+          {(city || salesOwner) && (
+            <div className="flex items-center gap-3 mt-1 flex-wrap">
+              {city && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><MapPin className="h-3 w-3" />{city}</span>}
+              {salesOwner && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><User className="h-3 w-3" />{resolveUserName(salesOwner)}</span>}
+            </div>
           )}
         </div>
-        {(customerName || city || salesOwner) && (
-          <div className="flex items-center gap-3 mt-1 flex-wrap">
-            {customerName && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><User className="h-3 w-3" />{customerName}</span>}
-            {city && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><MapPin className="h-3 w-3" />{city}</span>}
-            {salesOwner && <span className="text-[11px] text-[var(--color-text-muted)] flex items-center gap-1"><User className="h-3 w-3" />{salesOwner}</span>}
-          </div>
-        )}
       </div>
-      <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+      <div className="flex flex-wrap items-center justify-end gap-1.5 sm:shrink-0">
         {customerPhone && (
           <a href={`tel:${customerPhone}`}
             className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm">
@@ -115,14 +122,15 @@ export default function ProjectWorkspaceHeader({ project, customerName, customer
             View Customer
           </button>
         )}
+        {/* Back to list — desktop only. Mobile uses the back arrow above. */}
         <button
           type="button"
           onClick={onBack}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 sm:px-3 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm"
+          className="hidden lg:inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 sm:px-3 py-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-border-strong)] transition-colors shadow-sm"
           title="Back to Projects"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">Projects</span>
+          <span>Projects</span>
         </button>
       </div>
     </div>

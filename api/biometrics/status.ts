@@ -19,19 +19,35 @@
  * and returns ONLY a status enum, never the embedding or any other field.
  *
  * Authenticated via the same `api/_lib/auth.ts`/`api/_lib/rateLimit.ts`
- * mechanism every other route in this directory uses. Always self — reads
- * the CALLER's own reference (`user.erpUserId`), exactly like `verify.ts`;
- * there is no target-user parameter, by design (never a 1:N/employee-picker
- * surface).
+ * mechanism every other route in this directory uses.
+ *
+ * Employee-View "Register Face" follow-up: optionally accepts `?targetUserId=`
+ * so an Admin/HR viewer can see ANOTHER employee's enrollment status (to
+ * render "Not Registered" / "Face Registered" / "Revoked" in the Employee
+ * View popup) — reusing the EXACT SAME `resolveEnrollmentTarget()`
+ * authorization `api/biometrics/enroll.ts` already uses for on-behalf-of
+ * enrollment (self, or Admin/HR/SuperAdmin of the SAME company; cross-tenant
+ * and inactive-target are rejected there). No new authorization model. Omit
+ * the param (or pass your own id) for the original self-only behavior —
+ * every existing caller is unaffected.
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { verifyAuthToken } from '../_lib/auth';
 import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
 import { sendSuccess, sendError, sendInternalError } from '../_lib/response';
+import { getAdminDb } from '../_lib/firebase';
+import { COLLECTIONS } from '../../src/lib/collections';
 import { createDefaultBiometricReferenceStore } from '../_lib/biometrics/referenceStore';
+import { resolveEnrollmentTarget } from '../_lib/biometrics/authorization';
+import { BiometricPipelineError } from '../../src/lib/biometrics/pipeline/types';
 
 export type BiometricEnrollmentStatus = 'none' | 'active' | 'revoked';
+
+const REASON_STATUS: Record<string, number> = {
+  not_authorized: 403,
+  cross_tenant_denied: 403,
+};
 
 function setCorsHeaders(res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -58,8 +74,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    const requestedTargetUserId = typeof req.query.targetUserId === 'string' ? req.query.targetUserId : undefined;
+    const db = getAdminDb();
+    const target = await resolveEnrollmentTarget(user, requestedTargetUserId, {
+      async readUser(userId: string) {
+        const snap = await db.collection(COLLECTIONS.USERS).doc(userId).get();
+        return snap.exists ? (snap.data() as Record<string, unknown>) : null;
+      },
+    });
+
     const store = createDefaultBiometricReferenceStore();
-    const reference = await store.getReference(user.erpUserId);
+    const reference = await store.getReference(target.targetUserId);
     const status: BiometricEnrollmentStatus = !reference
       ? 'none'
       : reference.status === 'active'
@@ -69,7 +94,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Deliberately the ONLY field returned — never `embedding`, never any
     // other reference field (model/detector metadata, history, etc.).
     return sendSuccess(res, { status });
-  } catch {
+  } catch (error) {
+    if (error instanceof BiometricPipelineError) {
+      const status = REASON_STATUS[error.reason] || 422;
+      return sendError(res, status, error.reason.toUpperCase(), error.message);
+    }
     return sendInternalError(res, 'Could not determine enrollment status.');
   }
 }

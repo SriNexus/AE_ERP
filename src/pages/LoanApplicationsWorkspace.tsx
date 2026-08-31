@@ -29,9 +29,7 @@ import {
   EmptyCell,
   ActionStrip,
   loanApplicationStatusBadge,
-  signStatusBadge,
 } from '../features/loan-applications/components/LoanApplicationWorkspaceParts';
-import { LoanApplicationDetailModal } from '../features/loan-applications/components/LoanApplicationDetailModal';
 import { LoanApplicationWorkspaceDialogs } from '../features/loan-applications/components/LoanApplicationWorkspaceDialogs';
 import { useLoanApplications, LOAN_APPLICATION_STATUSES, LOAN_APPLICATION_FORM_DEFAULT, isToday } from '../features/loan-applications/hooks/useLoanApplications';
 import { useBankOptions } from '../features/banks/hooks/useBanks';
@@ -217,7 +215,7 @@ export default function LoanApplications() {
           const oldReg = (registrations as any[]).find((r: any) => r.id === editId);
           void onLoanApplicationStatusChange(saved.id, oldReg?.status || 'Draft', saved.status);
         }
-        openRegDetails(saved, true);
+        openRegDetails(saved);
       }
     },
     onError: (e: any) => toast.error(e.message),
@@ -332,23 +330,10 @@ export default function LoanApplications() {
     setSearchParams(next, { replace: true });
   }, [openParam, searchParams, setSearchParams]);
 
-  const openRegDetails = useCallback((reg: any, replace = false) => {
-    userClosedRef.current = false; setViewItem(reg);
+  const openRegDetails = useCallback((reg: any) => {
     if (!reg?.id) return;
-    const next = new URLSearchParams(searchParams);
-    next.set('open', reg.id);
-    if (search) next.set('q', search); else next.delete('q');
-    if (statusF) next.set('status', statusF); else next.delete('status');
-    if (bankF) next.set('bank', bankF); else next.delete('bank');
-    if (assignF) next.set('owner', assignF); else next.delete('owner');
-    if (dateRange && dateRange !== 'all') next.set('date', dateRange); else next.delete('date');
-    if (customFrom) next.set('from', customFrom); else next.delete('from');
-    if (customTo) next.set('to', customTo); else next.delete('to');
-    if (activeKpi) next.set('kpi', activeKpi); else next.delete('kpi');
-    if (page > 1) next.set('page', String(page)); else next.delete('page');
-    if (perPage !== PER_PAGE) next.set('perPage', String(perPage)); else next.delete('perPage');
-    setSearchParams(next, { replace });
-  }, [search, statusF, bankF, assignF, dateRange, customFrom, customTo, activeKpi, page, perPage, searchParams, setSearchParams]);
+    navigate(`/loan-applications/${encodeURIComponent(reg.id)}`);
+  }, [navigate]);
 
   function handleRowClick(e: React.MouseEvent<HTMLTableRowElement>, reg: any) {
     if (window.getSelection()?.toString()) return;
@@ -444,7 +429,7 @@ export default function LoanApplications() {
       <WorkspaceHero
         title="Loan Applications"
         icon={<FileText className="h-6 w-6" />}
-        breadcrumbs={['Home', 'Sales', 'Loan Applications']}
+
         statusText="Last sync · Realtime Connected"
         statusDotColor="var(--color-success)"
         className="gap-3"
@@ -640,7 +625,6 @@ export default function LoanApplications() {
                 <Th className="hidden md:table-cell" style={{ width: '10%', minWidth: 100 }}>BANK</Th>
                 <Th sortable sorted={sortKey === 'loanAmount'} desc={sortDesc} onSort={() => sort('loanAmount')} style={{ width: 100, minWidth: 100 }}>LOAN AMOUNT</Th>
                 <Th style={{ width: 110, minWidth: 110 }}>STATUS</Th>
-                <Th className="hidden md:table-cell" style={{ width: 80, minWidth: 80 }}>SIGN</Th>
                 <Th className="hidden lg:table-cell" style={{ width: '10%', minWidth: 100 }}>BANK SUB.</Th>
                 <Th style={{ width: '12%', minWidth: 130 }}>ASSIGNED</Th>
                 <Th sortable sorted={sortKey === 'createdAt'} desc={sortDesc} onSort={() => sort('createdAt')} style={{ width: 90, minWidth: 90 }}>CREATED</Th>
@@ -648,11 +632,11 @@ export default function LoanApplications() {
               </Thead>
               <Tbody>
                 {isLoading
-                  ? <SkeletonRows cols={12} />
+                  ? <SkeletonRows cols={11} />
                   : paginated.length === 0
                     ? (
                       <tr>
-                        <td colSpan={12} className="py-14 text-center">
+                        <td colSpan={11} className="py-14 text-center">
                           <EmptyState
                             icon={<FileText className="h-9 w-9" />}
                             title={search || statusF || bankF ? 'No loan applications match filters' : 'No loan applications yet'}
@@ -715,8 +699,6 @@ export default function LoanApplications() {
                         {/* Status */}
                         <Td className="py-3"><span data-interactive onClick={(e) => e.stopPropagation()}>{loanApplicationStatusBadge(r.status || 'Draft')}</span></Td>
 
-                        {/* Digital Sign */}
-                        <Td className="hidden md:table-cell py-3">{signStatusBadge(r.digitalSignStatus || 'pending')}</Td>
 
                         {/* Bank Submission */}
                         <Td className="hidden lg:table-cell py-3 text-xs text-[var(--color-text-muted)]">
@@ -756,12 +738,6 @@ export default function LoanApplications() {
         showBulkStatus, setShowBulkStatus, bulkStatus, setBulkStatus, bulkStatusMutation, selected,
         showBulkAssign, setShowBulkAssign, bulkAssignId, setBulkAssignId, bulkAssignName, setBulkAssignName, bulkAssignMutation, handleSubmit }} />
 
-      <LoanApplicationDetailModal open={!!viewItem} registration={viewItem} onClose={closeRegDetails}
-        onEdit={() => { closeRegDetails(); openEdit(viewItem); }}
-        onDelete={() => { closeRegDetails(); setDelId(viewItem?.id); }}
-        onViewCustomer={viewItem?.customerId ? () => navigate(`/customers?open=${encodeURIComponent(viewItem.customerId)}`) : undefined}
-        onCreatePayment={viewItem?.status === 'Approved' ? () => { const r = viewItem; closeRegDetails(); setTimeout(() => { if (r) { /* Payment creation flow */ } }, 200); } : undefined}
-        onCreateProject={viewItem?.status === 'Payment Received' ? () => { const r = viewItem; closeRegDetails(); setTimeout(() => { if (r) { /* Project creation flow */ } }, 200); } : undefined} />
 
       <ConfirmDialog open={!!delId} onClose={() => setDelId(null)}
         onConfirm={() => {

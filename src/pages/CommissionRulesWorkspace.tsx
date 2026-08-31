@@ -32,6 +32,7 @@ import {
 import { getOne, getAll, fmtDate, fmtCurrency } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';import { usePermissions } from '../lib/permissions';
 import { useAppStore } from '../store/useAppStore';
+import { useUserNameResolver } from '../hooks/useUserNameResolver';
 import { cn } from '../utils/cn';
 import { PageHeader } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -135,6 +136,7 @@ export default function CommissionRulesWorkspace() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
+  const resolveUserName = useUserNameResolver();
 
   // ── Data queries ─────────────────────────────────────────
   const ruleQuery = useQuery({
@@ -431,7 +433,7 @@ export default function CommissionRulesWorkspace() {
       <div>
         <p className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-3">Lifecycle</p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <OverviewField label="Created By" value={String(rule?.createdBy || '—')} icon={User} />
+          <OverviewField label="Created By" value={resolveUserName(rule?.createdBy)} icon={User} />
           <OverviewField label="Created At" value={fmtDateSafe(rule?.createdAt)} icon={Calendar} />
           <OverviewField label="Updated At" value={fmtDateSafe(rule?.updatedAt || rule?.createdAt)} icon={Clock} />
           <OverviewField label="Company" icon={Hash}>

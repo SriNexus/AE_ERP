@@ -231,6 +231,7 @@ export const SETTINGS_DEFAULTS: Record<SettingsSectionId, Record<string, unknown
   developer:            DEFAULT_DEVELOPER_SETTINGS as unknown as Record<string, unknown>,
   'about-erp':          {},
   attendance:           DEFAULT_ATTENDANCE_SETTINGS as unknown as Record<string, unknown>,
+  'recycle-bin':        {}, // recovery surface only — no persisted settings
 };
 
 /**

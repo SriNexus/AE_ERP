@@ -517,7 +517,7 @@ export default function Orders() {
       <WorkspaceHero
         title="Orders"
         icon={<ShoppingCart className="h-6 w-6" />}
-        breadcrumbs={['Home', 'Sales', 'Orders']}
+
         statusText="Last sync · Realtime Connected"
         statusDotColor="var(--color-success)"
         className="gap-3"

@@ -298,7 +298,6 @@ export function MobileOrderWorkspace({ mode }: { mode: Mode }) {
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [form, setForm] = useState<OrderForm>({ ...FORM0 });
   const [items, setItems] = useState<OrderItem[]>([]);
-  const [viewOrder, setViewOrder] = useState<Order | null>(null);
   const [dirty, setDirty] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -343,12 +342,7 @@ export function MobileOrderWorkspace({ mode }: { mode: Mode }) {
     window.history.replaceState({}, document.title);
   }, [location.state]);
 
-  useEffect(() => {
-    const openId = params.get('open');
-    if (!openId || viewOrder || !orders.length) return;
-    const found = (orders as Order[]).find((order) => order.id === openId);
-    if (found) setViewOrder(found);
-  }, [orders, params, viewOrder]);
+  // openParam sync removed — orders now open via /orders/:id route
 
   const salesUsers = useMemo(
     () => (users as any[])
@@ -396,20 +390,10 @@ export function MobileOrderWorkspace({ mode }: { mode: Mode }) {
   }
 
   function openOrder(order: Order) {
-    setViewOrder(order);
-    const next = new URLSearchParams(params);
-    next.set('open', order.id);
-    setParams(next, { replace: true });
+    navigate(`/orders/${encodeURIComponent(order.id)}`);
   }
 
-  function closeOrder() {
-    setViewOrder(null);
-    if (params.get('open')) {
-      const next = new URLSearchParams(params);
-      next.delete('open');
-      setParams(next, { replace: true });
-    }
-  }
+  // closeOrder removed — orders now open via /orders/:id route
 
   function toggleSelect(id: string) {
     setSelected((current) => {
@@ -511,7 +495,6 @@ export function MobileOrderWorkspace({ mode }: { mode: Mode }) {
   }
 
   function openEdit(order: Order) {
-    closeOrder();
     setEditingOrder(order);
     setForm({
       customer: order.customer || order.customerName || '',
@@ -592,7 +575,7 @@ export function MobileOrderWorkspace({ mode }: { mode: Mode }) {
       void qc.invalidateQueries({ queryKey: keys.ordersRoot });
       toast.success(editingOrder ? 'Order updated' : 'Order created');
       closeForm();
-      setViewOrder(order as Order);
+      if (order?.id) navigate(`/orders/${encodeURIComponent((order as Order).id)}`);
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -609,7 +592,6 @@ export function MobileOrderWorkspace({ mode }: { mode: Mode }) {
       toast.success(`Deleted ${selectedRows.length || 1} order${selectedRows.length === 1 ? '' : 's'}`);
       setSelected(new Set());
       setDeleteOpen(false);
-      setViewOrder(null);
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -794,41 +776,6 @@ export function MobileOrderWorkspace({ mode }: { mode: Mode }) {
       {!isLoading && filteredOrders.length > 0 && (
         <Pagination page={page} total={filteredOrders.length} perPage={PER_PAGE} onChange={changePage} />
       )}
-
-      <OrderViewModal
-        order={viewOrder}
-        customers={customers as any[]}
-        quotations={quotations as any[]}
-        invoices={invoices as ProformaInvoice[]}
-        dispatches={dispatches as any[]}
-        payments={payments as any[]}
-        currencySymbol={company?.currencySymbol || '₹'}
-        canEdit={canEdit}
-        canDelete={canDelete}
-        canCreateInvoice={perms.canCreate('invoices')}
-        generatingPI={generatePI.isPending}
-        markingPI={markPIAsPaid.isPending}
-        onClose={closeOrder}
-        onEdit={openEdit}
-        onDelete={(order) => {
-          setSelected(new Set([order.id]));
-          closeOrder();
-          setDeleteOpen(true);
-        }}
-        onDuplicate={(order) => {
-          closeOrder();
-          setDuplicateOrder(order);
-        }}
-        onNote={(order) => {
-          closeOrder();
-          setNoteOrder(order);
-        }}
-        onGeneratePI={(order) => generatePI.mutate(order)}
-        onSendEmail={(order) => sendEmail(order, 'order')}
-        onMarkPIAsPaid={(piId) => markPIAsPaid.mutate(piId)}
-        onCreateInvoice={(order) => navigate('/invoices', { state: { prefillOrder: order } })}
-        onPrint={printOrder}
-      />
 
       <OrderDialogs
         formOpen={formOpen}
@@ -1152,185 +1099,6 @@ function OrderDialogs({ formOpen, form, items, products, customers, quotations, 
   );
 }
 
-function OrderViewModal({ order, customers, quotations, invoices, dispatches, payments, currencySymbol, canEdit, canDelete, canCreateInvoice, generatingPI, markingPI, onClose, onEdit, onDelete, onDuplicate, onNote, onGeneratePI, onSendEmail, onMarkPIAsPaid, onCreateInvoice, onPrint }: {
-  order: Order | null;
-  customers: any[];
-  quotations: any[];
-  invoices: ProformaInvoice[];
-  dispatches: any[];
-  payments: any[];
-  currencySymbol: string;
-  canEdit: boolean;
-  canDelete: boolean;
-  canCreateInvoice: boolean;
-  generatingPI: boolean;
-  markingPI: boolean;
-  onClose: () => void;
-  onEdit: (order: Order) => void;
-  onDelete: (order: Order) => void;
-  onDuplicate: (order: Order) => void;
-  onNote: (order: Order) => void;
-  onGeneratePI: (order: Order) => void;
-  onSendEmail: (order: Order) => void;
-  onMarkPIAsPaid: (piId: string) => void;
-  onCreateInvoice: (order: Order) => void;
-  onPrint: (order: Order) => void;
-}) {
-  if (!order) return null;
-  const phone = orderPhone(order, customers);
-  const email = orderEmail(order, customers);
-  const relatedQuotation = quotations.find((quotation) => quotation.id === order.sourceQuotationId || quotation.id === order.quotationId);
-  const relatedInvoices = invoices.filter((invoice) => invoice.orderId === order.id || invoice.sourceOrderId === order.id || order.generatedPIs?.includes(invoice.id));
-  const relatedDispatches = dispatches.filter((dispatch) => dispatch.orderId === order.id);
-  const relatedPayments = payments.filter((payment) => payment.orderId === order.id);
-  const paidAmount = relatedPayments.reduce((sum, payment) => sum + (Number(payment.amount) || 0), Number(order.paidAmount || order.amountPaid || 0) || 0);
-  const outstanding = Math.max(0, (Number(order.total) || 0) - paidAmount);
-  const activity = [
-    { type: 'Created', desc: 'Order record created', date: order.createdAt || order.date, userName: order.createdByName || 'System' },
-    ...(order.updatedAt ? [{ type: 'Updated', desc: 'Order was updated', date: order.updatedAt, userName: order.updatedByName || 'System' }] : []),
-    ...(order.piGenerated ? [{ type: 'PI Generated', desc: 'Proforma invoice generated', date: order.updatedAt || order.createdAt, userName: order.updatedByName || 'System' }] : []),
-    ...(order.activityLog || []),
-  ];
-
-  return (
-    <Modal open={!!order} onClose={onClose} title={orderNumber(order)} size="full">
-      <div className="space-y-4">
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            {statusBadge(order.status || 'Pending')}
-            {statusBadge(order.paymentStatus || 'Pending')}
-            {order.orderType ? <Badge variant={order.orderType === 'B2C' ? 'info' : 'purple'}>{order.orderType}</Badge> : null}
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Detail label="Customer" value={orderCustomer(order)} />
-            <Detail label="Total" value={fmtCurrency(Number(order.total) || 0, currencySymbol)} />
-          </div>
-        </section>
-
-        <Section title="Order Information">
-          <Detail label="Order Number" value={orderNumber(order)} />
-          <Detail label="Order Date" value={order.date ? fmtDate(order.date) : 'Not set'} />
-          <Detail label="Delivery Date" value={order.deliveryDate ? fmtDate(order.deliveryDate) : 'Not set'} />
-          <Detail label="Assigned To" value={order.assignedToName || 'Unassigned'} />
-        </Section>
-
-        <Section title="Customer Information">
-          <Detail label="Customer" value={orderCustomer(order)} />
-          <Detail label="Mobile" value={phone || 'Not available'} />
-          <Detail label="Email" value={email || 'Not available'} />
-        </Section>
-
-        <Section title="Quotation Reference">
-          <Detail label="Quotation" value={relatedQuotation?.quotationNumber || relatedQuotation?.quoteNumber || order.sourceQuotationId || 'No quotation linked'} />
-        </Section>
-
-        <Section title="Products">
-          {order.items?.length ? (
-            <div className="space-y-2">
-              {order.items.map((item: any, index: number) => (
-                <div key={index} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{item.product || item.productId || `Item ${index + 1}`}</p>
-                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{Number(item.qty) || 0} {item.unit || ''} x {fmtCurrency(Number(item.price) || 0, currencySymbol)} · Tax {Number(item.tax) || 0}%</p>
-                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">Dispatched {Number(item.dispatchedQty) || 0} · Pending {Number(item.pendingQty) || Math.max(0, (Number(item.qty) || 0) - (Number(item.dispatchedQty) || 0))}</p>
-                </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-[var(--color-text-muted)]">No products added.</p>}
-        </Section>
-
-        <Section title="Pricing Summary">
-          <TotalRow label="Subtotal" value={fmtCurrency(Number(order.subtotal) || 0, currencySymbol)} />
-          <TotalRow label="Tax Details" value={fmtCurrency(Number(order.taxTotal || order.taxAmount) || 0, currencySymbol)} />
-          <TotalRow label="Discounts" value={fmtCurrency(Number(order.discount) || 0, currencySymbol)} />
-          <TotalRow label="Grand Total" value={fmtCurrency(Number(order.total) || 0, currencySymbol)} strong />
-        </Section>
-
-        <Section title="Billing Details">
-          <Detail label="Billing Address" value={order.billingAddress || order.shippingAddress || 'Not available'} />
-          <Detail label="Pending Billing" value={fmtCurrency(Number(order.pendingBilling) || 0, currencySymbol)} />
-          <Detail label="Total Invoiced" value={fmtCurrency(Number(order.totalInvoiced) || 0, currencySymbol)} />
-        </Section>
-
-        <Section title="Shipping Details">
-          <Detail label="Shipping Address" value={order.shippingAddress || 'Not available'} />
-          <Detail label="Warehouse" value={order.warehouseId || 'Not selected'} />
-        </Section>
-
-        <Section title="Payment Summary">
-          <Detail label="Payment Status" value={order.paymentStatus || 'Pending'} />
-          <Detail label="Paid Amount" value={fmtCurrency(paidAmount, currencySymbol)} />
-          <Detail label="Outstanding" value={fmtCurrency(outstanding, currencySymbol)} />
-        </Section>
-
-        <Section title="Dispatch Summary">
-          <Detail label="Dispatch Status" value={dispatchStatus(order, dispatches)} />
-          <Detail label="Dispatch Records" value={String(relatedDispatches.length)} />
-          <Detail label="Invoice Status" value={invoiceStatus(order, invoices)} />
-        </Section>
-
-        <Section title="Notes">
-          <p className="whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">{order.notes || 'No notes recorded.'}</p>
-        </Section>
-
-        <Section title="Attachments">
-          <p className="text-sm text-[var(--color-text-muted)]">{order.attachmentName || order.fileName || 'No attachments available.'}</p>
-        </Section>
-
-        <Section title="Timeline">
-          <MobileTimelinePreview title={`${orderNumber(order)} Timeline`} entries={activity} />
-        </Section>
-
-        <Section title="Related Invoice">
-          {relatedInvoices.length ? (
-            <div className="space-y-2">
-              {relatedInvoices.map((invoice) => (
-                <div key={invoice.id} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{(invoice as any).piNumber || (invoice as any).invoiceNumber || invoice.id}</p>
-                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{fmtCurrency(Number(invoice.total) || 0, currencySymbol)} · {invoice.paymentStatus || 'Pending'}</p>
-                  {(invoice.paymentStatus || '').toLowerCase() !== 'paid' ? (
-                    <Button className="mt-2" size="xs" variant="outline" loading={markingPI} onClick={() => onMarkPIAsPaid(invoice.id)}>Mark Paid</Button>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-[var(--color-text-muted)]">No related invoice.</p>}
-        </Section>
-
-        <Section title="Related Dispatch">
-          {relatedDispatches.length ? (
-            <div className="space-y-2">
-              {relatedDispatches.map((dispatch) => (
-                <div key={dispatch.id} className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] p-3">
-                  <p className="text-sm font-semibold text-[var(--color-text)]">{dispatch.dispatchNumber || dispatch.id}</p>
-                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{dispatch.status || 'Pending'}</p>
-                </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-[var(--color-text-muted)]">No dispatch records.</p>}
-        </Section>
-
-        <Section title="Audit Information">
-          <Detail label="Created By" value={order.createdByName || order.createdBy || 'System'} />
-          <Detail label="Updated" value={order.updatedAt ? fmtDate(order.updatedAt) : 'Not available'} />
-        </Section>
-
-        <div className="grid grid-cols-2 gap-2">
-          {phone ? <a className={linkButtonClass} href={`tel:${phone}`}><Phone className="h-4 w-4" />Call</a> : null}
-          {phone ? <a className={linkButtonClass} href={whatsappHref(phone)} target="_blank" rel="noreferrer"><MessageCircle className="h-4 w-4" />WhatsApp</a> : null}
-          {email ? <Button variant="outline" icon={<Mail className="h-4 w-4" />} onClick={() => onSendEmail(order)}>Send Email</Button> : null}
-          <Button variant="outline" icon={<Printer className="h-4 w-4" />} onClick={() => onPrint(order)}>Print</Button>
-          {canEdit ? <Button variant="outline" icon={<FileText className="h-4 w-4" />} loading={generatingPI} onClick={() => onGeneratePI(order)}>Generate PI</Button> : null}
-          {canCreateInvoice ? <Button variant="outline" icon={<ReceiptText className="h-4 w-4" />} onClick={() => onCreateInvoice(order)}>Invoice</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Truck className="h-4 w-4" />} onClick={() => toast('Dispatch request workflow is available from Dispatch module')}>Dispatch</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Copy className="h-4 w-4" />} onClick={() => onDuplicate(order)}>Duplicate</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Calendar className="h-4 w-4" />} onClick={() => onNote(order)}>Add Note</Button> : null}
-          {canEdit ? <Button variant="outline" icon={<Edit2 className="h-4 w-4" />} onClick={() => onEdit(order)}>Edit</Button> : null}
-          {canDelete ? <Button variant="danger" icon={<Trash2 className="h-4 w-4" />} onClick={() => onDelete(order)}>Delete</Button> : null}
-        </div>
-      </div>
-    </Modal>
-  );
-}
 
 function TotalRow({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
   return (
