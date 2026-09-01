@@ -22,7 +22,7 @@ import { RoleRoute } from '../../auth/RoleRoute';
 import { SuperAdminRoute } from '../../auth/SuperAdminRoute';
 import { useGlobalBoot } from '../../../lib/useGlobalBoot';
 import { useAppStore } from '../../../store/useAppStore';
-import { isPartnerPortalUser } from '../../../lib/permissions';
+import { isPartnerPortalUser, isPartnerOnlyIdentity } from '../../../lib/permissions';
 import { HomeWorkspace } from '../home/HomeWorkspace';
 import { MobileTaskWorkspace } from '../tasks/MobileTaskWorkspace';
 import { AppWorkspace } from '../app/AppWorkspace';
@@ -141,6 +141,15 @@ function UnderDevelopmentPage({ title }: { title: string }) {
 /** Mobile-protected layout with global boot (mirrors desktop ProtectedLayout) */
 function MobileProtectedLayout() {
   useGlobalBoot();
+  const user = useAppStore((s) => s.user);
+  // Root cause fix (desktop parity — see routes.tsx's ProtectedLayout for the
+  // full chain): a Channel Partner was never excluded from the internal
+  // mobile shell, only the reverse direction was guarded
+  // (MobilePartnerPortalLayout below). Redirecting here is symmetric with
+  // that existing guard and needs no per-route change.
+  if (user && isPartnerOnlyIdentity(user.role, user.isSuperAdmin)) {
+    return <Navigate to="/partner" replace />;
+  }
   return (
     <ProtectedRoute>
       <MobileLayout />

@@ -13,7 +13,7 @@ import { SuperAdminRoute } from '../../components/auth/SuperAdminRoute';
 import { useGlobalBoot }  from '../../lib/useGlobalBoot';
 import { ErrorBoundary }  from '../../components/shared/ErrorBoundary';
 import { useAppStore }    from '../../store/useAppStore';
-import { isPartnerPortalUser } from '../../lib/permissions';
+import { isPartnerPortalUser, isPartnerOnlyIdentity } from '../../lib/permissions';
 import PartnerLayout      from '../../components/partner/PartnerLayout';
 
 // ── Lazy page imports (route-level code splitting) ────────────
@@ -188,6 +188,21 @@ function LegacyLeadRedirect() {
 // ── Protected layout wrapper ──────────────────────────────────
 function ProtectedLayout() {
   useGlobalBoot();
+  const user = useAppStore((s) => s.user);
+  // Root cause fix: a Channel Partner (role 'Partner') was never excluded
+  // from the internal app shell — only the REVERSE direction was guarded
+  // (PartnerPortalLayout below blocks non-Partners from /partner/*). Nothing
+  // stopped a signed-in Partner from reaching internal routes like /leads
+  // directly (e.g. via the Home dashboard's own "New Lead" quick action),
+  // where RoleRoute's module-permission check passes for them too — the
+  // seeded Partner role legitimately holds `leads:{view,create}` for their
+  // OWN Partner Portal flow (see isPartnerOnlyIdentity's doc comment for the
+  // full chain). Redirecting here — the single entry point for every
+  // internal route — is symmetric with PartnerPortalLayout's existing guard
+  // and needs no per-route change.
+  if (user && isPartnerOnlyIdentity(user.role, user.isSuperAdmin)) {
+    return <Navigate to="/partner" replace />;
+  }
   return (
     <ProtectedRoute>
       <Layout />

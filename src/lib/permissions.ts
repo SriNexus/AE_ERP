@@ -288,6 +288,33 @@ export function isPartnerPortalUser(role?: string | UserRole | null, isSuperAdmi
   return resolved === 'Partner';
 }
 
+/**
+ * Whether a user must be CONFINED to the Partner Portal (`/partner/*`) and
+ * must never reach the internal app shell/routes (Home, Leads, Customers, ...).
+ *
+ * The counterpart to isPartnerPortalUser() above, which answers "who MAY
+ * enter /partner/*" (admitting super-admin oversight too) — this answers
+ * "who must NEVER leave it." Root cause this closes: the seeded Partner role
+ * (roleBootstrap.ts) grants `leads: {view,create}` / `customers` / `projects`
+ * / etc. so the Partner Portal's OWN self-scoped reads/writes are authorized
+ * — but RoleRoute's module-permission check (usePermissions().canView) can't
+ * distinguish "holds this module's permission for their own Partner Portal
+ * flow" from "is an internal Sales/Admin actor" — so a signed-in Partner
+ * could reach the INTERNAL /leads, /customers, /projects, etc. by direct
+ * navigation (nothing about ProtectedLayout/MobileProtectedLayout excluded
+ * them), landing on the same "Assign To (Sales Team)" / round-robin
+ * auto-assignment UI built for internal Sales/Admin users — exposing real
+ * internal staff names and letting an external partner assign a lead to any
+ * of them. isSuperAdmin is excluded explicitly (never confine an oversight
+ * account, even though isPartnerPortalUser's OR-bypass would admit them to
+ * the portal too) so a future account that is both Partner AND super-admin
+ * keeps full internal access.
+ */
+export function isPartnerOnlyIdentity(role?: string | UserRole | null, isSuperAdmin?: boolean): boolean {
+  if (isSuperAdmin === true) return false;
+  return resolveCompatibleRole(role) === 'Partner';
+}
+
 export function getModuleVisibility(module: Module, role?: UserRole | string): Visibility {
   const state = useAppStore.getState();
   const rawRole = role ?? state.user?.role;
