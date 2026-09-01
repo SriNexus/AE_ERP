@@ -9,22 +9,28 @@ import {
 import { COLLECTIONS, db } from './firebase';
 import { updateDocById } from './firestore';
 import { isHiddenOwnerRecord } from './ownerAccess';
+import { isSalesEligibleRole } from './salesTeam';
 
 type Assignee = {
   userId: string;
   name: string;
 };
 
-export async function getNextAssignee(companyId: string, roleFilter = 'Sales'): Promise<Assignee> {
+export async function getNextAssignee(companyId: string): Promise<Assignee> {
+  // Fetch every company user once and filter client-side via
+  // isSalesEligibleRole(), the same pattern Leads.tsx's own `salesUsers`
+  // dropdown already uses — a single Firestore `where('role','==','Sales')`
+  // query can't recognize a data-driven role like "Sales Executive" (see
+  // lib/salesTeam.ts for why a fixed role-name filter silently excludes real
+  // Sales teams whenever the role isn't named exactly the seeded default).
   const usersSnap = await getDocs(query(
     collection(db, COLLECTIONS.USERS),
     where('companyId', '==', companyId),
-    where('role', '==', roleFilter)
   ));
 
   const users = usersSnap.docs
     .map((snap) => ({ id: snap.id, ...snap.data() } as Record<string, any>))
-    .filter((user) => !isHiddenOwnerRecord(user) && user.isDeleted !== true && user.status !== 'Inactive')
+    .filter((user) => isSalesEligibleRole(user.role, user.department) && !isHiddenOwnerRecord(user) && user.isDeleted !== true && user.status !== 'Inactive')
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
 
   if (users.length === 0) {

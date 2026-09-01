@@ -284,6 +284,16 @@ export interface PartnerCreateLeadInput {
   notes?: string;
   partnerId: string;
   partnerName: string;
+  // Optional — the partner may pick a company Sales Person to route the lead
+  // to directly (see components/partner/PartnerCreateLeadModal.tsx). When
+  // omitted, the lead is created unassigned, exactly as before: the existing
+  // notifyRoleUsers(['Admin','Sales'], ...) blanket notification below is
+  // still how the company is alerted, and an Admin/Sales user triages it
+  // manually. Sales Person assignment is therefore never required to create
+  // a partner lead — only an added convenience when the partner knows who
+  // should own it.
+  assignedToId?: string;
+  assignedToName?: string;
 }
 
 /**
@@ -329,6 +339,11 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     partnerName: input.partnerName,
     // Store the partner's user UID so notifications reach them
     userId: state.user?.id || '',
+    // Optional Sales Person the partner chose (see PartnerCreateLeadInput
+    // comment above) — stored under the same assignedToId/assignedToName
+    // fields the internal Leads.tsx flow uses, so the lead is indistinguishable
+    // from an internally-assigned one downstream (Transfer, filters, reports).
+    ...(input.assignedToId ? { assignedToId: input.assignedToId, assignedToName: input.assignedToName || '' } : {}),
     // Partner workflow fields
     commissionStatus: 'eligible' as CommissionStatus,
     installationStatus: 'pending' as InstallationStatus,
@@ -364,6 +379,21 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     leadId,
     notificationCompanyId,
   );
+
+  // Also notify the specific Sales Person the partner chose, if any — the
+  // role-blanket notification above still fires unconditionally so the lead
+  // is never silently missed if the chosen person is unavailable.
+  if (input.assignedToId) {
+    void sendNotification(
+      input.assignedToId,
+      NotificationType.LEAD_ASSIGNED,
+      'Lead assigned',
+      `${input.partnerName} assigned you a new lead: ${input.name || input.phone}`,
+      'lead',
+      leadId,
+      notificationCompanyId,
+    ).catch(() => {});
+  }
 
   return leadId;
 }

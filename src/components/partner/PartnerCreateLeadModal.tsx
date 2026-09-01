@@ -6,14 +6,17 @@
  * Partners can set: name, phone, email, city, state, notes.
  */
 
-import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Target, Plus } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Modal } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
-import { Input, Textarea, FormSection, FormRow } from '../../components/ui/Input';
+import { Input, Select, Textarea, FormSection, FormRow } from '../../components/ui/Input';
 import { partnerCreateLead } from '../../lib/partnerLeadIntegration';
+import { getAll } from '../../lib/firestore';
+import { COLLECTIONS } from '../../lib/firebase';
+import { filterEligibleSalesUsers } from '../../lib/salesTeam';
 import { queryKeys } from '../../lib/queryKeys';
 import { useAppStore } from '../../store/useAppStore';
 import type { ChannelPartner } from '../../features/channel-partner/types';
@@ -31,6 +34,7 @@ const FORM_DEFAULT = {
   city: '',
   state: '',
   notes: '',
+  assignedToId: '',
 };
 
 type FormData = typeof FORM_DEFAULT;
@@ -41,11 +45,29 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
   const keys = queryKeys.forCompany(activeCompanyId);
   const [form, setForm] = useState<FormData>({ ...FORM_DEFAULT });
 
+  // Eligible Sales Persons for this partner's own company — same
+  // company-scoped users read (via activeCompanyId) already used by
+  // PartnerLeads.tsx for the leads list itself, filtered with the shared
+  // isSalesEligibleRole() predicate (lib/salesTeam.ts) so a company whose
+  // Sales role isn't literally named "Sales" (e.g. "Sales Executive") still
+  // shows real results here — the same fix applied to the internal
+  // round-robin auto-assignment (lib/roundRobin.ts). Never queries across
+  // companies/partners: getAll() is scoped to the partner's own
+  // activeCompanyId, identical to every other query in this file.
+  const { data: companyUsers = [], isLoading: usersLoading } = useQuery({
+    queryKey: queryKeys.global.users,
+    queryFn: () => getAll(COLLECTIONS.USERS),
+    staleTime: 60_000,
+    enabled: open && Boolean(activeCompanyId),
+  });
+  const salesUsers = useMemo(() => filterEligibleSalesUsers(companyUsers as any[]), [companyUsers]);
+
   const createLead = useMutation({
     mutationFn: async (data: FormData) => {
       if (!partner?.id || !partner?.firmName) {
         throw new Error('Partner profile not found. Cannot create lead.');
       }
+      const chosen = data.assignedToId ? salesUsers.find((u: any) => u.id === data.assignedToId) : undefined;
       return partnerCreateLead({
         name: data.name,
         phone: data.phone,
@@ -55,6 +77,8 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
         notes: data.notes,
         partnerId: partner.id,
         partnerName: partner.firmName,
+        assignedToId: data.assignedToId || undefined,
+        assignedToName: chosen ? String(chosen.name || '') : undefined,
       });
     },
     onSuccess: (leadId) => {
@@ -136,6 +160,28 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
               placeholder="State"
             />
           </FormRow>
+        </FormSection>
+
+        <FormSection title="Assignment (Optional)">
+          {usersLoading ? (
+            <p className="text-xs text-[var(--color-text-muted)]">Loading Sales Persons…</p>
+          ) : salesUsers.length > 0 ? (
+            <>
+              <Select
+                label="Sales Person"
+                value={form.assignedToId}
+                onChange={(e) => setForm((f) => ({ ...f, assignedToId: e.target.value }))}
+                options={[{ label: 'Unassigned — company will assign', value: '' }, ...salesUsers.map((u: any) => ({ label: String(u.name || u.id), value: u.id }))]}
+              />
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Optional — pick a Sales Person if you already know who should own this lead. Leave unassigned and the company will assign it.
+              </p>
+            </>
+          ) : (
+            <p className="text-xs text-[var(--color-text-muted)]">
+              No Sales Persons are available for assignment. Please contact your Company Admin. Your lead will still be created and routed to your Company for follow-up.
+            </p>
+          )}
         </FormSection>
 
         <FormSection title="Notes">
