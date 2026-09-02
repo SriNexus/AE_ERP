@@ -138,7 +138,17 @@ function normalizedKey(value: unknown) {
   return String(value || '').trim().toLowerCase();
 }
 
-function resolveCompatibleRole(role?: string | UserRole | null): string | null {
+/**
+ * Resolve a raw role string to the name of the role DOCUMENT whose permissions
+ * govern it. An exact per-company role doc wins; otherwise the static
+ * EXACT_ROLE_COMPATIBILITY alias table maps data-driven/legacy names
+ * ("Sales Executive" -> "Sales", "TL" -> "Manager", …). Exported so
+ * useGlobalBoot's roleData resolution stays consistent with canDo()/
+ * getModuleVisibility() — a user whose role has only an alias (no exact doc)
+ * must still get the aliased role's permissions AND visibility, not a
+ * fail-closed `self`/`null` (RC-A: leads invisible to a "Sales Executive").
+ */
+export function resolveCompatibleRole(role?: string | UserRole | null): string | null {
   const key = normalizedKey(role);
   if (!key) return null;
   const cache = useAppStore.getState().permissionCache;

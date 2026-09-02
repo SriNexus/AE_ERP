@@ -22,6 +22,7 @@ export default defineConfig({
       'src/lib/__tests__/stockAdjustTransaction.emulator.test.ts',
       'src/lib/__tests__/sensitiveCollectionsRoleEnforcement.emulator.test.ts',
       'src/lib/__tests__/biometricFaceReferences.emulator.test.ts',
+      'src/lib/__tests__/leadCreationProjectionWrites.emulator.test.ts',
     ],
   },
 });

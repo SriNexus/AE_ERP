@@ -15,6 +15,7 @@
 
 import { updateDocById, genId, createDocWithId, getOne, getAll, resolveWriteCompanyId } from './firestore';
 import { resolveCurrentPartnerDocId } from './partnerOwnership';
+import { fetchAssignableSalesUsers } from './salesTeam';
 import { COLLECTIONS } from './firebase';
 import { useAppStore } from '../store/useAppStore';
 import { logActivity } from './workflow';
@@ -284,14 +285,17 @@ export interface PartnerCreateLeadInput {
   notes?: string;
   partnerId: string;
   partnerName: string;
-  // Optional — the partner may pick a company Sales Person to route the lead
-  // to directly (see components/partner/PartnerCreateLeadModal.tsx). When
-  // omitted, the lead is created unassigned, exactly as before: the existing
-  // notifyRoleUsers(['Admin','Sales'], ...) blanket notification below is
-  // still how the company is alerted, and an Admin/Sales user triages it
-  // manually. Sales Person assignment is therefore never required to create
-  // a partner lead — only an added convenience when the partner knows who
-  // should own it.
+  // The Sales Person the partner explicitly assigned the lead to (see
+  // components/partner/PartnerCreateLeadModal.tsx — the modal requires a
+  // selection whenever the company has any assignable Sales Person). Always
+  // re-validated server-side here against fetchAssignableSalesUsers(): the id
+  // must resolve to an ACTIVE, sales-eligible user of THIS company — a tampered
+  // payload cannot assign a lead to an arbitrary user, a deactivated user, or
+  // anyone in another company/tenant. Omitted only when the company genuinely
+  // has zero assignable Sales Persons; the lead is then created unassigned and
+  // the notifyRoleUsers(['Admin','Sales'], ...) blanket notification below is
+  // how the company is alerted to triage it. There is no implicit / round-robin
+  // assignment in the Channel Partner flow.
   assignedToId?: string;
   assignedToName?: string;
 }
@@ -324,6 +328,25 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     throw new Error('Lead partner attribution does not match the authenticated partner account.');
   }
 
+  // Server-side (client-lib) validation of the partner-chosen Sales Person.
+  // fetchAssignableSalesUsers() is company-scoped (where('companyId','==',...))
+  // and already applies the active / not-deleted / sales-eligible / not-owner
+  // predicate — so a supplied assignedToId that is not in this set (an
+  // arbitrary user, a deactivated user, or anyone from another company/tenant)
+  // is rejected outright before the lead is written. When no id is supplied the
+  // lead is created unassigned (only reachable when the company has zero
+  // assignable Sales Persons — the modal otherwise forces a choice).
+  let resolvedAssignee: { id: string; name: string } | undefined;
+  const suppliedAssigneeId = String(input.assignedToId || '').trim();
+  if (suppliedAssigneeId) {
+    const eligible = await fetchAssignableSalesUsers(companyId);
+    const match = eligible.find((u) => String(u.id) === suppliedAssigneeId);
+    if (!match) {
+      throw new Error('Selected Sales Person is not a valid, active member of your company.');
+    }
+    resolvedAssignee = { id: String(match.id), name: String(match.name || input.assignedToName || '') };
+  }
+
   const leadDoc = {
     id: leadId,
     companyId,
@@ -339,11 +362,12 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     partnerName: input.partnerName,
     // Store the partner's user UID so notifications reach them
     userId: state.user?.id || '',
-    // Optional Sales Person the partner chose (see PartnerCreateLeadInput
-    // comment above) — stored under the same assignedToId/assignedToName
-    // fields the internal Leads.tsx flow uses, so the lead is indistinguishable
-    // from an internally-assigned one downstream (Transfer, filters, reports).
-    ...(input.assignedToId ? { assignedToId: input.assignedToId, assignedToName: input.assignedToName || '' } : {}),
+    // The validated Sales Person the partner chose — stored under the same
+    // assignedToId/assignedToName fields the internal Leads.tsx flow uses, so
+    // the lead is indistinguishable from an internally-assigned one downstream
+    // (Transfer, filters, reports). Name is taken from the resolved user
+    // document, never trusted from the client payload.
+    ...(resolvedAssignee ? { assignedToId: resolvedAssignee.id, assignedToName: resolvedAssignee.name } : {}),
     // Partner workflow fields
     commissionStatus: 'eligible' as CommissionStatus,
     installationStatus: 'pending' as InstallationStatus,
@@ -383,9 +407,9 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
   // Also notify the specific Sales Person the partner chose, if any — the
   // role-blanket notification above still fires unconditionally so the lead
   // is never silently missed if the chosen person is unavailable.
-  if (input.assignedToId) {
+  if (resolvedAssignee) {
     void sendNotification(
-      input.assignedToId,
+      resolvedAssignee.id,
       NotificationType.LEAD_ASSIGNED,
       'Lead assigned',
       `${input.partnerName} assigned you a new lead: ${input.name || input.phone}`,

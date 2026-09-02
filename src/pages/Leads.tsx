@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useDeferredValue } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getAll, createDocWithId, genId, fmtDate } from '../lib/firestore';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { genId, fmtDate } from '../lib/firestore';
 import { batchCreateLeadProjections, useLeads, useSaveLead } from '../features/leads/hooks/useLeads';
 import { deleteProjectionWithEntity, updateProjectionWithEntity } from '../lib/entityProjection';
 import { COLLECTIONS } from '../lib/firebase';
@@ -36,6 +36,7 @@ import {
   FollowupBadge,
 } from '../features/leads/components/LeadWorkspaceParts';
 import { LeadWorkspaceDialogs } from '../features/leads/components/LeadWorkspaceDialogs';
+import { useAssignableSalesUsers } from '../hooks/useAssignableSalesUsers';
 import {
   Plus, Trash2, Target, Phone, Calendar, RefreshCw,
   UploadCloud, Download,
@@ -300,15 +301,10 @@ export default function Leads() {
 
   // ── Queries
   const { data: leads = [], isLoading, refetch, loadMore, hasMore, loadingMore } = useLeads();
-  const { data: users = [] } = useQuery({
-    queryKey: ['users'], queryFn: () => getAll(COLLECTIONS.USERS), staleTime: 300000,
-  });
-
-  const salesUsers = useMemo(() =>
-    (users as any[])
-      .filter(u => ['Sales','Executive','BDE','BDM','Manager','TL'].includes(u.role) && u.status !== 'Inactive' && !u.isDeleted)
-      .sort((a, b) => a.name.localeCompare(b.name)),
-    [users]);
+  // Canonical company-scoped Sales Executive roster — every active,
+  // sales-eligible user in this tenant, never narrowed by the current user's
+  // own role / ownership visibility / assignments (see useAssignableSalesUsers).
+  const { data: salesUsers } = useAssignableSalesUsers();
 
   // ── Mutations ─────────────────────────────────────────────────────────────
   // Creation is routed through the shared useSaveLead (also used by
@@ -527,7 +523,7 @@ export default function Leads() {
     syncQueueParams({ q: '', status: '', source: '', owner: '', date: 'all', from: '', to: '', kpi: '', stale: '', overdue: '', page: 1, partnerId: '' });
   }
 
-  const assignOptions = [{ label: 'All Assigned', value: '' }, ...salesUsers.map(u => ({ label: u.name, value: u.id }))];
+  const assignOptions = [{ label: 'All Assigned', value: '' }, ...salesUsers.map(u => ({ label: String(u.name ?? u.id), value: u.id }))];
 
     const leadScores = useMemo(() => {
     const map = new Map<string, { score: number; band: string; confidence: string }>();

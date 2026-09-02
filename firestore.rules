@@ -1317,6 +1317,41 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.userId is string
         && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.email == request.auth.token.email
         && usersUpdateAllowed(userId);
+      // Contact-identity role-attach (the UPDATE half of the isContactIdentityRole
+      // create exception above). The internal Lead/Customer/Employee create flow
+      // (lib/entityProjection.ts attachUserId -> lib/userIdentity.ts
+      // createOrResolveUserByPhone -> attachUserRole) first CREATEs a phone-keyed
+      // master-identity users doc (allowed by the contact-identity `create`
+      // branch), then immediately UPDATEs it to merge the projection's role into
+      // roles[]/linkedModules[]. Without a matching update branch that second
+      // write was denied for every non-Admin / non-GroupAdmin actor (Sales,
+      // Manager, ...), leaving an orphan users/MUSR-* doc and surfacing a raw
+      // "Missing or insufficient permissions" while the Lead itself was never
+      // written — a non-atomic partial failure (emulator-reproduced,
+      // leadCreationProjectionWrites.emulator.test.ts). Scoped exactly to that
+      // flow and no wider than the create exception:
+      //   - the EXISTING doc must already be a contact identity (never a staff
+      //     account — role/isSuperAdmin/status cannot be changed here)
+      //   - the actor is any active, same-company signed-in user, anchored on
+      //     their self-owned auth map (email == verified token email) whose
+      //     companyId equals the target doc's companyId (no cross-tenant reach)
+      //   - only the projection-owned fields may change (companyId / role /
+      //     groupId / isSuperAdmin / status / channelPartnerId are all immutable)
+      allow update: if actorIsActive() && signedIn()
+        && isContactIdentityRole(resource.data)
+        && isContactIdentityRole(request.resource.data)
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.companyId == resource.data.companyId
+        && groupIdUnchanged()
+        && channelPartnerLinkUnchanged()
+        && request.resource.data.get('isSuperAdmin', false) == resource.data.get('isSuperAdmin', false)
+        && request.resource.data.get('status', '') == resource.data.get('status', '')
+        && resource.data.email != 'shreeniwas.tripathi0@gmail.com'
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['roles', 'linkedModules', 'entityId', 'userId', 'masterUserId', 'name', 'email', 'phone', 'updatedAt', 'updatedBy'])
+        && exists(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid))
+        && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.email == request.auth.token.email
+        && get(/databases/$(database)/documents/user_auth_maps/$(request.auth.uid)).data.companyId == resource.data.companyId;
       allow delete: if false;
     }
 
@@ -2098,8 +2133,32 @@ service cloud.firestore {
       // audit-log write auditLogger.ts fires right after every successful
       // user creation) hit the same 1000-expression budget denial here. A
       // ternary is guaranteed lazy: exactly one arm evaluates.
+      //
+      // Self-authored activity entry (lib/workflow.ts logActivity, called on
+      // EVERY Lead/Customer/Order/... mutation by EVERY role): a non-Admin
+      // actor's own action log was denied here and only survived because
+      // logActivity swallows the error — so the audit trail for anything a
+      // Sales/Manager/Partner did was silently lost, and the raw
+      // "Missing or insufficient permissions" surfaced in the console
+      // (real-account repro, 2026-09-02). The added branch is deliberately
+      // narrow and cannot forge history: append-only (update/delete stay
+      // false), the entry's `userId` MUST equal the acting identity (no
+      // impersonation), and it is company-scoped (auth-map companyId == the
+      // entry's companyId — no cross-tenant reach). Reads stay Admin/
+      // GroupAdmin-only, so a non-Admin can write their own trail but never
+      // browse the log. LEAN: reads the self-owned auth map directly (the
+      // actorGroupId()/actorUserId() pattern) — no currentUser()/sameCompany()
+      // re-entry, keeping this rule well under the expression budget.
       allow create: if actorIsActive()
-        && (isGroupAdmin() ? sameGroup(request.resource.data) : (isAdmin() && sameCompany(request.resource.data)))
+        && (
+          (isGroupAdmin() ? sameGroup(request.resource.data) : (isAdmin() && sameCompany(request.resource.data)))
+          || (
+            hasAuthMap()
+            && request.resource.data.userId == get(authMapPath()).data.userId
+            && hasCompanyId(request.resource.data)
+            && request.resource.data.companyId == get(authMapPath()).data.companyId
+          )
+        )
         && groupIdMatchesCompany(request.resource.data);
       allow update, delete: if false;
     }

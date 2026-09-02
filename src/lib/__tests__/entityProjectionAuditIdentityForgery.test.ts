@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const mockCreateOrResolveUserByPhone = vi.fn();
+const mockCreateOrResolveUserByPhone = vi.fn().mockResolvedValue({ id: 'MUSR-identity-1', created: false });
 const mockGetProjectionRole = vi.fn((...args: any[]) => {
   const col = args[0] as string;
   return { collection: col, role: col === 'users' ? 'User' : 'Lead', ownerField: 'userId' };

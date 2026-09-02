@@ -20,6 +20,8 @@
  * "sales" as a whole word — covers "Sales Executive", "Sales Manager", etc.
  * without inventing a new per-company configuration surface.
  */
+import { collection, getDocs, query, where } from 'firebase/firestore';
+import { COLLECTIONS, db } from './firebase';
 import { isHiddenOwnerRecord } from './ownerAccess';
 
 const SALES_ROLE_SHORT_NAMES = new Set(['sales', 'executive', 'bde', 'bdm', 'manager', 'tl']);
@@ -47,4 +49,34 @@ export function filterEligibleSalesUsers<T extends SalesEligibleUser>(users: T[]
   return users
     .filter((u) => isSalesEligibleRole(u.role, u.department) && u.status !== 'Inactive' && u.isDeleted !== true && !isHiddenOwnerRecord(u))
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+}
+
+/**
+ * Canonical fetch of the Sales Persons a lead may legitimately be assigned to
+ * within ONE company.
+ *
+ * Scope: a single explicit `where('companyId','==',companyId)` equality — the
+ * SAME query shape getNextAssignee() (lib/roundRobin.ts) and
+ * getNotificationUsersByRoles() (lib/notifications.ts) already use. Tenant
+ * isolation is therefore structural here AND independently enforced by the
+ * `users` list rule in firestore.rules (which only proves a same-company list
+ * query — a forged companyId is denied server-side). Status/active/soft-delete
+ * and the hidden-owner record are removed by filterEligibleSalesUsers().
+ *
+ * Deliberately a RAW company-scoped read, NOT getAll(COLLECTIONS.USERS):
+ * getAll() runs applyAccessFilters(), whose record-level `self` visibility for
+ * the Partner role (that role holds no `users` module grant) strips every
+ * Sales-rep user document out before this predicate can see it — the root
+ * cause of the Channel Partner "Add Lead" Sales Person selector rendering an
+ * empty list and the partner being left with no choice but implicit
+ * company-side assignment.
+ */
+export async function fetchAssignableSalesUsers(companyId: string): Promise<SalesEligibleUser[]> {
+  if (!companyId) return [];
+  const snap = await getDocs(query(
+    collection(db, COLLECTIONS.USERS),
+    where('companyId', '==', companyId),
+  ));
+  const users = snap.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as SalesEligibleUser));
+  return filterEligibleSalesUsers(users);
 }

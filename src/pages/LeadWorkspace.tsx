@@ -29,7 +29,8 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQueryClient, useMutation } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { useLeads, useLeadsUsers } from '../features/leads/hooks/useLeads';
+import { useLeads } from '../features/leads/hooks/useLeads';
+import { useAssignableSalesUsers } from '../hooks/useAssignableSalesUsers';
 import { logActivity } from '../lib/workflow';
 import { queryKeys } from '../lib/queryKeys';
 import { useAppStore, useCurrentUser } from '../store/useAppStore';
@@ -189,12 +190,10 @@ function WorkspaceContent() {
   }, []);
 
   // ── Transfer Lead — assignment change ONLY (never a status change). ──
-  const { data: workspaceUsers = [] } = useLeadsUsers();
-  const eligibleTransferUsers = useMemo(() =>
-    (workspaceUsers as any[])
-      .filter((u) => ['Sales', 'Executive', 'BDE', 'BDM', 'Manager', 'TL'].includes(u.role) && u.status !== 'Inactive' && !u.isDeleted)
-      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))),
-    [workspaceUsers]);
+  // Canonical company-scoped Sales Executive roster (see useAssignableSalesUsers)
+  // — any active sales-eligible user in this tenant may be a transfer target,
+  // not narrowed by the viewer's own role / ownership visibility.
+  const { data: eligibleTransferUsers } = useAssignableSalesUsers();
   const [transferOpen, setTransferOpen] = useState(false);
   const [transferUserId, setTransferUserId] = useState('');
 

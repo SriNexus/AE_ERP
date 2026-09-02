@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type React from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Download,
@@ -17,7 +17,8 @@ import { Badge, Button, Card, ConfirmDialog, Input, Modal, Pagination, Select, T
 import { scoreLead } from '../../../lib/leadScoring';
 import { LEAD_FORM_DEFAULT, type LeadForm, SOURCE_OPTIONS, STATUS_OPTIONS, useDeleteLead, useLeads, useSaveLead } from '../../../features/leads/hooks/useLeads';
 import { COLLECTIONS } from '../../../lib/firebase';
-import { createDocWithId, fmtDate, genId, getAll, toInputDate } from '../../../lib/firestore';
+import { createDocWithId, fmtDate, genId, toInputDate } from '../../../lib/firestore';
+import { useAssignableSalesUsers } from '../../../hooks/useAssignableSalesUsers';
 import { updateProjectionWithEntity } from '../../../lib/entityProjection';
 import { convertLeadToCustomer } from '../../../lib/leadWorkflow';
 import { logActivity } from '../../../lib/workflow';
@@ -154,11 +155,10 @@ export function MobileLeadWorkspace({ mode }: { mode: Mode }) {
   const perms = usePermissions();
   const { data: leads = [], isLoading, error } = useLeads();
   const deleteLead = useDeleteLead();
-  const { data: users = [] } = useQuery({
-    queryKey: ['users'],
-    queryFn: () => getAll(COLLECTIONS.USERS),
-    staleTime: 300000,
-  });
+  // Canonical company-scoped Sales Executive roster (see useAssignableSalesUsers)
+  // — every active sales-eligible user in this tenant, not narrowed by the
+  // viewer's own role / ownership visibility / assignments.
+  const { data: salesUsers } = useAssignableSalesUsers();
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(() => Math.max(1, Number(params.get('page')) || 1));
@@ -199,13 +199,6 @@ export function MobileLeadWorkspace({ mode }: { mode: Mode }) {
     setDirty(false);
     setFormOpen(true);
   }, [mode, createParam]);
-
-  const salesUsers = useMemo(
-    () => (users as any[])
-      .filter((entry) => ['Sales', 'Executive', 'BDE', 'BDM', 'Manager', 'TL'].includes(entry.role) && entry.status !== 'Inactive' && !entry.isDeleted)
-      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))),
-    [users],
-  );
 
   const filters = useMemo<LeadFilters>(() => ({
     search: params.get('q') || '',

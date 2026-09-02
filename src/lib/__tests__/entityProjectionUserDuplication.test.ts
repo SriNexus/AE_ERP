@@ -82,7 +82,7 @@ vi.mock('../../store/useAppStore', () => ({
 describe('createProjectionWithUserId — duplicate-user regression', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockCreateOrResolveUserByPhone.mockResolvedValue('MUSR-company-demo-neozy-9876543210');
+    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
     mockCreateOrResolveEntity.mockResolvedValue({ entity: { id: 'ENT-001' }, matched: false });
     mockGetOne.mockResolvedValue({ id: 'authId-001', name: 'NITESH' });
   });

@@ -138,11 +138,39 @@ function projectionUpdateWithoutIdentityOverwrite(payload: Record<string, unknow
   );
 }
 
-async function attachUserId<T extends Record<string, unknown>>(col: ProjectionCollection, id: string, payload: T): Promise<T & { userId: string }> {
+async function attachUserId<T extends Record<string, unknown>>(
+  col: ProjectionCollection,
+  id: string,
+  payload: T,
+): Promise<T & { userId: string; __masterIdentityId: string; __masterIdentityCreated: boolean }> {
   const config = getProjectionRole(col);
   const preferredId = col === COLLECTIONS.USERS ? id : undefined;
-  const userId = await createOrResolveUserByPhone(payload, config.role, preferredId);
-  return { ...payload, [config.ownerField]: userId } as T & { userId: string };
+  const resolved = await createOrResolveUserByPhone(payload, config.role, preferredId);
+  return {
+    ...payload,
+    [config.ownerField]: resolved.id,
+    // Internal, stripped by the caller before any Firestore write — carries
+    // enough to compensate an orphaned master-identity doc on partial failure.
+    __masterIdentityId: resolved.id,
+    __masterIdentityCreated: resolved.created,
+  } as T & { userId: string; __masterIdentityId: string; __masterIdentityCreated: boolean };
+}
+
+// Mirrors compensateOrphanedEntity(): a master-identity users/MUSR-* doc that
+// THIS creation flow brought into existence (never a resolved pre-existing
+// contact — shared identities are never touched) is hard-deleted if a later
+// write in the same createProjectionWithUserId() call throws. Closes the
+// non-atomic partial-failure the forensic audit found: W1 (users create) had
+// no rollback, so any downstream denial left an orphan users record while the
+// Lead itself was never written.
+async function compensateOrphanedMasterIdentity(userId: string, justCreated: boolean): Promise<void> {
+  if (!justCreated || !userId) return;
+  try {
+    await hardDelete(COLLECTIONS.USERS, userId);
+  } catch {
+    // Best-effort — the ORIGINAL error is what the caller must see (matching
+    // compensateOrphanedEntity / authProvisioning.ts rollback precedent).
+  }
 }
 
 /**
@@ -219,9 +247,32 @@ export async function createProjectionWithUserId<T extends Record<string, unknow
   payload: T
 ) {
   const hydrated = hydrateCreatePayload({ ...payload, id });
-  const withUser = shouldResolveMasterIdentity(col) ? await attachUserId(col, id, hydrated) : hydrated;
-  const { entityJustCreated, ...withEntity } = await attachEntityId(col, withUser);
+
+  // TXN-002 (forensic audit — non-atomic Lead creation): the master-identity
+  // (W1/W2) and entity (W3) writes are performed OUTSIDE the try below in the
+  // original code, so any failure there (or in the primary write W4) left an
+  // orphan users/MUSR-* doc and a raw permission error while the Lead was never
+  // created. All of W1–W4 are now inside one try, and BOTH a just-created
+  // master identity AND a just-created entity are compensated on any failure.
+  let masterIdentityId = '';
+  let masterIdentityCreated = false;
+  let entityId = '';
+  let entityJustCreated = false;
   try {
+    let withUser: Record<string, unknown> = hydrated;
+    if (shouldResolveMasterIdentity(col)) {
+      const attached = await attachUserId(col, id, hydrated);
+      const { __masterIdentityId, __masterIdentityCreated, ...rest } = attached;
+      masterIdentityId = __masterIdentityId;
+      masterIdentityCreated = __masterIdentityCreated;
+      withUser = rest;
+    }
+
+    const attachedEntity = await attachEntityId(col, withUser);
+    entityId = attachedEntity.entityId;
+    entityJustCreated = attachedEntity.entityJustCreated;
+    const { entityJustCreated: _drop, ...withEntity } = attachedEntity;
+
     if (col === COLLECTIONS.USERS) {
       // users write path bypasses the groupId-stamping write helpers (USERS is
       // excluded from the generic auto-stamp by design — it has its own groupId
@@ -232,7 +283,8 @@ export async function createProjectionWithUserId<T extends Record<string, unknow
     }
     return await createDocWithId(col, id, withEntity);
   } catch (error) {
-    await compensateOrphanedEntity(withEntity.entityId, entityJustCreated);
+    if (entityId) await compensateOrphanedEntity(entityId, entityJustCreated);
+    await compensateOrphanedMasterIdentity(masterIdentityId, masterIdentityCreated);
     throw error;
   }
 }
@@ -244,7 +296,7 @@ export async function batchCreateProjectionsWithUserId<T extends Record<string, 
   const payload = await Promise.all(items.map(async (item) => {
     const id = stringValue(item.id);
     const hydrated = hydrateCreatePayload({ ...item, id });
-    const withUser = await attachUserId(col, id, hydrated);
+    const { __masterIdentityId: _mid, __masterIdentityCreated: _mc, ...withUser } = await attachUserId(col, id, hydrated);
     const { entityJustCreated: _entityJustCreated, ...withEntity } = await attachEntityId(col, withUser);
     return withEntity;
   }));

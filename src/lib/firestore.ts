@@ -15,6 +15,28 @@ import { formatGeneralDate, formatGeneralNumber, getGeneralSettingsRuntime } fro
 import { filterManageableUsers } from './ownerAccess';
 import { getCachedPartnerDocId, resolveCurrentPartnerDocId } from './partnerOwnership';
 
+/**
+ * The session's canonical tenant. An ORDINARY user (not owner / not
+ * super-admin / not GroupAdmin — none of whom can switch company context) is
+ * always bound to the company on their ERP profile, so a stale persisted
+ * `activeCompanyId` (e.g. a 'company-demo-neozy' left over from a prior demo
+ * session, before useGlobalBoot's tenant-routing effect reconciles it) can
+ * never win and mis-tenant their reads/writes. Owner / Super Admin / GroupAdmin
+ * keep their explicit selection (they legitimately act across companies), and
+ * the 'all' / 'group' sentinels are handled by the callers before this runs.
+ * Deliberately NARROWER than resolveSessionCompanyId() (tenantRouting.ts),
+ * which does not exempt GroupAdmin — the extra exemption here is a safety
+ * margin, never a widening.
+ */
+function boundSessionCompanyId(
+  user: { companyId?: unknown; role?: unknown; isOwner?: boolean; isSuperAdmin?: boolean } | null | undefined,
+  requestedCompanyId: string,
+): string {
+  const canonical = typeof user?.companyId === 'string' ? user.companyId.trim() : '';
+  if (!canonical || user?.isOwner || user?.isSuperAdmin || user?.role === 'GroupAdmin') return requestedCompanyId;
+  return canonical;
+}
+
 export type DocWithId<T = DocumentData> = T & { id: string };
 
 const NOT_CONFIGURED_MSG = 'Firebase is not configured. This application requires a valid Firebase configuration. Sign in with demo@neozy.in on the deployed application, or configure VITE_FIREBASE_* environment variables for local development.';
@@ -52,16 +74,33 @@ function isRealGroupId(id: string | undefined | null): id is string {
  * profile, otherwise the caller must fail closed (see createDoc/createDocWithId).
  * This prevents the Admin companyId='default' defect class: records must not be
  * written under an invalid tenant that the rules then reject.
+ *
+ * Canonical-tenant binding (real-account repro, 2026-09-02): an ORDINARY user
+ * (not owner / not super-admin) can never switch company — they are always
+ * bound to the company on their ERP profile (mirrors resolveSessionCompanyId in
+ * lib/tenantRouting.ts). A stale persisted `activeCompanyId` (e.g. a
+ * 'company-demo-neozy' left over from a prior demo session on the same browser,
+ * BEFORE useGlobalBoot's tenant-routing effect reconciles it once `user` loads)
+ * is "real-looking" and previously won here — so a Lead created in that window
+ * was stamped with the wrong tenant, the Firestore rules' sameCompany() check
+ * denied it, and the write failed / left partial data. For an ordinary user
+ * their own profile companyId is authoritative and closes that window
+ * structurally.
  */
 export function resolveWriteCompanyId(): string {
   const state = useAppStore.getState();
-  return isRealCompanyId(state.activeCompanyId)
-    ? state.activeCompanyId
-    : isRealCompanyId(state.company?.id)
-      ? state.company!.id
-      : isRealCompanyId(state.user?.companyId)
-        ? state.user!.companyId!
-        : '';
+  // Bind to the session's canonical tenant — the SAME rule useGlobalBoot's
+  // tenant-routing effect applies to activeCompanyId (lib/tenantRouting.ts).
+  // In the steady state this equals activeCompanyId for every actor; it only
+  // differs in the pre-boot window (persisted stale activeCompanyId, user just
+  // restored) — exactly the window a mis-tenanted write must not slip through.
+  const bound = boundSessionCompanyId(state.user, String(state.activeCompanyId || ''));
+  if (isRealCompanyId(bound)) return bound;
+  return isRealCompanyId(state.company?.id)
+    ? state.company!.id
+    : isRealCompanyId(state.user?.companyId)
+      ? state.user!.companyId!
+      : '';
 }
 
 /**
@@ -372,9 +411,17 @@ export function companyScopedQuery(colName: string): QueryConstraint[] {
     );
   }
 
-  const companyId = isRealCompanyId(activeCompanyId)
-    ? activeCompanyId
-    : user.companyId;
+  // Canonical-tenant binding (same rule as resolveWriteCompanyId / the boot
+  // tenant-routing effect): an ordinary user's list queries are scoped to their
+  // OWN profile company, never a stale/real-looking persisted activeCompanyId
+  // from a prior session — which would query a foreign tenant, get denied by
+  // the rules, and render the module empty in the pre-boot window.
+  const boundCompanyId = boundSessionCompanyId(user, String(activeCompanyId || ''));
+  const companyId = isRealCompanyId(boundCompanyId)
+    ? boundCompanyId
+    : isRealCompanyId(activeCompanyId)
+      ? activeCompanyId
+      : user.companyId;
 
   if (!companyId || companyId === 'default') {
     if (user.isOwner || user.isSuperAdmin) return [];

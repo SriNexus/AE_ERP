@@ -154,7 +154,7 @@ describe('createProjectionWithUserId — TXN-001 orphan-entity compensation', ()
   });
 
   it('entityJustCreated never leaks into a batchCreate payload either', async () => {
-    mockCreateOrResolveUserByPhone.mockResolvedValue('MUSR-company-demo-neozy-9876543210');
+    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
     mockCreateOrResolveEntity.mockResolvedValue({ entity: { id: 'ENT-NEW-006' }, created: true, matched: false });
     const { batchCreateProjectionsWithUserId } = await import('../entityProjection');
 
@@ -164,5 +164,65 @@ describe('createProjectionWithUserId — TXN-001 orphan-entity compensation', ()
 
     const batchedItems = mockBatchCreate.mock.calls[0][1];
     expect('entityJustCreated' in batchedItems[0]).toBe(false);
+    expect('__masterIdentityId' in batchedItems[0]).toBe(false);
+    expect('__masterIdentityCreated' in batchedItems[0]).toBe(false);
+  });
+});
+
+// TXN-002 (forensic audit — non-atomic Lead creation): the master-identity
+// users/MUSR-* doc created by W1 is now ALSO compensated on any downstream
+// failure — closing the "permission error + orphan users record + Lead
+// missing" contradiction. Mirrors the entity-compensation contract above.
+describe('createProjectionWithUserId — TXN-002 orphan master-identity compensation (Lead path)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetOne.mockResolvedValue({ id: 'PLD-1', name: 'x', entityId: 'ENT-1' });
+    mockUpdateDocById.mockResolvedValue(undefined);
+    mockCreateDocWithId.mockResolvedValue(undefined);
+  });
+
+  const newLead = () => ({ name: 'Ramesh', phone: '9876543210', companyId: 'company-demo-neozy' });
+
+  it('a JUST-CREATED master identity is hard-deleted when the entities write then fails', async () => {
+    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
+    mockCreateOrResolveEntity.mockRejectedValue(new Error('entities create denied'));
+    const { createProjectionWithUserId } = await import('../entityProjection');
+
+    await expect(createProjectionWithUserId('leads', 'PLD-1', newLead())).rejects.toThrow('entities create denied');
+    expect(mockHardDelete).toHaveBeenCalledWith('users', 'MUSR-company-demo-neozy-9876543210');
+  });
+
+  it('a JUST-CREATED master identity AND a JUST-CREATED entity are both hard-deleted when the leads write fails', async () => {
+    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
+    mockCreateOrResolveEntity.mockResolvedValue({ entity: { id: 'ENT-NEW-9' }, created: true, matched: false });
+    mockCreateDocWithId.mockRejectedValue(new Error('leads create denied'));
+    const { createProjectionWithUserId } = await import('../entityProjection');
+
+    await expect(createProjectionWithUserId('leads', 'PLD-1', newLead())).rejects.toThrow('leads create denied');
+    expect(mockHardDelete).toHaveBeenCalledWith('entities', 'ENT-NEW-9');
+    expect(mockHardDelete).toHaveBeenCalledWith('users', 'MUSR-company-demo-neozy-9876543210');
+  });
+
+  it('a RESOLVED pre-existing master identity is NEVER deleted on failure (may be shared by other records)', async () => {
+    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: false });
+    mockCreateOrResolveEntity.mockRejectedValue(new Error('entities create denied'));
+    const { createProjectionWithUserId } = await import('../entityProjection');
+
+    await expect(createProjectionWithUserId('leads', 'PLD-1', newLead())).rejects.toThrow('entities create denied');
+    expect(mockHardDelete).not.toHaveBeenCalledWith('users', expect.anything());
+  });
+
+  it('on success nothing is compensated and the lead doc carries no internal __masterIdentity* fields', async () => {
+    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
+    mockCreateOrResolveEntity.mockResolvedValue({ entity: { id: 'ENT-1' }, created: true, matched: false });
+    const { createProjectionWithUserId } = await import('../entityProjection');
+
+    await createProjectionWithUserId('leads', 'PLD-1', newLead());
+
+    expect(mockHardDelete).not.toHaveBeenCalled();
+    const written = mockCreateDocWithId.mock.calls[0][2];
+    expect('__masterIdentityId' in written).toBe(false);
+    expect('__masterIdentityCreated' in written).toBe(false);
+    expect(written.userId).toBe('MUSR-company-demo-neozy-9876543210');
   });
 });

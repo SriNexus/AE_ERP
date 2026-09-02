@@ -7,6 +7,7 @@ import { createDocWithId, getAll, isRealCompanyId, resolveWriteCompanyId, update
 import { COLLECTIONS, auth, db, firebaseEnv } from './firebase';
 import { useAppStore } from '../store/useAppStore';
 import { resolveSessionCompanyId } from './tenantRouting';
+import { resolveCompatibleRole } from './permissions';
 import { loadCurrentUserProfile, syncCurrentUserProfile } from './userProfile';
 import { refreshAuthMappingIfStale } from './authIdentity';
 import { registerServiceWorker, getFcmToken, persistDeviceToken, deactivateDeviceTokens } from './fcmTokenManager';
@@ -45,6 +46,34 @@ function validateRoleDocument(role: RawRoleDocument) {
  */
 export function shouldReconcileStaleSession(firebaseUser: unknown, isAuthenticated: boolean): boolean {
   return firebaseUser === null && isAuthenticated;
+}
+
+/**
+ * Resolve the role DOCUMENT whose permissions + visibility govern `userRole`.
+ * Extracted + exported so it is directly unit-testable and stays the single
+ * source of truth for `roleData`.
+ *
+ * An exact per-company role doc wins. When the user's role string has no exact
+ * doc (a data-driven / legacy name — e.g. "Sales Executive" in a company that
+ * only seeded the canonical "Sales" role) the compatibility alias resolves it,
+ * exactly as canDo() / getModuleVisibility() already do. Without this the
+ * effect set roleData=null, and resolveVisibility() (lib/firestore.ts) then
+ * fell through to 'self' — hiding every lead/customer the user did not
+ * personally own even though their aliased role grants 'all' (RC-A, real
+ * "Sales Executive" account repro 2026-09-02).
+ */
+export function resolveActiveRoleDocument<T extends { name?: unknown }>(
+  roles: T[],
+  userRole: string | undefined | null,
+): T | null {
+  const normalizedUserRole = normalizeRoleName(String(userRole || ''));
+  if (!normalizedUserRole) return null;
+  const exact = roles.find((role) => normalizeRoleName(String(role.name || '')) === normalizedUserRole);
+  if (exact) return exact;
+  const compatibleName = resolveCompatibleRole(userRole);
+  if (!compatibleName) return null;
+  const compatibleKey = normalizeRoleName(compatibleName);
+  return roles.find((role) => normalizeRoleName(String(role.name || '')) === compatibleKey) ?? null;
 }
 
 /**
@@ -574,7 +603,11 @@ export function useGlobalBoot() {
 
       if (cancelled) return;
 
-      const currentRole = currentRoles.find((role) => normalizeRoleName(role.name) === normalizeRoleName(user.role));
+      // Exact per-company role doc, else the compatibility alias — kept
+      // consistent with canDo()/getModuleVisibility() so an aliased role
+      // ("Sales Executive" -> "Sales") gets its real permissions AND visibility
+      // instead of a fail-closed roleData=null (RC-A).
+      const currentRole = resolveActiveRoleDocument(currentRoles, user.role);
       setRoleData(currentRole || null);
 
       setPermissionCache({
