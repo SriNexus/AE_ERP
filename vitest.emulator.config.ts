@@ -20,6 +20,7 @@ export default defineConfig({
       'src/lib/__tests__/phase8GroupPerformance.emulator.test.ts',
       'src/lib/__tests__/attendanceRules.emulator.test.ts',
       'src/lib/__tests__/stockAdjustTransaction.emulator.test.ts',
+      'src/lib/__tests__/stockRoleMatrix.emulator.test.ts',
       'src/lib/__tests__/sensitiveCollectionsRoleEnforcement.emulator.test.ts',
       'src/lib/__tests__/biometricFaceReferences.emulator.test.ts',
       'src/lib/__tests__/leadCreationProjectionWrites.emulator.test.ts',
