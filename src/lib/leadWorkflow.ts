@@ -2,7 +2,7 @@ import { createDocWithId, updateDocById, genId } from './firestore';
 import { COLLECTIONS, firebaseEnv } from './firebase';
 import { sanitizeFirestoreData } from './sanitizer';
 import { useAppStore } from '../store/useAppStore';
-import { attachUserRole } from './userIdentity';
+import { attachUserRole, linkMasterIdentityBestEffort } from './userIdentity';
 import { createCustomerProjectionInTransaction, updateCustomerProjection } from '../features/customers/hooks/useCustomers';
 import { sendNotification } from './notifications';
 import { NotificationType } from '../types';
@@ -46,8 +46,25 @@ export async function convertLeadToCustomer(lead: any, customerType: 'B2B' | 'B2
   const { doc, runTransaction } = await import('firebase/firestore');
   const cid = genId.customer();
   let customerId = cid;
-  let convertedUserId = '';
   let assignedLeadUserId = '';
+
+  // OPTIONAL master-identity link — resolved BEFORE any transaction and
+  // BEST-EFFORT, identical to standalone Customer/Lead creation. The lead's
+  // phone-keyed contact virtually always exists already (created at lead
+  // creation); this just attaches the 'Customer' role to it. A failure here
+  // never blocks the conversion — the canonical Customer + the lead's
+  // Converted state are what must be atomic, not the CRM identity link.
+  let convertedUserId = await linkMasterIdentityBestEffort(
+    {
+      name: text(lead.name),
+      email: text(lead.email),
+      phone: text(lead.phone),
+      companyId,
+      createdBy: state.user?.id || 'system',
+      linkedModules: ['customers'],
+    },
+    'Customer',
+  );
 
   if (!firebaseEnv.isConfigured) {
     await createDocWithId(COLLECTIONS.CUSTOMERS, cid, sanitizeFirestoreData({
@@ -69,6 +86,7 @@ export async function convertLeadToCustomer(lead: any, customerType: 'B2B' | 'B2
       createdBy: state.user?.id || 'system',
       updatedBy: state.user?.id || 'system',
       isDeleted: false,
+      ...(convertedUserId ? { userId: convertedUserId, masterUserId: convertedUserId } : {}),
       assignedToId: text(lead.assignedToId) || state.user?.id || 'system',
       assignedToName: text(lead.assignedToName) || state.user?.name || 'System',
       // Left Panel/Tabs/Documents/Footer UI standardization mission: carry the
@@ -98,7 +116,7 @@ export async function convertLeadToCustomer(lead: any, customerType: 'B2B' | 'B2
     const currentLead = leadSnap.data() as WorkflowRecord;
     if (currentLead.convertedCustomerId) {
       customerId = text(currentLead.convertedCustomerId);
-      convertedUserId = text(currentLead.userId);
+      convertedUserId = text(currentLead.userId) || convertedUserId;
       assignedLeadUserId = text(currentLead.assignedToId);
       return;
     }
@@ -138,8 +156,8 @@ export async function convertLeadToCustomer(lead: any, customerType: 'B2B' | 'B2
       // prefer the freshly-read transactional lead, falling back to the
       // caller's in-memory copy for any field the snapshot lacks.
       documents: normalizeDocuments({ ...lead, ...currentLead }),
-    });
-    convertedUserId = customerResult.userId;
+    }, text(currentLead.userId) || convertedUserId);
+    convertedUserId = customerResult.userId || text(currentLead.userId) || convertedUserId;
     assignedLeadUserId = resolvedAssignedToId;
 
     transaction.set(leadRef, sanitizeFirestoreData({

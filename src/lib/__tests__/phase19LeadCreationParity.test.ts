@@ -71,8 +71,14 @@ describe('Phase 19 — desktop/mobile Lead creation parity', () => {
     expect(useLeadsSource).toMatch(/notifyRoleUsers\(\['Admin',\s*'Director'\]/);
   });
 
-  it('useSaveLead still performs master-user linking and caseId propagation on create (unregressed by this fix)', () => {
-    expect(useLeadsSource).toMatch(/resolveOrCreateMasterUser/);
+  it('useSaveLead performs master-identity linking through the canonical projection path (createLeadProjection), and caseId propagation, on create', () => {
+    // Master-identity linking is NOT a separate, unwrapped resolveOrCreateMasterUser()
+    // call in useSaveLead any more — it happens once inside createLeadProjection ->
+    // createProjectionWithUserId -> attachUserId (best-effort). A direct call here
+    // hard-failed Lead creation for every role the `users` rules don't let write a
+    // contact identity (GroupAdmin, non-Admin on a pre-existing contact).
+    expect(useLeadsSource).not.toMatch(/resolveOrCreateMasterUser/);
+    expect(useLeadsSource).toMatch(/createLeadProjection\(/);
     expect(useLeadsSource).toMatch(/createCaseForLead/);
   });
 });

@@ -9,7 +9,7 @@ import {
   type Transaction,
 } from 'firebase/firestore';
 import { COLLECTIONS, db, firebaseEnv } from './firebase';
-import { createDocWithId, genId, getAll, getOne, hardDelete, updateDocById } from './firestore';
+import { createDocWithId, genId, getAll, getOne, updateDocById } from './firestore';
 import { sanitizeFirestoreData } from './sanitizer';
 import { useAppStore } from '../store/useAppStore';
 import type { MasterUser } from '../types';
@@ -102,6 +102,15 @@ function timestampValue(value: unknown): string | undefined {
   return undefined;
 }
 
+/** The roles[] a freshly-created master-identity contact should carry, so the
+ *  attachUserRole() that follows is an idempotent no-op — ONE `users` write per
+ *  new contact (the create), never a second role-attach UPDATE. */
+function seededRoles(seedData: Record<string, unknown>): string[] {
+  if (Array.isArray(seedData.roles) && seedData.roles.length) return seedData.roles.map(String);
+  const role = stringValue(seedData.role);
+  return role ? [role] : [];
+}
+
 function toMasterUser(id: string, data: Record<string, unknown>): MasterUser {
   return {
     id,
@@ -117,33 +126,17 @@ function toMasterUser(id: string, data: Record<string, unknown>): MasterUser {
   };
 }
 
-export type ResolvedMasterUser = MasterUser & {
-  /** true only when THIS call created the users/MUSR-* document (never for a
-   *  resolved pre-existing identity) — drives compensating rollback in
-   *  entityProjection.createProjectionWithUserId(). */
-  justCreated: boolean;
-};
-
-/** The roles[] array a freshly-created master identity should carry — so the
- *  immediately-following attachUserRole() is an idempotent no-op instead of a
- *  second Firestore write (see attachUserRole). */
-function seededRoles(seedData: Record<string, unknown>): string[] {
-  if (Array.isArray(seedData.roles) && seedData.roles.length) return seedData.roles.map(String);
-  const role = stringValue(seedData.role);
-  return role ? [role] : [];
-}
-
 export async function resolveOrCreateMasterUser(
   phone: string,
   companyId: string,
   seedData: Partial<MasterUser> & Record<string, unknown> = {}
-): Promise<ResolvedMasterUser> {
+): Promise<MasterUser> {
   if (!firebaseEnv.isConfigured) {
     const normalizedPhone = normalizePhone(phone);
     const resolvedCompanyId = stringValue(companyId) || systemCompanyId(seedData);
     const id = masterUserId(resolvedCompanyId, normalizedPhone);
     const existing = await getOne<Record<string, unknown>>(COLLECTIONS.USERS, id);
-    if (existing) return { ...toMasterUser(id, existing), justCreated: false };
+    if (existing) return toMasterUser(id, existing);
     await createDocWithId(COLLECTIONS.USERS, id, sanitizeFirestoreData({
       ...seedData,
       id,
@@ -157,17 +150,14 @@ export async function resolveOrCreateMasterUser(
       linkedModules: Array.isArray(seedData.linkedModules) ? seedData.linkedModules : [],
       isDeleted: false,
     }));
-    return {
-      ...toMasterUser(id, {
-        ...seedData,
-        id,
-        phone: normalizedPhone,
-        companyId: resolvedCompanyId,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }),
-      justCreated: true,
-    };
+    return toMasterUser(id, {
+      ...seedData,
+      id,
+      phone: normalizedPhone,
+      companyId: resolvedCompanyId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   return runTransaction(db, (transaction) => (
@@ -182,7 +172,7 @@ export async function resolveOrCreateMasterUserInTransaction(
   phone: string,
   companyId: string,
   seedData: Partial<MasterUser> & Record<string, unknown> = {}
-): Promise<ResolvedMasterUser> {
+): Promise<MasterUser> {
   const normalizedPhone = normalizePhone(phone);
   const resolvedCompanyId = stringValue(companyId) || systemCompanyId(seedData);
   if (!normalizedPhone || normalizedPhone.length !== 10) {
@@ -196,7 +186,7 @@ export async function resolveOrCreateMasterUserInTransaction(
   const ref = doc(db, COLLECTIONS.USERS, id);
   const byId = await transaction.get(ref);
   if (byId.exists() && byId.data().isDeleted !== true) {
-    return { ...toMasterUser(byId.id, byId.data()), justCreated: false };
+    return toMasterUser(byId.id, byId.data());
   }
 
   const payload = {
@@ -216,14 +206,11 @@ export async function resolveOrCreateMasterUserInTransaction(
   };
 
   transaction.set(ref, sanitizeFirestoreData(payload));
-  return {
-    ...toMasterUser(id, {
-      ...payload,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }),
-    justCreated: true,
-  };
+  return toMasterUser(id, {
+    ...payload,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 function identityPayload(payload: ProjectionSafePayload, fallbackPhone = ''): ProjectionSafePayload {
@@ -297,12 +284,10 @@ export async function attachUserRole(userId: string, role: UserIdentityRole, upd
   const currentRoles = Array.isArray(current.roles) ? current.roles.map(String) : [];
   const currentModules = Array.isArray(current.linkedModules) ? current.linkedModules.map(String) : [];
 
-  // Idempotent no-op: when the identity already carries this role + linked
-  // module (the common case once resolveOrCreateMasterUser() seeds `roles` on
-  // creation, and every re-resolution of an existing contact), skip the write
-  // entirely. This removes the phone-keyed-contact UPDATE from the hot path of
-  // Lead/Customer/Employee creation — the write a non-Admin creator could not
-  // perform before the contact-identity update rule existed (see firestore.rules).
+  // Idempotent no-op: a freshly-created master identity is seeded with its
+  // roles[] + linkedModules[] (see seededRoles), so this common-path call has
+  // nothing to add and skips the `users` UPDATE entirely — a non-Admin creator
+  // never needs `users` write access on the hot path of Lead/Customer creation.
   if (currentRoles.includes(role) && currentModules.includes(linkedModule)) return;
 
   await updateDocById(COLLECTIONS.USERS, userId, {
@@ -339,20 +324,11 @@ export async function createUserIdentity(
   });
 }
 
-export interface ResolvedUserByPhone {
-  id: string;
-  /** true only when THIS call created a brand-new master-identity users doc
-   *  (never for a resolved pre-existing identity). Drives compensating rollback
-   *  in entityProjection.createProjectionWithUserId() so a partial failure
-   *  downstream never leaves an orphan users/MUSR-* record. */
-  created: boolean;
-}
-
 export async function createOrResolveUserByPhone(
   payload: ProjectionSafePayload,
   role: UserIdentityRole,
   preferredId?: string
-): Promise<ResolvedUserByPhone> {
+): Promise<string> {
   validateRoleAssignment(role);
   const existingUserId = stringValue(payload.userId || preferredId);
   const fallbackPhone = role === 'User' && existingUserId ? numericFallback(existingUserId) : '';
@@ -372,42 +348,91 @@ export async function createOrResolveUserByPhone(
         throw new Error('userId phone does not match identity phone');
       }
       await attachUserRole(existingUserId, role, createdBy);
-      return { id: existingUserId, created: false };
+      return existingUserId;
     }
   }
 
   const existing = await findUserByPhone(companyId, phone);
   if (existing) {
     await attachUserRole(existing.id, role, createdBy);
-    return { id: existing.id, created: false };
+    return existing.id;
   }
 
+  // Curated contact-identity seed — do NOT spread the whole projection
+  // payload. `normalizedPayload` is the full Lead/Customer/Employee document
+  // (assignedToId, source, status, city, notes, next_date, …); spreading it
+  // leaked every one of those business fields into the `users` contact doc.
+  // A phone-keyed CRM contact identity only ever needs who/where it is + how
+  // it links back. It is DELIBERATELY group-less: `users` is in
+  // GROUP_ID_EXCLUDED_COLLECTIONS, and a group-scoped contact would route a
+  // Group Admin's write through the `users` CREATE rule's staff group-
+  // coherence arm (budget-marginal — see firestore.rules §users) instead of
+  // the cheap contact-identity arm. A Group Admin's contact write is simply
+  // denied and the caller (linkMasterIdentityBestEffort) proceeds unlinked;
+  // an Admin backfill/edit populates the link. The primary business record is
+  // never blocked either way.
   const resolvedRole = stringValue(normalizedPayload.role) || role;
   const masterUser = await resolveOrCreateMasterUser(phone, companyId, {
-    ...normalizedPayload,
+    name: stringValue(
+      normalizedPayload.name || normalizedPayload.displayName
+      || normalizedPayload.company || normalizedPayload.contactPerson,
+    ),
+    email: stringValue(normalizedPayload.email || normalizedPayload.businessEmail),
     role: resolvedRole,
-    // Seed roles[] so attachUserRole() below is an idempotent no-op on the
-    // freshly-created doc (one Firestore write for this contact, not two).
     roles: [resolvedRole],
     linkedModules: [getRoleLinkedModule(PROJECTION_ROLE_MAP[role])],
     createdBy,
   });
+  await attachUserRole(masterUser.id, role, createdBy);
+  return masterUser.id;
+}
+
+/**
+ * THE canonical "optional master-identity enrichment" primitive.
+ *
+ * Neozy's identity/projection architecture has exactly two tiers:
+ *
+ *   PRIMARY BUSINESS RECORD  (leads/{id}, customers/{id}, employees/{id}, …)
+ *     → authorized by that collection's own company/group-scoped rule
+ *     → its canonical write MUST succeed or the operation fails
+ *
+ *   MASTER-IDENTITY / CONTACT LINK  (users/MUSR-{companyId}-{phone})
+ *     → a phone-keyed CRM contact record, NOT a staff login account
+ *     → shares the `users` collection (and therefore its staff-account rules —
+ *       heavy, expression-budget-fragile, and routing Group Admin through a
+ *       group-coherence CREATE arm the group-less contact cannot satisfy)
+ *       purely for storage convenience
+ *     → it is ENRICHMENT: cross-module identity continuity + partner
+ *       notification routing. No primary business record's validity depends on
+ *       it (the Channel Partner lead path, partnerLeadIntegration.ts, creates
+ *       fully-working leads without ever touching it).
+ *
+ * This helper resolves the link and, on ANY failure, logs once and returns ''
+ * so the caller can proceed to write the primary record unlinked (an Admin
+ * edit / backfill populates `userId`/`masterUserId` later). Callers that need
+ * the identity as a STRUCTURAL key — EmployeeDomainService.create (attendance /
+ * payroll / linkOrCreateForUser dedup all key off users/MUSR-*) and User
+ * creation (Auth-UID-keyed, handled separately) — must NOT use this; they call
+ * resolveOrCreateMasterUser directly and let a failure surface.
+ */
+export async function linkMasterIdentityBestEffort(
+  payload: ProjectionSafePayload,
+  role: UserIdentityRole,
+): Promise<string> {
   try {
-    await attachUserRole(masterUser.id, role, createdBy);
+    return await createOrResolveUserByPhone(payload, role);
   } catch (error) {
-    // Self-atomic: if the role-attach UPDATE fails AFTER this call created the
-    // master-identity doc, roll that create back so no orphan users/MUSR-*
-    // record is left behind (the forensic audit's partial-write symptom).
-    if (masterUser.justCreated) {
-      try { await hardDelete(COLLECTIONS.USERS, masterUser.id); } catch { /* best-effort */ }
-    }
-    throw error;
+    console.warn(
+      `[userIdentity] master-identity link skipped (role=${role}) — the primary business record ` +
+      'is still created; the users/MUSR-* write is CRM enrichment, not part of its authorization:',
+      error,
+    );
+    return '';
   }
-  return { id: masterUser.id, created: masterUser.justCreated };
 }
 
 export async function createUserProjection(id: string, payload: Record<string, unknown>) {
-  const { id: userId } = await createOrResolveUserByPhone(payload, 'User', id);
+  const userId = await createOrResolveUserByPhone(payload, 'User', id);
   if (userId !== id) throw new Error('Phone already belongs to another user identity');
   const current = await getOne<Record<string, unknown>>(COLLECTIONS.USERS, userId);
   return updateDocById(COLLECTIONS.USERS, id, {

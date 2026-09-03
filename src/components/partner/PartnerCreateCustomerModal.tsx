@@ -14,6 +14,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { Input, FormSection, FormRow } from '../../components/ui/Input';
 import { useSaveCustomer, CUSTOMER_FORM_DEFAULT } from '../../features/customers/hooks/useCustomers';
+import { partnerDisplayName } from '../../lib/partnerOwnership';
 import type { ChannelPartner } from '../../features/channel-partner/types';
 
 interface PartnerCreateCustomerModalProps {
@@ -76,7 +77,7 @@ export function PartnerCreateCustomerModal({ open, onClose, partner }: PartnerCr
           <Users className="h-5 w-5 text-[var(--color-primary-text)] shrink-0" />
           <div>
             <p className="font-semibold text-[var(--color-primary-text)]">
-              This customer will be attributed to {partner?.firmName || 'your firm'}
+              This customer will be attributed to {partnerDisplayName(partner, 'your account')}
             </p>
             <p className="text-xs text-[var(--color-primary-text)] opacity-80">
               Ownership is assigned automatically from your partner account.

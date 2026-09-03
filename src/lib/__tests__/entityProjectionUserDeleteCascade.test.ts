@@ -31,6 +31,9 @@ const mockGetProjectionRole = vi.fn((...args: any[]) => {
 vi.mock('../userIdentity', () => ({
   createOrResolveUserByPhone: (...args: any[]) => mockCreateOrResolveUserByPhone(...args),
   getProjectionRole: (...args: any[]) => mockGetProjectionRole(...args),
+  linkMasterIdentityBestEffort: async (payload: any, role: any) => {
+    try { return await mockCreateOrResolveUserByPhone(payload, role); } catch { return ''; }
+  },
 }));
 
 const mockSoftDeleteEntity = vi.fn().mockResolvedValue(undefined);

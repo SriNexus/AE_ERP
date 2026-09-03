@@ -36,6 +36,11 @@ const mockGetProjectionRole = vi.fn((...args: any[]) => {
 vi.mock('../userIdentity', () => ({
   createOrResolveUserByPhone: (...args: any[]) => mockCreateOrResolveUserByPhone(...args),
   getProjectionRole: (...args: any[]) => mockGetProjectionRole(...args),
+  // Real impl wraps createOrResolveUserByPhone in a best-effort try/catch — the
+  // mock mirrors that so these tests still observe the underlying resolver.
+  linkMasterIdentityBestEffort: async (payload: any, role: any) => {
+    try { return await mockCreateOrResolveUserByPhone(payload, role); } catch { return ''; }
+  },
 }));
 
 const mockCreateOrResolveEntity = vi.fn().mockResolvedValue({ entity: { id: 'ENT-001' }, matched: false });
@@ -82,7 +87,7 @@ vi.mock('../../store/useAppStore', () => ({
 describe('createProjectionWithUserId — duplicate-user regression', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
+    mockCreateOrResolveUserByPhone.mockResolvedValue('MUSR-company-demo-neozy-9876543210');
     mockCreateOrResolveEntity.mockResolvedValue({ entity: { id: 'ENT-001' }, matched: false });
     mockGetOne.mockResolvedValue({ id: 'authId-001', name: 'NITESH' });
   });

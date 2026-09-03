@@ -1551,7 +1551,16 @@ service cloud.firestore {
     }
 
     match /customer_phone_locks/{lockId} {
-      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      // get() of a NOT-YET-CREATED deterministically-keyed lock
+      // ({companyId}_{phone}) is the FIRST read every Customer-creation
+      // transaction makes (useCustomers.createCustomerProjectionInTransaction's
+      // uniqueness check). resource.data is null for a missing doc, so a bare
+      // canReadCompanyScoped()/groupAdminCanRead() raises a "Null value error"
+      // and denies the whole transaction for EVERY role — the same
+      // permission-denied-storm class already fixed on `settings`, `roles` and
+      // `companies` with this exact `resource == null` guard. A missing doc
+      // holds zero data, so it grants nothing once the lock actually exists.
+      allow read: if actorIsActive() && (resource == null || canReadCompanyScoped() || groupAdminCanRead(resource.data));
       allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data))
         && request.resource.data.id == lockId
         && request.resource.data.phone is string

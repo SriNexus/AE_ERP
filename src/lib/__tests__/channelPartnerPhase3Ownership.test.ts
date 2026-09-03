@@ -53,12 +53,15 @@ vi.mock('../firestore', () => ({
   updateDocById: mockUpdateDocById,
   createDocWithId: mockCreateDocWithId,
   resolveWriteCompanyId: mockResolveWriteCompanyId,
+  resolveWriteGroupId: vi.fn(() => 'group-1'),
   genId: { lead: (prefix = 'LD') => `${prefix}-test-1` },
 }));
 
 vi.mock('../partnerOwnership', () => ({
   resolveCurrentPartnerDocId: mockResolveCurrentPartnerDocId,
   getCachedPartnerDocId: () => mockResolveCurrentPartnerDocId(),
+  partnerDisplayName: (p: any, fb = 'Partner') =>
+    (p?.firmName || p?.contactPerson || p?.name || fb),
 }));
 
 vi.mock('../firebase', () => ({
@@ -67,6 +70,10 @@ vi.mock('../firebase', () => ({
     CUSTOMERS: 'customers',
     PROJECTS: 'projects',
     USERS: 'users',
+    CHANNEL_PARTNERS: 'channel_partners',
+    COMMISSION_RECORDS: 'commission_records',
+    COMMISSION_RULES: 'commission_rules',
+    PARTNER_WALLET_TXNS: 'partner_wallet_transactions',
   },
   firebaseEnv: { isConfigured: false },
 }));
@@ -207,6 +214,36 @@ describe('partnerCreateLead — §9.3 validation + ownership stamping', () => {
         updatedBy: 'user-1',
         commissionStatus: 'eligible',
         installationStatus: 'pending',
+      }),
+    );
+  });
+
+  it('a FIRM-LESS partner (human/agent, no firmName) can create a lead; partnerName is derived from contactPerson', async () => {
+    // The reported bug: modal + integration blocked lead creation when the
+    // partner had no firmName. A Channel Partner is a person — firmName is
+    // optional. The partner record resolves to the human name.
+    mockGetOne.mockImplementation(async (col: string, id: string) =>
+      (col === 'channel_partners' && id === 'partner-1')
+        ? { id: 'partner-1', firmName: '', contactPerson: 'newperosn', userId: 'user-1' }
+        : null,
+    );
+    const leadId = await partnerCreateLead({
+      name: 'Walk-in Customer',
+      phone: '9998887770',
+      partnerId: 'partner-1',
+      partnerName: '', // firm-less agent — the modal now passes contactPerson,
+      //                  but even a blank hint must still resolve server-side.
+    });
+    expect(leadId).toBe('PLD-test-1');
+    expect(mockCreateDocWithId).toHaveBeenCalledWith(
+      'leads', 'PLD-test-1',
+      expect.objectContaining({
+        partnerId: 'partner-1',
+        partnerName: 'newperosn',
+        // §3.2 tenant denormalization — a partner lead is group-stamped like
+        // any internally-created lead, so a Group Admin's group view sees it.
+        groupId: 'group-1',
+        source: 'Channel Partner',
       }),
     );
   });

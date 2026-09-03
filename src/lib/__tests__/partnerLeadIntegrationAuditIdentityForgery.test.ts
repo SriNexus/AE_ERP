@@ -20,10 +20,13 @@ vi.mock('../firestore', () => ({
   getAll: vi.fn().mockResolvedValue([]),
   getOne: (...args: any[]) => mockGetOne(...args),
   resolveWriteCompanyId: vi.fn(() => 'company-real-session'),
+  resolveWriteGroupId: vi.fn(() => ''),
 }));
 
 vi.mock('../partnerOwnership', () => ({
   resolveCurrentPartnerDocId: vi.fn().mockResolvedValue(null),
+  partnerDisplayName: (p: any, fb = 'Partner') =>
+    (p?.firmName || p?.contactPerson || p?.name || fb),
 }));
 
 vi.mock('../firebase', () => ({

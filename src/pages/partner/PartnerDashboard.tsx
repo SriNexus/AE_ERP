@@ -33,6 +33,7 @@ import { EmptyState } from '../../components/shared/EmptyState';
 import { statusBadge } from '../../components/ui/Badge';
 import { useAppStore } from '../../store/useAppStore';
 import { usePartnerSelf } from '../../features/channel-partner/hooks/usePartnerSelf';
+import { partnerDisplayName } from '../../lib/partnerOwnership';
 import { COLLECTIONS } from '../../lib/firebase';
 import { getAll, fmtCurrency, fmtCompactCurrency, ageDays } from '../../lib/firestore';
 import { queryKeys } from '../../lib/queryKeys';
@@ -245,7 +246,7 @@ export default function PartnerDashboard() {
   return (
     <PageShell
       title="Dashboard"
-      subtitle={partner?.firmName || 'Partner Portal'}
+      subtitle={partnerDisplayName(partner, 'Partner Portal')}
       icon={<LayoutDashboard className="h-5 w-5" />}
     >
       {/* ── Welcome Header ──────────────────────────────── */}

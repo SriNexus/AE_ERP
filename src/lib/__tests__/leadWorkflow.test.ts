@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   logActivity: vi.fn(),
   sendNotification: vi.fn(),
   attachUserRole: vi.fn(),
+  linkMasterIdentityBestEffort: vi.fn(async () => ''),
   createCustomerProjectionInTransaction: vi.fn(),
   updateCustomerProjection: vi.fn(),
   getState: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock('../firestore', () => ({
   createDocWithId: mocks.createDocWithId,
   updateDocById: mocks.updateDocById,
   genId: mocks.genId,
+  resolveWriteGroupId: vi.fn(() => ''),
 }));
 
 vi.mock('../workflow', () => ({
@@ -32,6 +34,7 @@ vi.mock('../notifications', () => ({
 
 vi.mock('../userIdentity', () => ({
   attachUserRole: mocks.attachUserRole,
+  linkMasterIdentityBestEffort: mocks.linkMasterIdentityBestEffort,
 }));
 
 vi.mock('../../features/customers/hooks/useCustomers', () => ({

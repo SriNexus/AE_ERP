@@ -16,6 +16,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { Input, Select, Textarea, FormSection, FormRow } from '../../components/ui/Input';
 import { partnerCreateLead } from '../../lib/partnerLeadIntegration';
+import { partnerDisplayName } from '../../lib/partnerOwnership';
 import { fetchAssignableSalesUsers } from '../../lib/salesTeam';
 import { queryKeys } from '../../lib/queryKeys';
 import { useAppStore } from '../../store/useAppStore';
@@ -68,8 +69,14 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
 
   const createLead = useMutation({
     mutationFn: async (data: FormData) => {
-      if (!partner?.id || !partner?.firmName) {
-        throw new Error('Partner profile not found. Cannot create lead.');
+      // A Channel Partner is a HUMAN/AGENT — `firmName` is optional business
+      // metadata and must NEVER gate lead creation (that was the "Partner
+      // profile not found" root cause for firm-less agents). The only real
+      // precondition is a resolved partner profile; `partnerCreateLead`
+      // additionally re-validates the id against the authenticated link
+      // server-side.
+      if (!partner?.id) {
+        throw new Error('Your account is not linked to a partner profile yet. Contact your administrator.');
       }
       const chosen = data.assignedToId ? salesUsers.find((u: any) => u.id === data.assignedToId) : undefined;
       return partnerCreateLead({
@@ -80,7 +87,7 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
         state: data.state,
         notes: data.notes,
         partnerId: partner.id,
-        partnerName: partner.firmName,
+        partnerName: partnerDisplayName(partner),
         assignedToId: data.assignedToId || undefined,
         assignedToName: chosen ? String(chosen.name || '') : undefined,
       });
@@ -126,7 +133,7 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
           <Target className="h-5 w-5 text-[var(--color-primary-text)] shrink-0" />
           <div>
             <p className="font-semibold text-[var(--color-primary-text)]">
-              This lead will be attributed to {partner?.firmName || 'your firm'}
+              This lead will be attributed to {partnerDisplayName(partner, 'your account')}
             </p>
             <p className="text-xs text-[var(--color-primary-text)] opacity-80">
               Source will be set to "Channel Partner".

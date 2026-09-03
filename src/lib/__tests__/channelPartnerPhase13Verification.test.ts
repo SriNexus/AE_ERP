@@ -103,6 +103,9 @@ vi.mock('../permissions', () => ({
 
 vi.mock('../partnerOwnership', () => ({
   resolveCurrentPartnerDocId: mocks.resolveCurrentPartnerDocId,
+  getCachedPartnerDocId: () => null,
+  partnerDisplayName: (p: any, fb = 'Partner') => (p && (p.firmName || p.contactPerson || p.name)) || fb,
+  partnerAccountState: (p: any) => (p && p.userId ? 'linked' : 'pending_account_setup'),
 }));
 
 vi.mock('../casePropagation', () => ({

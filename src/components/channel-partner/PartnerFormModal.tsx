@@ -164,29 +164,16 @@ export function PartnerFormModal({
       }
     >
       <form id="partner-form" onSubmit={handleSubmit} className="space-y-5">
-        <FormSection title="Basic Information">
+        {/* A Channel Partner is a person/agent. The human identity is primary;
+            firm / GST / PAN are optional business metadata (kept, not removed). */}
+        <FormSection title="Partner (Contact)">
           <FormRow>
-            <Input
-              label="Firm Name"
-              value={form.firmName}
-              onChange={(e) => handleChange('firmName', e.target.value)}
-              placeholder="e.g. Green Energy Solutions"
-            />
             <Input
               label="Contact Person *"
               required
               value={form.contactPerson}
               onChange={(e) => handleChange('contactPerson', e.target.value)}
-              placeholder="Full name of primary contact"
-            />
-          </FormRow>
-          <FormRow>
-            <Input
-              label="Email"
-              type="email"
-              value={form.email}
-              onChange={(e) => handleChange('email', e.target.value)}
-              placeholder="partner@company.com"
+              placeholder="Full name of the partner / agent"
             />
             <Input
               label="Phone *"
@@ -198,30 +185,49 @@ export function PartnerFormModal({
           </FormRow>
           <FormRow>
             <Input
+              label="Email"
+              type="email"
+              value={form.email}
+              onChange={(e) => handleChange('email', e.target.value)}
+              placeholder="partner@company.com"
+            />
+            <Input
               label="Alternate Phone"
               value={form.alternatePhone}
               onChange={(e) => handleChange('alternatePhone', e.target.value)}
               placeholder="Optional alternate number"
             />
+          </FormRow>
+        </FormSection>
+
+        <FormSection title="Business / Firm Information (optional)">
+          <FormRow>
+            <Input
+              label="Firm Name"
+              value={form.firmName}
+              onChange={(e) => handleChange('firmName', e.target.value)}
+              placeholder="Leave blank for an individual agent"
+            />
+            <Select
+              label="Default Commission Type"
+              value={form.defaultCommissionType}
+              onChange={(e) => handleChange('defaultCommissionType', e.target.value)}
+              options={commissionTypeOptions}
+            />
+          </FormRow>
+          <FormRow>
             <Input
               label="GST Number"
               value={form.gstNumber}
               onChange={(e) => handleChange('gstNumber', e.target.value.toUpperCase())}
               placeholder="15-character GST"
             />
-          </FormRow>
-          <FormRow>
             <Input
               label="PAN Number"
               value={form.panNumber}
               onChange={(e) => handleChange('panNumber', e.target.value.toUpperCase())}
               placeholder="10-character PAN"
-            />              <Select
-                label="Default Commission Type"
-                value={form.defaultCommissionType}
-                onChange={(e) => handleChange('defaultCommissionType', e.target.value)}
-                options={commissionTypeOptions}
-              />
+            />
           </FormRow>
         </FormSection>
 

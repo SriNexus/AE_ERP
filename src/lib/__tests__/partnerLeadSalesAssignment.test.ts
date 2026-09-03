@@ -45,10 +45,13 @@ vi.mock('../firestore', () => ({
   getOne: mockGetOne,
   getAll: mockGetAll,
   resolveWriteCompanyId: vi.fn(() => 'company-1'),
+  resolveWriteGroupId: vi.fn(() => 'group-1'),
 }));
 
 vi.mock('../partnerOwnership', () => ({
   resolveCurrentPartnerDocId: vi.fn(() => Promise.resolve('partner-1')),
+  partnerDisplayName: (p: any, fb = 'Partner') =>
+    (p?.firmName || p?.contactPerson || p?.name || fb),
 }));
 
 vi.mock('../workflow', () => ({ logActivity: vi.fn(() => Promise.resolve()) }));

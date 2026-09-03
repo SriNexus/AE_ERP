@@ -14,7 +14,6 @@ import { LEAD_SOURCES, LEAD_STATUSES } from '../../../config/company';
 import { logActivity } from '../../../lib/workflow';
 import { getNextAssignee } from '../../../lib/roundRobin';
 import { queryKeys } from '../../../lib/queryKeys';
-import { resolveOrCreateMasterUser } from '../../../lib/userIdentity';
 import { LeadDomainService } from '../../../services/LeadDomainService';
 import { usePaginatedCollection } from '../../../hooks/usePaginatedCollection';
 import { createCaseForLead } from '../../../lib/casePropagation';
@@ -81,19 +80,17 @@ export function useSaveLead(editId: string | null, onSuccess: (id: string) => vo
         const assignment = data.assignedToId
           ? { assignedToId: data.assignedToId, assignedToName: data.assignedToName }
           : await getNextAssignee(activeCompanyId).then(a => ({ assignedToId: a.userId, assignedToName: a.name }));
-        const masterUser = data.phone
-          ? await resolveOrCreateMasterUser(data.phone, activeCompanyId, {
-            name: data.name,
-            email: data.email,
-            role: 'Lead',
-            linkedModules: ['leads'],
-            createdBy: user.id,
-          })
-          : null;
+        // Master-identity linking is done ONCE, inside the canonical projection
+        // path (createLeadProjection -> createProjectionWithUserId -> attachUserId,
+        // which is best-effort — see entityProjection.ts). The earlier separate,
+        // UNWRAPPED master-identity resolver call here duplicated that work and
+        // hard-failed Lead creation for every role the `users` collection rules
+        // don't let write a contact identity (GroupAdmin, and any non-Admin on a
+        // pre-existing contact) — even though creating a Lead never legitimately
+        // needs `users` write access.
         await createLeadProjection(id, {
           ...data, ...assignment, id, createdBy: user.id,
           companyId: activeCompanyId,
-          ...(masterUser ? { userId: masterUser.id, masterUserId: masterUser.id } : {}),
         });
         // Phase 3B: Auto-create Case for new Lead
         void createCaseForLead(id, activeCompanyId);

@@ -30,6 +30,9 @@ const mockGetProjectionRole = vi.fn((...args: any[]) => {
 vi.mock('../userIdentity', () => ({
   createOrResolveUserByPhone: (...args: any[]) => mockCreateOrResolveUserByPhone(...args),
   getProjectionRole: (...args: any[]) => mockGetProjectionRole(...args),
+  linkMasterIdentityBestEffort: async (payload: any, role: any) => {
+    try { return await mockCreateOrResolveUserByPhone(payload, role); } catch { return ''; }
+  },
 }));
 
 const mockCreateOrResolveEntity = vi.fn();
@@ -154,7 +157,7 @@ describe('createProjectionWithUserId — TXN-001 orphan-entity compensation', ()
   });
 
   it('entityJustCreated never leaks into a batchCreate payload either', async () => {
-    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
+    mockCreateOrResolveUserByPhone.mockResolvedValue('MUSR-company-demo-neozy-9876543210');
     mockCreateOrResolveEntity.mockResolvedValue({ entity: { id: 'ENT-NEW-006' }, created: true, matched: false });
     const { batchCreateProjectionsWithUserId } = await import('../entityProjection');
 
@@ -164,65 +167,60 @@ describe('createProjectionWithUserId — TXN-001 orphan-entity compensation', ()
 
     const batchedItems = mockBatchCreate.mock.calls[0][1];
     expect('entityJustCreated' in batchedItems[0]).toBe(false);
-    expect('__masterIdentityId' in batchedItems[0]).toBe(false);
-    expect('__masterIdentityCreated' in batchedItems[0]).toBe(false);
   });
 });
 
-// TXN-002 (forensic audit — non-atomic Lead creation): the master-identity
-// users/MUSR-* doc created by W1 is now ALSO compensated on any downstream
-// failure — closing the "permission error + orphan users record + Lead
-// missing" contradiction. Mirrors the entity-compensation contract above.
-describe('createProjectionWithUserId — TXN-002 orphan master-identity compensation (Lead path)', () => {
+/**
+ * CROSS-ROLE Lead-creation authorization: the phone-keyed master-identity write
+ * (users/MUSR-*) is a CRM enrichment that lands in the `users` collection,
+ * whose rules deny most non-Admin roles AND GroupAdmin. attachUserId() is
+ * BEST-EFFORT — a failure there must NOT fail the Lead/Customer/Employee
+ * creation; the record is written without the userId link (backfilled later).
+ */
+describe('createProjectionWithUserId — master-identity link is best-effort (cross-role)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetOne.mockResolvedValue({ id: 'PLD-1', name: 'x', entityId: 'ENT-1' });
     mockUpdateDocById.mockResolvedValue(undefined);
-    mockCreateDocWithId.mockResolvedValue(undefined);
+    mockCreateDocWithId.mockResolvedValue({ id: 'PLD-1' });
+    mockCreateOrResolveEntity.mockResolvedValue({ entity: { id: 'ENT-1' }, created: true, matched: false });
   });
 
   const newLead = () => ({ name: 'Ramesh', phone: '9876543210', companyId: 'company-demo-neozy' });
 
-  it('a JUST-CREATED master identity is hard-deleted when the entities write then fails', async () => {
-    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
-    mockCreateOrResolveEntity.mockRejectedValue(new Error('entities create denied'));
+  it('when the users/MUSR write is DENIED, the Lead is still created — without the userId link', async () => {
+    mockCreateOrResolveUserByPhone.mockRejectedValue(new Error('7 PERMISSION_DENIED: users create'));
     const { createProjectionWithUserId } = await import('../entityProjection');
 
-    await expect(createProjectionWithUserId('leads', 'PLD-1', newLead())).rejects.toThrow('entities create denied');
-    expect(mockHardDelete).toHaveBeenCalledWith('users', 'MUSR-company-demo-neozy-9876543210');
-  });
+    await expect(createProjectionWithUserId('leads', 'PLD-1', newLead())).resolves.toBeDefined();
 
-  it('a JUST-CREATED master identity AND a JUST-CREATED entity are both hard-deleted when the leads write fails', async () => {
-    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
-    mockCreateOrResolveEntity.mockResolvedValue({ entity: { id: 'ENT-NEW-9' }, created: true, matched: false });
-    mockCreateDocWithId.mockRejectedValue(new Error('leads create denied'));
-    const { createProjectionWithUserId } = await import('../entityProjection');
-
-    await expect(createProjectionWithUserId('leads', 'PLD-1', newLead())).rejects.toThrow('leads create denied');
-    expect(mockHardDelete).toHaveBeenCalledWith('entities', 'ENT-NEW-9');
-    expect(mockHardDelete).toHaveBeenCalledWith('users', 'MUSR-company-demo-neozy-9876543210');
-  });
-
-  it('a RESOLVED pre-existing master identity is NEVER deleted on failure (may be shared by other records)', async () => {
-    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: false });
-    mockCreateOrResolveEntity.mockRejectedValue(new Error('entities create denied'));
-    const { createProjectionWithUserId } = await import('../entityProjection');
-
-    await expect(createProjectionWithUserId('leads', 'PLD-1', newLead())).rejects.toThrow('entities create denied');
+    expect(mockCreateDocWithId).toHaveBeenCalledTimes(1);
+    expect(mockCreateDocWithId.mock.calls[0][0]).toBe('leads');
+    const lead = mockCreateDocWithId.mock.calls[0][2];
+    expect(lead.userId).toBeUndefined();
+    expect(lead.name).toBe('Ramesh');
+    // The entity relation (the other required write) still happened.
+    expect(mockCreateOrResolveEntity).toHaveBeenCalledTimes(1);
+    // A failed master-identity link is never "compensated" — nothing was written.
     expect(mockHardDelete).not.toHaveBeenCalledWith('users', expect.anything());
   });
 
-  it('on success nothing is compensated and the lead doc carries no internal __masterIdentity* fields', async () => {
-    mockCreateOrResolveUserByPhone.mockResolvedValue({ id: 'MUSR-company-demo-neozy-9876543210', created: true });
-    mockCreateOrResolveEntity.mockResolvedValue({ entity: { id: 'ENT-1' }, created: true, matched: false });
+  it('when the users/MUSR write SUCCEEDS, the Lead carries the userId link', async () => {
+    mockCreateOrResolveUserByPhone.mockResolvedValue('MUSR-company-demo-neozy-9876543210');
     const { createProjectionWithUserId } = await import('../entityProjection');
 
     await createProjectionWithUserId('leads', 'PLD-1', newLead());
 
-    expect(mockHardDelete).not.toHaveBeenCalled();
-    const written = mockCreateDocWithId.mock.calls[0][2];
-    expect('__masterIdentityId' in written).toBe(false);
-    expect('__masterIdentityCreated' in written).toBe(false);
-    expect(written.userId).toBe('MUSR-company-demo-neozy-9876543210');
+    const lead = mockCreateDocWithId.mock.calls[0][2];
+    expect(lead.userId).toBe('MUSR-company-demo-neozy-9876543210');
+  });
+
+  it('a still-required write (entities) failing DOES fail the creation and rolls back a just-created entity', async () => {
+    mockCreateOrResolveUserByPhone.mockResolvedValue('MUSR-x');
+    mockCreateDocWithId.mockRejectedValue(new Error('leads create denied'));
+    const { createProjectionWithUserId } = await import('../entityProjection');
+
+    await expect(createProjectionWithUserId('leads', 'PLD-1', newLead())).rejects.toThrow('leads create denied');
+    expect(mockHardDelete).toHaveBeenCalledWith('entities', 'ENT-1');
   });
 });

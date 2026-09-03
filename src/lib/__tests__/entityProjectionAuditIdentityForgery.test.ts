@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const mockCreateOrResolveUserByPhone = vi.fn().mockResolvedValue({ id: 'MUSR-identity-1', created: false });
+const mockCreateOrResolveUserByPhone = vi.fn();
 const mockGetProjectionRole = vi.fn((...args: any[]) => {
   const col = args[0] as string;
   return { collection: col, role: col === 'users' ? 'User' : 'Lead', ownerField: 'userId' };
@@ -23,6 +23,9 @@ const mockGetProjectionRole = vi.fn((...args: any[]) => {
 vi.mock('../userIdentity', () => ({
   createOrResolveUserByPhone: (...args: any[]) => mockCreateOrResolveUserByPhone(...args),
   getProjectionRole: (...args: any[]) => mockGetProjectionRole(...args),
+  linkMasterIdentityBestEffort: async (payload: any, role: any) => {
+    try { return await mockCreateOrResolveUserByPhone(payload, role); } catch { return ''; }
+  },
 }));
 
 const mockCreateOrResolveEntity = vi.fn().mockResolvedValue({ entity: { id: 'ENT-001' }, created: true, matched: false });

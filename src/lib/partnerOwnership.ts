@@ -21,62 +21,130 @@ import { collection, getDoc, getDocs, doc, query, where } from 'firebase/firesto
 import { db, COLLECTIONS, firebaseEnv } from './firebase';
 import { useAppStore } from '../store/useAppStore';
 
+// The cache holds ONLY a SUCCESSFUL resolution (a non-null partner doc id).
+// A null result — non-partner user, not-yet-linked partner, or a transient
+// read error — is never cached, so a partner who is linked/approved DURING an
+// open portal session (or after a transient Firestore hiccup) resolves on the
+// next call without a page reload. `cachedForUserId` also guards against a
+// stale value leaking across a logout→login as a different identity.
 let cachedPartnerDocId: string | null = null;
 let cachedForUserId: string | null = null;
 
 /** Synchronous read of the session-cached partner doc id (null if unknown). */
 export function getCachedPartnerDocId(): string | null {
   const user = useAppStore.getState().user;
-  if (!user) return null;
+  if (!user?.id) return null;
   return cachedForUserId === user.id ? cachedPartnerDocId : null;
 }
 
 /**
- * Resolves (and caches) the current user's channel_partners document id.
- * Returns null for non-partner users or unlinked accounts. Idempotent per user
- * session; the first call performs at most one users-doc get plus (only when
- * the canonical link is absent) one legacy channel_partners query.
+ * Resolves (and caches on success) the current user's channel_partners doc id.
+ * Returns null for non-partner users or not-yet-linked accounts.
+ *
+ * The single canonical data-layer partner-identity resolver (the portal UI's
+ * peer is usePartnerSelf, which resolves the SAME `users.channelPartnerId →
+ * channel_partners/{id}` link). One users-doc get per session once resolved;
+ * a null result is retried on the next call rather than being cached.
  */
 export async function resolveCurrentPartnerDocId(): Promise<string | null> {
   const state = useAppStore.getState();
   const user = state.user;
   if (!user?.id) return null;
-  if (cachedForUserId === user.id) return cachedPartnerDocId;
+  if (cachedForUserId === user.id && cachedPartnerDocId) return cachedPartnerDocId;
 
-  let partnerId: string | null = null;
   try {
-    if (firebaseEnv.isConfigured) {
-      // Canonical Phase 1 link: users/{uid}.channelPartnerId.
-      const userSnap = await getDoc(doc(db, COLLECTIONS.USERS, user.id));
-      const channelPartnerId = userSnap.exists() ? userSnap.data()?.channelPartnerId : null;
-      if (typeof channelPartnerId === 'string' && channelPartnerId) {
-        partnerId = channelPartnerId;
-      } else {
-        // Legacy fallback: channel_partners.userId == uid (pre-Phase-1 links).
-        const snap = await getDocs(query(
-          collection(db, COLLECTIONS.CHANNEL_PARTNERS),
-          where('userId', '==', user.id),
-        ));
-        partnerId = snap.docs[0]?.id ?? null;
-      }
+    if (!firebaseEnv?.isConfigured) return null;
+    // Canonical Phase 1 link: users/{uid}.channelPartnerId.
+    const userSnap = await getDoc(doc(db, COLLECTIONS.USERS, user.id));
+    const channelPartnerId = userSnap.exists() ? userSnap.data()?.channelPartnerId : null;
+    let partnerId: string | null = typeof channelPartnerId === 'string' && channelPartnerId
+      ? channelPartnerId
+      : null;
+
+    if (!partnerId) {
+      // Legacy fallback: channel_partners.userId == uid (pre-Phase-1 links).
+      const snap = await getDocs(query(
+        collection(db, COLLECTIONS.CHANNEL_PARTNERS),
+        where('userId', '==', user.id),
+      ));
+      partnerId = snap.docs.find((d) => (d.data() as { isDeleted?: unknown }).isDeleted !== true)?.id ?? null;
     }
+
+    if (partnerId) {
+      cachedPartnerDocId = partnerId;
+      cachedForUserId = user.id;
+    }
+    return partnerId;
   } catch {
     // Fail soft in the data layer: a missing resolution only means
-    // partnerId-keyed matching is inactive for this session; createdBy/
-    // assignedToId matching still applies. The portal's usePartnerSelf hook is
-    // the authoritative surface for partner identity.
-    partnerId = null;
+    // partnerId-keyed matching is inactive for THIS call; createdBy/
+    // assignedToId matching still applies, and the next call retries.
+    return null;
   }
-
-  cachedPartnerDocId = partnerId;
-  cachedForUserId = user.id;
-  return partnerId;
 }
 
 /** Test/teardown helper: clear the per-user cache. */
 export function resetPartnerDocIdCache(): void {
   cachedPartnerDocId = null;
   cachedForUserId = null;
+}
+
+/**
+ * THE canonical human-readable name for a Channel Partner.
+ *
+ * Architectural correction: a Channel Partner is a HUMAN / AGENT, not a
+ * company. `firmName` is OPTIONAL business metadata — an individual agent
+ * legitimately has none. Every surface that shows a partner name, and every
+ * flow that stamps `partnerName` onto an attributed record (leads, customers,
+ * commissions, notifications), MUST use this resolver so a firm-less agent is
+ * never rendered as "—" and lead/customer creation is never blocked for the
+ * absence of a firm.
+ *
+ * Order: firm (if the partner IS a firm) → the human contact → the linked
+ * login's display name → a neutral fallback (never an empty string).
+ */
+type PartnerNameSource = {
+  firmName?: unknown;
+  contactPerson?: unknown;
+  name?: unknown;
+  displayName?: unknown;
+};
+
+export function partnerDisplayName(
+  partner: PartnerNameSource | null | undefined,
+  fallback = 'Partner',
+): string {
+  if (!partner) return fallback;
+  const pick = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+  return (
+    pick(partner.firmName)
+    || pick(partner.contactPerson)
+    || pick(partner.name)
+    || pick(partner.displayName)
+    || fallback
+  );
+}
+
+/**
+ * The login-account readiness of a Channel Partner, derived from the canonical
+ * link (`channel_partners.userId` ←→ `users/{uid}.channelPartnerId`, set
+ * atomically by linkPartnerUser).
+ *
+ *   'linked'                — a login identity exists; the person can sign in
+ *                             and the portal (usePartnerSelf) resolves them.
+ *   'pending_account_setup' — the partner RELATIONSHIP exists but no login is
+ *                             linked yet. Approving here still transitions the
+ *                             business status, but "active" does not yet mean
+ *                             "can log in" — the reviewer must be told.
+ *
+ * Keeping this a DERIVED value (not a new stored status enum) means there is
+ * one source of truth (the link) and no possibility of the two drifting.
+ */
+export function partnerAccountState(
+  partner: { userId?: unknown } | null | undefined,
+): 'linked' | 'pending_account_setup' {
+  const uid = typeof partner?.userId === 'string' ? partner.userId.trim() : '';
+  return uid ? 'linked' : 'pending_account_setup';
 }
 
 /**

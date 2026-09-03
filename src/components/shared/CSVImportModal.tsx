@@ -6,7 +6,6 @@ import { COLLECTIONS } from '../../lib/firebase';
 import { batchCreate, genId, resolveWriteCompanyId } from '../../lib/firestore';
 import { createProjectionWithUserId } from '../../lib/entityProjection';
 import { getNextAssignee } from '../../lib/roundRobin';
-import { resolveOrCreateMasterUser } from '../../lib/userIdentity';
 import { createCustomerProjection } from '../../features/customers/hooks/useCustomers';
 import { useAppStore } from '../../store/useAppStore';
 
@@ -165,12 +164,10 @@ export function CSVImportModal({ collection, onClose, onSuccess }: Props) {
           const assignee = row.assignedToId
             ? { userId: row.assignedToId, name: row.assignedToName || row.assignedToId }
             : await getNextAssignee(companyId);
-          await resolveOrCreateMasterUser(row.phone, companyId, {
-            name: row.name,
-            email: row.email,
-            linkedModules: ['leads'],
-            createdBy: user?.id || 'system',
-          });
+          // Master-identity linking happens once, inside createProjectionWithUserId
+          // (attachUserId, best-effort). The separate call here was redundant (its
+          // result was never used) and hard-failed the whole import for any actor
+          // the `users` rules don't let write a contact identity.
           await createProjectionWithUserId(COLLECTIONS.LEADS, genId.lead(), compact({
             ...row,
             source: row.source || 'CSV Import',

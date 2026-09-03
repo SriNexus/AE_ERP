@@ -1,13 +1,13 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { doc, runTransaction, serverTimestamp, type Transaction } from 'firebase/firestore';
 import { createDocWithId, getAll, genId, getOne, resolveWriteCompanyId, resolveWriteGroupId } from '../../../lib/firestore';
-import { resolveCurrentPartnerDocId } from '../../../lib/partnerOwnership';
+import { resolveCurrentPartnerDocId, partnerDisplayName } from '../../../lib/partnerOwnership';
 import {
   deleteProjectionWithEntity,
 } from '../../../lib/entityProjection';
 import { COLLECTIONS, db, firebaseEnv } from '../../../lib/firebase';
 import { sanitizeFirestoreData } from '../../../lib/sanitizer';
-import { normalizePhone, resolveOrCreateMasterUser, resolveOrCreateMasterUserInTransaction } from '../../../lib/userIdentity';
+import { linkMasterIdentityBestEffort, normalizePhone } from '../../../lib/userIdentity';
 import { useCurrentUser, useAppStore } from '../../../store/useAppStore';
 import { queryKeys } from '../../../lib/queryKeys';
 import { CustomerDomainService } from '../../../services/CustomerDomainService';
@@ -75,7 +75,14 @@ function resolveCreatedBy(payload: Record<string, unknown>) {
 export async function createCustomerProjectionInTransaction(
   transaction: Transaction,
   id: string,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  // Pre-resolved, OPTIONAL master-identity link. Resolved BEFORE the transaction
+  // by the caller via userIdentity.linkMasterIdentityBestEffort (identical model
+  // to Lead creation): the users/MUSR-* contact write is CRM enrichment and is
+  // NOT allowed to abort this transaction — the phone-lock + canonical Customer
+  // are the only REQUIRED writes here. '' when the link was denied/skipped; an
+  // Admin edit/backfill populates it later.
+  masterUserId = ''
 ) {
   const companyId = resolveCompanyId(payload);
   const phone = normalizePhone(stringValue(payload.phone || payload.mobile || payload.businessPhone));
@@ -94,13 +101,6 @@ export async function createCustomerProjectionInTransaction(
     throw new Error('Customer phone already exists for this company');
   }
 
-  const masterUser = await resolveOrCreateMasterUserInTransaction(transaction, phone, companyId, {
-    name: stringValue(payload.name || payload.fullName || payload.contactPerson || payload.company),
-    email: stringValue(payload.email || payload.businessEmail),
-    linkedModules: ['customers'],
-    createdBy,
-  });
-
   const now = serverTimestamp();
   transaction.set(lockRef, sanitizeFirestoreData({
     id: lockRef.id,
@@ -116,8 +116,7 @@ export async function createCustomerProjectionInTransaction(
     ...payload,
     id,
     phone,
-    userId: masterUser.id,
-    masterUserId: masterUser.id,
+    ...(masterUserId ? { userId: masterUserId, masterUserId } : {}),
     companyId,
     ...(groupId ? { groupId } : {}),
     createdBy,
@@ -126,7 +125,7 @@ export async function createCustomerProjectionInTransaction(
     updatedAt: now,
     isDeleted: false,
   }));
-  return { id, userId: masterUser.id, masterUserId: masterUser.id, companyId, phone };
+  return { id, userId: masterUserId, masterUserId, companyId, phone };
 }
 
 export async function createCustomerProjection(id: string, payload: Record<string, unknown>) {
@@ -152,8 +151,12 @@ export async function createCustomerProjection(id: string, payload: Record<strin
     if (partnerDocId && !payload.partnerId) {
       payload.partnerId = partnerDocId;
       if (!stringValue(payload.partnerName)) {
-        const partner = await getOne<{ partnerName?: string }>(COLLECTIONS.CHANNEL_PARTNERS, partnerDocId);
-        payload.partnerName = stringValue(partner?.partnerName) || undefined;
+        // The channel_partners doc has NO `partnerName` field — a Channel
+        // Partner is a human/agent: derive firm-or-human via the canonical
+        // resolver so a firm-less agent's customers still carry a readable
+        // attribution name (the partnerId is what matters for ownership).
+        const partner = await getOne<{ firmName?: string; contactPerson?: string }>(COLLECTIONS.CHANNEL_PARTNERS, partnerDocId);
+        payload.partnerName = partnerDisplayName(partner, '') || undefined;
       }
     }
   }
@@ -175,7 +178,28 @@ export async function createCustomerProjection(id: string, payload: Record<strin
     return { id, userId: '', masterUserId: '', companyId, phone };
   }
 
-  const result = await runTransaction(db, (transaction) => createCustomerProjectionInTransaction(transaction, id, payload));
+  // OPTIONAL master-identity enrichment — resolved OUTSIDE the transaction and
+  // BEST-EFFORT, exactly like Lead creation (entityProjection.attachUserId).
+  // The users/MUSR-* contact write shares the heavy staff-account `users`
+  // rules (which route a Group Admin through a group-coherence CREATE arm the
+  // group-less contact cannot satisfy); that must never block Customer
+  // creation, so a denial here just leaves the link empty and an Admin
+  // edit/backfill fills it in.
+  const companyId = resolveCompanyId(payload);
+  const masterUserId = await linkMasterIdentityBestEffort(
+    {
+      name: stringValue(payload.name || payload.fullName || payload.contactPerson || payload.company),
+      email: stringValue(payload.email || payload.businessEmail),
+      phone: stringValue(payload.phone || payload.mobile || payload.businessPhone),
+      companyId,
+      createdBy: resolveCreatedBy(payload),
+      linkedModules: ['customers'],
+    },
+    'Customer',
+  );
+
+  const result = await runTransaction(db, (transaction) =>
+    createCustomerProjectionInTransaction(transaction, id, payload, masterUserId));
   await updateCustomerProjection(id, { updatedBy: resolveCreatedBy(payload) });
   return result;
 }
@@ -302,15 +326,12 @@ export function useSaveCustomer(editId: string | null, onSuccess: () => void) {
         await CustomerDomainService.update(editId, { ...payload, updatedBy: user.id });
       } else {
         const id = genId.customer();
-        if (data.phone) {
-          await resolveOrCreateMasterUser(data.phone, activeCompanyId, {
-            name: data.name,
-            email: data.email,
-            role: 'Customer',
-            linkedModules: ['customers'],
-            createdBy: user.id,
-          });
-        }
+        // Master-identity linking happens ONCE, inside createCustomerProjection
+        // (best-effort, before its phone-lock transaction). The separate
+        // unwrapped call that used to sit here was redundant (its result was
+        // never used) and hard-failed the whole Customer creation for every
+        // actor the `users` rules don't let write a contact identity —
+        // Group Admin especially — before the canonical write was even reached.
         await createCustomerProjection(id, { ...payload, id, createdBy: user.id, companyId: activeCompanyId });
       }
     },

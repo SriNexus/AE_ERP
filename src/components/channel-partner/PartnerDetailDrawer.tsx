@@ -15,6 +15,7 @@ import { ActivityTimeline } from '../shared/ActivityTimeline';
 import { DocumentViewer, useDocumentViewer, formatFileSize } from '../shared/DocumentViewer';
 import type { DocumentViewerFile } from '../shared/DocumentViewer';
 import type { ChannelPartner } from '../../features/channel-partner/types';
+import { partnerAccountState } from '../../lib/partnerOwnership';
 import { useAppStore } from '../../store/useAppStore';
 import { useUserNameResolver } from '../../hooks/useUserNameResolver';
 
@@ -169,6 +170,11 @@ export function PartnerDetailDrawer({
                 </h2>
                 <PartnerStatusBadge status={partner.status} />
                 <KYCStatusBadge status={partner.kycStatus} />
+                {partnerAccountState(partner) === 'pending_account_setup' && (
+                  <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                    Pending Account Setup — no login linked
+                  </span>
+                )}
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--color-text-muted)]">
                 <span className="inline-flex items-center gap-1.5">

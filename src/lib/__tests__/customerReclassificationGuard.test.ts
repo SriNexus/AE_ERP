@@ -36,8 +36,7 @@ vi.mock('../sanitizer', () => ({
 
 vi.mock('../userIdentity', () => ({
   normalizePhone: (phone: string) => phone,
-  resolveOrCreateMasterUser: vi.fn(),
-  resolveOrCreateMasterUserInTransaction: vi.fn(),
+  linkMasterIdentityBestEffort: vi.fn(async () => ''),
 }));
 
 vi.mock('../../store/useAppStore', () => ({

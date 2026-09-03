@@ -48,6 +48,7 @@ import { usePartners, useSavePartner, useDeletePartner, useApprovePartner, useSu
 import { PartnerFormModal, type PartnerFormValues } from '../components/channel-partner/PartnerFormModal';
 import { PartnerDetailDrawer } from '../components/channel-partner/PartnerDetailDrawer';
 import { PARTNER_STATUSES, KYC_STATUSES } from '../features/channel-partner/constants';
+import { partnerDisplayName, partnerAccountState } from '../lib/partnerOwnership';
 import { ChannelPartnerDomainService } from '../services/ChannelPartnerDomainService';
 import type { ChannelPartner } from '../features/channel-partner/types';
 
@@ -490,10 +491,24 @@ export default function Partners() {
 
   function handleApprove(id: string) {
     const partner = (partners as any[]).find((p: any) => p.id === id);
+    const label = partnerDisplayName(partner, id);
+    // "Approved" must be honest: a partner with no linked login account is
+    // transitioned to `active` but STILL cannot sign in — surface that instead
+    // of a silently misleading state (Case E). Not a hard block: the reviewer
+    // may legitimately approve first and link the login account afterwards.
+    if (partner && partnerAccountState(partner) === 'pending_account_setup') {
+      const ok = window.confirm(
+        `${label} has no linked login account yet.\n\n`
+        + 'You can approve now, but they will not be able to sign in to the '
+        + 'Partner Portal until you link a user account (Edit Partner → Linked User).\n\n'
+        + 'Approve anyway?',
+      );
+      if (!ok) return;
+    }
     approvePartner.mutate(id, {
       onSuccess: () => {
         closeView();
-        logActivity('Channel Partners', 'Approved Partner', id, { entityName: partner?.firmName || id, actionLabel: 'Approved channel partner' });
+        logActivity('Channel Partners', 'Approved Partner', id, { entityName: label, actionLabel: 'Approved channel partner' });
         if (partner?.userId) {
           sendNotification(partner.userId, NotificationType.PARTNER_APPROVED, 'Partner approved', 'Your channel partner account has been approved.', 'partner', id, notificationCompanyId).catch(() => {});
         }
@@ -503,13 +518,13 @@ export default function Partners() {
 
   function handleSuspend(id: string) {
     suspendPartner.mutate({ partnerId: id }, {
-      onSuccess: () => { closeView(); logActivity('Channel Partners', 'Suspended Partner', id, { entityName: (partners as any[]).find((p: any) => p.id === id)?.firmName || id, actionLabel: 'Suspended channel partner' }); },
+      onSuccess: () => { closeView(); logActivity('Channel Partners', 'Suspended Partner', id, { entityName: partnerDisplayName((partners as any[]).find((p: any) => p.id === id), id), actionLabel: 'Suspended channel partner' }); },
     });
   }
 
   function handleReactivate(id: string) {
     reactivatePartner.mutate(id, {
-      onSuccess: () => { closeView(); logActivity('Channel Partners', 'Reactivated Partner', id, { entityName: (partners as any[]).find((p: any) => p.id === id)?.firmName || id, actionLabel: 'Reactivated channel partner' }); },
+      onSuccess: () => { closeView(); logActivity('Channel Partners', 'Reactivated Partner', id, { entityName: partnerDisplayName((partners as any[]).find((p: any) => p.id === id), id), actionLabel: 'Reactivated channel partner' }); },
     });
   }
 

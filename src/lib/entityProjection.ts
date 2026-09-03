@@ -7,7 +7,7 @@ import {
   mapLeadToEntity,
   mapUserToEntity,
 } from './entityMappers';
-import { createOrResolveUserByPhone, getProjectionRole } from './userIdentity';
+import { createOrResolveUserByPhone, getProjectionRole, linkMasterIdentityBestEffort } from './userIdentity';
 import { useAppStore } from '../store/useAppStore';
 
 type ProjectionCollection =
@@ -138,39 +138,54 @@ function projectionUpdateWithoutIdentityOverwrite(payload: Record<string, unknow
   );
 }
 
+/**
+ * Populate a Lead/Customer/Employee projection's owner field (`userId`, plus
+ * the `masterUserId` alias) from the phone-keyed master-identity contact.
+ *
+ * The two-tier PRIMARY-RECORD / OPTIONAL-IDENTITY architecture and the reason
+ * the `users`-collection write is enrichment-not-authorization live on the
+ * shared primitive: userIdentity.linkMasterIdentityBestEffort. This function is
+ * just the projection-payload adapter for it (resolve role + owner field via
+ * getProjectionRole, stamp both id fields). Non-Lead/Customer callers that need
+ * the identity as a structural key call resolveOrCreateMasterUser directly.
+ *
+ * CROSS-ROLE ROOT CAUSE (authorization audit, 2026-09-02): the `users` rules
+ * protect STAFF LOGIN accounts. The freshly-created contact is seeded with
+ * roles[]/linkedModules[] (userIdentity.seededRoles) so attachUserRole() is an
+ * idempotent no-op — no UPDATE on the create hot path. The remaining hard case
+ * is a Group Admin: the `users` CREATE rule routes them to a group-coherence
+ * arm that requires a groupId the (deliberately group-less) contact does not
+ * carry, so their contact CREATE is denied. That must never block a business
+ * operation, so the link is BEST-EFFORT: on any failure the projection is
+ * created unlinked and a later Admin edit / backfill populates it (an Admin's
+ * own edit re-runs this path and succeeds).
+ */
 async function attachUserId<T extends Record<string, unknown>>(
   col: ProjectionCollection,
   id: string,
   payload: T,
-): Promise<T & { userId: string; __masterIdentityId: string; __masterIdentityCreated: boolean }> {
+): Promise<T> {
   const config = getProjectionRole(col);
-  const preferredId = col === COLLECTIONS.USERS ? id : undefined;
-  const resolved = await createOrResolveUserByPhone(payload, config.role, preferredId);
-  return {
-    ...payload,
-    [config.ownerField]: resolved.id,
-    // Internal, stripped by the caller before any Firestore write — carries
-    // enough to compensate an orphaned master-identity doc on partial failure.
-    __masterIdentityId: resolved.id,
-    __masterIdentityCreated: resolved.created,
-  } as T & { userId: string; __masterIdentityId: string; __masterIdentityCreated: boolean };
-}
 
-// Mirrors compensateOrphanedEntity(): a master-identity users/MUSR-* doc that
-// THIS creation flow brought into existence (never a resolved pre-existing
-// contact — shared identities are never touched) is hard-deleted if a later
-// write in the same createProjectionWithUserId() call throws. Closes the
-// non-atomic partial-failure the forensic audit found: W1 (users create) had
-// no rollback, so any downstream denial left an orphan users record while the
-// Lead itself was never written.
-async function compensateOrphanedMasterIdentity(userId: string, justCreated: boolean): Promise<void> {
-  if (!justCreated || !userId) return;
-  try {
-    await hardDelete(COLLECTIONS.USERS, userId);
-  } catch {
-    // Best-effort — the ORIGINAL error is what the caller must see (matching
-    // compensateOrphanedEntity / authProvisioning.ts rollback precedent).
+  if (col === COLLECTIONS.USERS) {
+    // A login account is Auth-UID-keyed: this anchors the existing
+    // users/{authId} document (preferredId = id), it is NOT a phone-keyed MUSR
+    // contact and NOT optional — a failure is a real provisioning error and
+    // must surface. (Not reached from createProjectionWithUserId, which gates
+    // USERS out via shouldResolveMasterIdentity; retained for batch callers.)
+    const userId = await createOrResolveUserByPhone(payload, config.role, id);
+    return { ...payload, [config.ownerField]: userId } as T;
   }
+
+  // Lead / Customer / Employee projection: the phone-keyed master-identity link
+  // is OPTIONAL enrichment — one shared best-effort primitive, same as the
+  // standalone Customer path (useCustomers.createCustomerProjection). On any
+  // failure the projection is created unlinked; masterUserId mirrors the owner
+  // field for downstream cross-module continuity.
+  const userId = await linkMasterIdentityBestEffort(payload, config.role);
+  return userId
+    ? ({ ...payload, [config.ownerField]: userId, masterUserId: userId } as T)
+    : payload;
 }
 
 /**
@@ -248,31 +263,18 @@ export async function createProjectionWithUserId<T extends Record<string, unknow
 ) {
   const hydrated = hydrateCreatePayload({ ...payload, id });
 
-  // TXN-002 (forensic audit — non-atomic Lead creation): the master-identity
-  // (W1/W2) and entity (W3) writes are performed OUTSIDE the try below in the
-  // original code, so any failure there (or in the primary write W4) left an
-  // orphan users/MUSR-* doc and a raw permission error while the Lead was never
-  // created. All of W1–W4 are now inside one try, and BOTH a just-created
-  // master identity AND a just-created entity are compensated on any failure.
-  let masterIdentityId = '';
-  let masterIdentityCreated = false;
-  let entityId = '';
-  let entityJustCreated = false;
+  // attachUserId() is BEST-EFFORT (see its doc comment) — the master-identity
+  // `users/MUSR-*` write is a CRM enrichment, never part of Lead/Customer/
+  // Employee authorization, so a failure there does not fail the creation. The
+  // required writes are the entity relation and the canonical projection
+  // document, both authorized by the uniform company-scoped rule every
+  // authorized role shares.
+  const withUser: Record<string, unknown> = shouldResolveMasterIdentity(col)
+    ? await attachUserId(col, id, hydrated)
+    : hydrated;
+
+  const { entityJustCreated, ...withEntity } = await attachEntityId(col, withUser);
   try {
-    let withUser: Record<string, unknown> = hydrated;
-    if (shouldResolveMasterIdentity(col)) {
-      const attached = await attachUserId(col, id, hydrated);
-      const { __masterIdentityId, __masterIdentityCreated, ...rest } = attached;
-      masterIdentityId = __masterIdentityId;
-      masterIdentityCreated = __masterIdentityCreated;
-      withUser = rest;
-    }
-
-    const attachedEntity = await attachEntityId(col, withUser);
-    entityId = attachedEntity.entityId;
-    entityJustCreated = attachedEntity.entityJustCreated;
-    const { entityJustCreated: _drop, ...withEntity } = attachedEntity;
-
     if (col === COLLECTIONS.USERS) {
       // users write path bypasses the groupId-stamping write helpers (USERS is
       // excluded from the generic auto-stamp by design — it has its own groupId
@@ -283,8 +285,7 @@ export async function createProjectionWithUserId<T extends Record<string, unknow
     }
     return await createDocWithId(col, id, withEntity);
   } catch (error) {
-    if (entityId) await compensateOrphanedEntity(entityId, entityJustCreated);
-    await compensateOrphanedMasterIdentity(masterIdentityId, masterIdentityCreated);
+    await compensateOrphanedEntity(withEntity.entityId, entityJustCreated);
     throw error;
   }
 }
@@ -296,7 +297,7 @@ export async function batchCreateProjectionsWithUserId<T extends Record<string, 
   const payload = await Promise.all(items.map(async (item) => {
     const id = stringValue(item.id);
     const hydrated = hydrateCreatePayload({ ...item, id });
-    const { __masterIdentityId: _mid, __masterIdentityCreated: _mc, ...withUser } = await attachUserId(col, id, hydrated);
+    const withUser = await attachUserId(col, id, hydrated);
     const { entityJustCreated: _entityJustCreated, ...withEntity } = await attachEntityId(col, withUser);
     return withEntity;
   }));

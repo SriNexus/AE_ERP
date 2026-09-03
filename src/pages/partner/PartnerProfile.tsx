@@ -12,7 +12,7 @@
 
 import { useState, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { User, ShieldCheck, Building2, Banknote, MapPin, Save } from 'lucide-react';
+import { User, ShieldCheck, Banknote, MapPin, Save } from 'lucide-react';
 import { PageShell } from '../../components/shared/PageShell';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
@@ -235,7 +235,9 @@ export default function PartnerProfile() {
   return (
     <PageShell
       title="My Profile"
-      subtitle={`${partner.firmName || 'Partner'} · ${partner.contactPerson || ''}`}
+      subtitle={partner.firmName
+        ? `${partner.firmName} · ${partner.contactPerson || ''}`
+        : (partner.contactPerson || 'Partner')}
       icon={<User className="h-5 w-5" />}
       actions={
         <div className="flex items-center gap-2">
@@ -279,31 +281,19 @@ export default function PartnerProfile() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* ── Left: Business Details (2/3) ──────────────────── */}
         <div className="lg:col-span-2 space-y-6">
-          {/* Business Details */}
+          {/* Partner Details — a Channel Partner is a person/agent; firm
+              information is optional business metadata (kept, not removed). */}
           <div className="bg-[var(--color-surface)] rounded-2xl border border-[var(--color-border)] shadow-[var(--shadow-enterprise-surface)] p-6">
             <div className="flex items-center gap-2 mb-5">
-              <Building2 className="h-5 w-5 text-[var(--color-primary)]" />
-              <h3 className="font-semibold text-[var(--color-text)]">Business Details</h3>
+              <User className="h-5 w-5 text-[var(--color-primary)]" />
+              <h3 className="font-semibold text-[var(--color-text)]">Partner Details</h3>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
-              <Input
-                label="Firm Name"
-                value={form.firmName}
-                onChange={(e) => updateField('firmName', e.target.value)}
-                placeholder="Your firm name"
-              />
               <Input
                 label="Contact Person"
                 value={form.contactPerson}
                 onChange={(e) => updateField('contactPerson', e.target.value)}
-                placeholder="Primary contact name"
-              />
-              <Input
-                label="Email"
-                type="email"
-                value={form.email}
-                onChange={(e) => updateField('email', e.target.value)}
-                placeholder="email@example.com"
+                placeholder="Your full name"
               />
               <Input
                 label="Phone"
@@ -313,12 +303,27 @@ export default function PartnerProfile() {
                 placeholder="+91-9876543210"
               />
               <Input
+                label="Email"
+                type="email"
+                value={form.email}
+                onChange={(e) => updateField('email', e.target.value)}
+                placeholder="email@example.com"
+              />
+              <Input
                 label="Alternate Phone"
                 type="tel"
                 value={form.alternatePhone}
                 onChange={(e) => updateField('alternatePhone', e.target.value)}
                 placeholder="+91-9876543210"
               />
+              <div className="sm:col-span-2">
+                <Input
+                  label="Firm / Business Name (optional)"
+                  value={form.firmName}
+                  onChange={(e) => updateField('firmName', e.target.value)}
+                  placeholder="Leave blank if you operate as an individual agent"
+                />
+              </div>
             </div>
           </div>
 

@@ -13,8 +13,9 @@
  * The Lead module remains the single source of truth for all leads.
  */
 
-import { updateDocById, genId, createDocWithId, getOne, getAll, resolveWriteCompanyId } from './firestore';
-import { resolveCurrentPartnerDocId } from './partnerOwnership';
+import { updateDocById, genId, createDocWithId, getOne, getAll, resolveWriteCompanyId, resolveWriteGroupId } from './firestore';
+import { resolveCurrentPartnerDocId, partnerDisplayName } from './partnerOwnership';
+import type { ChannelPartner } from '../features/channel-partner/types';
 import { fetchAssignableSalesUsers } from './salesTeam';
 import { COLLECTIONS } from './firebase';
 import { useAppStore } from '../store/useAppStore';
@@ -328,6 +329,14 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     throw new Error('Lead partner attribution does not match the authenticated partner account.');
   }
 
+  // Partner name is DERIVED (never trusted from the client for anything but a
+  // convenience default): resolve firm-or-human from the canonical partner
+  // record. A Channel Partner is a human/agent — `firmName` may be blank, so
+  // fall back to `contactPerson` and finally the supplied name.
+  const partnerRecord = await getOne<ChannelPartner>(COLLECTIONS.CHANNEL_PARTNERS, effectivePartnerId);
+  const effectivePartnerName =
+    partnerDisplayName(partnerRecord, '') || String(input.partnerName || '').trim() || effectivePartnerId;
+
   // Server-side (client-lib) validation of the partner-chosen Sales Person.
   // fetchAssignableSalesUsers() is company-scoped (where('companyId','==',...))
   // and already applies the active / not-deleted / sales-eligible / not-owner
@@ -347,9 +356,16 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     resolvedAssignee = { id: String(match.id), name: String(match.name || input.assignedToName || '') };
   }
 
+  // §3.2 tenant denormalization: stamp the derived groupId so a partner lead is
+  // visible to a Group Admin's group-scoped view exactly like an
+  // internally-created lead (createDocWithId would stamp it too, but only when
+  // the group is resolvable — do it explicitly here from the partner's company).
+  const groupId = resolveWriteGroupId(companyId);
+
   const leadDoc = {
     id: leadId,
     companyId,
+    ...(groupId ? { groupId } : {}),
     name: input.name,
     phone: input.phone,
     email: input.email || '',
@@ -359,7 +375,7 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     status: 'New',
     notes: input.notes || '',
     partnerId: effectivePartnerId,
-    partnerName: input.partnerName,
+    partnerName: effectivePartnerName,
     // Store the partner's user UID so notifications reach them
     userId: state.user?.id || '',
     // The validated Sales Person the partner chose — stored under the same
@@ -377,7 +393,7 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     // never the partner doc id — ownership resolution and self-visibility
     // key off users docs. createdByName is the user's display name.
     createdBy: state.user?.id || '',
-    createdByName: state.user?.name || input.partnerName || effectivePartnerId,
+    createdByName: state.user?.name || effectivePartnerName,
     updatedBy: state.user?.id || '',
     isDeleted: false,
   };
@@ -387,9 +403,9 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
   // Activity log
   await logActivity('Leads', 'Lead Created by Partner', leadId, {
     partnerId: effectivePartnerId,
-    partnerName: input.partnerName,
+    partnerName: effectivePartnerName,
     entityName: input.name || input.phone || leadId,
-    actionLabel: `Lead created by partner ${input.partnerName}`,
+    actionLabel: `Lead created by partner ${effectivePartnerName}`,
   });
 
   // Notify company roles
@@ -398,7 +414,7 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     ['Admin', 'Sales'],
     NotificationType.LEAD_CREATED_BY_PARTNER,
     'New partner lead',
-    `${input.partnerName} created a new lead: ${input.name || input.phone}`,
+    `${effectivePartnerName} created a new lead: ${input.name || input.phone}`,
     'lead',
     leadId,
     notificationCompanyId,
@@ -412,7 +428,7 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
       resolvedAssignee.id,
       NotificationType.LEAD_ASSIGNED,
       'Lead assigned',
-      `${input.partnerName} assigned you a new lead: ${input.name || input.phone}`,
+      `${effectivePartnerName} assigned you a new lead: ${input.name || input.phone}`,
       'lead',
       leadId,
       notificationCompanyId,
