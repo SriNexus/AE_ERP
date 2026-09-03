@@ -1,0 +1,246 @@
+# INVENTORY_REGRESSION_MATRIX.md
+
+**Permanent regression checklist for the Neozy Inventory remediation.**
+
+Every phase's Completion Protocol (Plan §23 step 8) requires the rows for **every touched module** to be green before commit. HIGH-blast-radius phases (03, 05d, 07 — see `INVENTORY_PHASE_DEPENDENCY_MAP.md` §6) require the **entire** matrix green.
+
+**Legend:** `T` = automated test exists / to be written · `M` = manual verification in the running app · `E` = Firestore emulator (rules) test · `—` = not applicable.
+
+**Baseline note (from Phase 00):** `npx vitest run` has ~29 pre-existing brittle source-string UI test failures (`BRAIN.md` §35) that are **NOT regressions**. Phase 00 records the exact list; a failure outside that list = a regression = no commit.
+
+**Standard gate for every phase:**
+```
+npm run lint      # tsc --noEmit — must equal baseline (3 pre-existing attendance-test errors, 0 in inventory)
+npm run build     # vite build — must succeed
+npx vitest run    # full — no new failures vs the Phase-00 baseline list
+# if firestore.rules changed:
+firebase emulators:exec --only firestore --project neozy-demo-isolation-test \
+  "npx vitest run --config vitest.emulator.config.ts"   # batched 2–3 runs, 100% green
+```
+
+---
+
+## A. PRODUCT
+
+| # | Check | Type | Expected | Phases that must re-verify |
+|---|---|---|---|---|
+| A1 | Create a product | T,M | doc created, `companyId`+`groupId` stamped, `isDeleted:false` | 09 |
+| A2 | Edit a product (price/tax/unit) | T,M | fields updated; **historical quotation/order line snapshots unchanged** | 09 |
+| A3 | Soft-delete a product with zero stock & no open refs | T,M | `isDeleted:true`; hard delete impossible | 09 |
+| A4 | Soft-delete a product **with** stock or open order/PO | T | **blocked** with a clear message | 09 (introduces), all later |
+| A5 | Duplicate SKU on create/edit | T,E | **rejected** (blank SKU allowed) | 09 (introduces) |
+| A6 | Product referenced by a quotation/order line still renders (name/price from snapshot) | T,M | line shows the snapshot, not a live join failure | 04, 07, 09 |
+| A7 | Company A cannot read/write Company B's products | E | denied | any rules change |
+| A8 | Product list loads (paginated after Phase 11) | M | no full-collection hang at scale | 11 |
+| A9 | `categoryId` set on new products; `category` name denormalized | T | both present; picker emits `categoryId` | 09 (introduces) |
+
+## B. CATEGORY
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| B1 | Create / edit / soft-delete a category | T,M | works; `companyId`+`groupId` stamped | 09 |
+| B2 | Hard-delete a category as non-superadmin | E | **denied** (superadmin only) | any rules change |
+| B3 | Soft-delete a category **with products** | T | **blocked** | 09 (introduces) |
+| B4 | Category name→id backfill report | T,M | maps by name; unmatched flagged, never auto-picked | 09 |
+| B5 | Renaming a category | T | denormalized `category` on products updated (or explicitly not — per Phase 09 decision) | 09 |
+| B6 | Cross-company category isolation | E | denied | any rules change |
+
+## C. WAREHOUSE
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| C1 | Create warehouse (`id == warehouseId`, `hasCompanyId`) | T,E,M | created | 09, any rules change |
+| C2 | Edit warehouse (`companyId` immutable) | T,E | works; companyId change denied | 09 |
+| C3 | Soft-delete a warehouse with zero stock | T,M | `isDeleted:true` | 09 |
+| C4 | Soft-delete a warehouse **with stock / open dispatch / open GRN** | T | **blocked** | 09 (introduces), 08 |
+| C5 | Warehouse-restricted role sees only its own warehouse's stock/dispatch/GRN | E | scoped; other warehouse denied | 01, 03, 05*, 07, 08, any rules change |
+| C6 | `warehouseId` immutable on stock/dispatch/GRN | E | re-point denied | 01, 03, 05*, 08 |
+| C7 | Forged cross-company `warehouseId` on a stock write | E | **denied** (`warehouseBelongsToCompany`) | 01, 03, 05*, 07, 08 |
+
+## D. STOCK — MOVEMENT & QUANTITIES
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| D1 | Manual stock IN | T,M | `onHandQty += qty` (post-05: via engine), one ledger row | 05a, 05d, 06 |
+| D2 | Manual stock OUT | T,M | `onHandQty -= qty`, one ledger row | 05d, 06 |
+| D3 | Manual OUT below zero | T | **rejected**, no write (INV-1) | 01, 05*, all |
+| D4 | Two concurrent OUT of the last unit (dispatch **and** manual) | T | exactly one succeeds; `onHandQty` never negative; no lost update | **01**, 05c, 05d, 07 |
+| D5 | Retry / double-submit the same movement | T | **one** effect (idempotency key) | 01, 03, 05*, 07, 08, 10 |
+| D6 | New stock summary (first movement for a product+warehouse pair) | T,E | created with correct triple key `SUM-{co}-{prod}-{wh}` | 05*, any rules change |
+| D7 | Duplicate stock summaries for one triple | T | `resolveStockSummaryDocumentId` throws / canonicalized on read | 05* |
+| D8 | Every movement writes exactly one immutable ledger row (INV-7) | T | 1:1; ledger row `update`/`delete` denied at rules | 05*, 06 |
+| D9 | `stock_ledger` row cannot be edited or deleted | E | denied (`update, delete: if false`) | any rules change |
+| D10 | `availableQty == onHandQty` (pre-Phase-07) / `== onHandQty − reservedQty` (Phase 07+) — INV-4 | T | holds after every movement | 05*, **07** |
+| D11 | `Σ(ledger IN) − Σ(ledger OUT) == onHandQty` per summary — INV-5 | T | holds for movements made after 05c; reconciliation flags pre-05 drift | **06**, 07, 08 |
+| D12 | Idempotency key uniqueness (INV-8) — no two ledger rows share one | T | enforced by deterministic doc id | 05a, all after |
+
+## E. STOCK — SECURITY / ROLES
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| E1 | Role matrix: Warehouse / Operations / Admin / GroupAdmin / **Procurement** create a stock summary | E | allowed | **00 (repro)**, 03, 05* |
+| E2 | Role matrix: same roles update `availableQty`/`onHandQty`/`reservedQty` on an existing summary | E | allowed (final list per Phase 03) | **00**, 03, 05*, 07 |
+| E3 | Role matrix: Sales / Accounts (no stock write grant) attempt a stock write | E | denied (unless a cancel-restore path is explicitly granted in 03) | 00, 03 |
+| E4 | `stock` PUT via REST API | T | **405** (Phase 02+) | **02**, 11 |
+| E5 | `stock` GET via REST API | T | works (read-only) | 02 |
+| E6 | Cross-company stock read/write | E | denied | any rules change |
+| E7 | `stock` rules change stays under the 1000-expression budget | E | emulator suite green (no "maximum expressions" error) | **03**, 07, 08, 09, 11 |
+| E8 | No `stock`-summary write exists outside `stockMovementEngine.ts` (Phase 05d+) | T (grep/lint) | zero matches | **05d**, all after |
+
+## F. INVENTORY LEDGER
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| F1 | Ledger row carries `movementType`, `direction`, `idempotencyKey`, `onHandBefore/After` (Phase 05+) | T | present | 05a, all after |
+| F2 | Legacy ledger consumers still work (dual-written `type`/`referenceType`/`referenceId`/`date`) | T,M | reports/screens render | 05*, 06 |
+| F3 | Ledger immutability | E | `update`/`delete` denied | any rules change |
+| F4 | Reconciliation report is read-only (no write on load) | T | zero writes | **06** |
+| F5 | `RECONCILE_ADJUST` requires human approval + audit log + is idempotent per run-id | T,E | enforced | 06 |
+
+## G. QUOTATIONS
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| G1 | Create a quotation with picker items | T,M | `productId` + price/name/category snapshot stored; **no stock effect** | 04, 07 |
+| G2 | Edit a quotation before conversion | T,M | allowed | 04 |
+| G3 | Edit a quotation after conversion | T | **blocked** (`isQuotationLocked`) | 04 |
+| G4 | Convert quotation → order | T,M | order created, items/qty/pricing/tax preserved, `orderType` resolved | 04 |
+| G5 | Two concurrent conversions of one quote | T | **one** order; same id returned to both | **04** |
+| G6 | Engineering-derived quotation items (`productId: ''`) | T | still convertible; downstream tolerates empty productId | 04, 07 |
+
+## H. ORDERS
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| H1 | Create an order | T,M | one doc; **no reservation, no stock effect** (pre-07) | 04, 07 |
+| H2 | Edit an order's non-line fields (notes, contact) any time | T,M | allowed | 04 |
+| H3 | Edit an order's line qty/product **after any dispatch verified** | T,M | **blocked** (INV-12, `isOrderLineLocked`) | **04**, 07 |
+| H4 | Edit an order's lines before any dispatch | T,M | allowed | 04 |
+| H5 | Cancel an order **before** dispatch | T,M | status→Cancelled; reservation released (Phase 07); PI-reversal flags set | 04, **07** |
+| H6 | Cancel an order **after** dispatch | T,M | dispatched qty restored to stock (via engine post-05d); order+dispatches flip atomically | 04, 05d, 07 |
+| H7 | Cancel is idempotent (re-run) | T | no double stock restore (`CANCEL:`/`SALES_RETURN_IN` key) | 04, 05d, 07 |
+| H8 | Order `items[]` API PUT still bypasses the lock | T | documented known gap (not a regression) | 04 (document) |
+| H9 | Order status reflects dispatch progress (`Partial Dispatch` / `Dispatched`) | T,M | correct after verify | 01, 05c |
+
+## I. INVOICES (PI + TAX)
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| I1 | Generate PI(s) from an order | T,M | PI docs created; **no stock effect** | 04, 07 |
+| I2 | Generate PI a second time | T | **rejected** unless `force` (Phase 04+) | **04** |
+| I3 | Mark PI paid | T,M | PI+order updated atomically; **Phase 07: stock reserved for the order lines** | **04**, **07** |
+| I4 | Tax invoice generation | T,M | GST breakdown correct; **no stock effect**; number allocated | (protected — verify no accidental change) |
+| I5 | PI/order money math unchanged | T,M | subtotal/tax/discount/adjustment identical to pre-phase | every phase touching invoiceWorkflow (04, 07) |
+| I6 | Invoicing never triggers a stock movement (INV-14) | T,review | zero `stock_ledger` rows from PI/tax-invoice flows | 04, 07 |
+
+## J. PROCUREMENT — VENDOR / PO / GRN
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| J1 | Create a vendor | T,M | works; `companyId`+`groupId` stamped | 09 |
+| J2 | Delete a vendor with open POs | T | blocked or confirm-required (Phase 09) | 09 |
+| J3 | Create a PO (`status:'Draft'`, `purchaseOrderId==docId`, items list) | T,E,M | created | 03, any rules change |
+| J4 | PO status transitions | T,E | only legal transitions; **one shared table** (rules == workflow == validation engine) | **03** |
+| J5 | Edit a PO after it leaves Draft | T | blocked (only Draft editable) | 03 |
+| J6 | GRN — receive full quantity | T,M | stock IN per line; PO→`Received`; ledger rows | 03, 05b |
+| J7 | GRN — receive partial | T,M | stock IN; PO→`PartiallyReceived`; line `receivedQty` incremented | 03, 05b |
+| J8 | GRN — attempt over-receipt | T | **rejected** (INV-13) | **03** |
+| J9 | GRN — double-submit / retry | T | **one** stock IN (idempotency) | **03**, 05b |
+| J10 | GRN — two concurrent receipts against one PO line | T | `Σ received ≤ ordered`; no lost update | **03** |
+| J11 | GRN as a **Procurement-role** user into an existing stock summary | E,M | **allowed** (Phase 03 role alignment) | **00 (repro)**, **03**, 05b |
+| J12 | GRN partial failure (stockIn ok, GRN doc write fails) | T | resumable; no duplicate stock on retry; no GRN-less stock (compensation marker) | 03, 05b |
+| J13 | `incomingQty` derived from open POs (report) | T | `Σ ordered − Σ received` per product | 10 (if surfaced) |
+
+## K. DISPATCH
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| K1 | Request a dispatch | T,M | doc created `Pending Verification`; `createdBy==actor`; warehouse FK | 01, any rules change |
+| K2 | Verify a dispatch (stock OUT) | T,M | `onHandQty -= verifiedQty` **in one transaction** + one ledger row | **01**, 05c, 07 |
+| K3 | Verify — insufficient stock | T | **rejected**, no partial write | **01**, 05c |
+| K4 | Verify — two concurrent verifies of the same line | T | one succeeds, no oversell (D4) | **01**, 05c |
+| K5 | Verify — double-click | T | one OUT; second is no-op or "already dispatched" | **01**, 05c |
+| K6 | Verify with a deleted product / warehouse | T | clear error, no write | **01**, 09 |
+| K7 | Verify consumes the order's reservation (Phase 07) | T | `reservedQty -= min(verified, reservation)`; reservation doc updated | **07** |
+| K8 | Confirm delivery (OTP) — transactional | T | status→Delivered, OTP consumed once | (protected — verify no change) |
+| K9 | Close dispatch — transactional | T | status→Closed; order reconciliation flag | (protected) |
+| K10 | Serial number reused across dispatches | T,E | **rejected** (full scan pre-11, `dispatch_serials` lock Phase 11) | 11a |
+| K11 | Order `items[].dispatchedQty/pendingQty` updated correctly after verify | T | matches; order status correct | 01, 05c |
+
+## L. WAREHOUSE TRANSFER (Phase 08+)
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| L1 | Ship a transfer | T,M | source `onHandQty -= qty`; `TRANSFER_OUT` ledger row; status `in_transit` | 08 |
+| L2 | Receive a transfer | T,M | dest `onHandQty += qty`; `TRANSFER_IN` ledger row; status `received` | 08 |
+| L3 | `Σ(TRANSFER_OUT + TRANSFER_IN)` per transfer == 0 (INV-11) | T | holds | 08 |
+| L4 | Ship / receive idempotency | T | one effect each on retry | 08 |
+| L5 | Cancel an in-transit transfer | T | reversed to source | 08 |
+| L6 | Cross-company transfer attempt | E | **denied** | 08 |
+| L7 | In-transit qty visible / reconcilable | T,M | derived from `status=='in_transit'` transfers | 08 |
+
+## M. RESERVATION / ALLOCATION (Phase 07+)
+
+| # | Check | Type | Expected | Re-verify |
+|---|---|---|---|---|
+| M1 | PI paid → stock reserved for order lines at `fulfilmentWarehouseId` | T,M | `reservedQty += qty`; `stock_reservations` doc `active` | 07 |
+| M2 | `availableQty` drops by the reserved amount; `onHandQty` unchanged | T | INV-4 | 07 |
+| M3 | Reservation caps at available; shortfall flagged (default policy) | T | `order.stockShortfall[]` set; reserve = available | 07 |
+| M4 | Two concurrent PI-paid events for the last units | T | second reserves only the remainder + shortfall | 07 |
+| M5 | Dispatch consumes the reservation | T | K7 | 07 |
+| M6 | Cancel releases the unconsumed remainder | T | `SALES_RELEASE`; reservation `released` | 07 |
+| M7 | Reservation lifecycle idempotent (double PI-paid, double cancel) | T | one reserve / one release | 07 |
+| M8 | `reservedQty >= 0` and `<= onHandQty` (INV-2, INV-3 — unless backorder enabled) | T | enforced in the engine txn | 07 |
+| M9 | `reservationsEnabled` flag OFF → `availableQty == onHandQty`, no reserve on PI-paid | T | clean fallback | 07 |
+| M10 | Orders/PIs created before Phase 07 dispatch without a reservation | T | engine consumes `min(verified, 0)`; no error | 07 |
+
+## N. SECURITY — CROSS-CUTTING (run on EVERY rules change: Phases 03, 07, 08, 09, 11)
+
+| # | Check | Type | Expected |
+|---|---|---|---|
+| N1 | Company A → Company B: read/write stock, ledger, dispatch, GRN, PO, reservations, transfers | E | **all denied** |
+| N2 | Warehouse A user → Warehouse B: read/write stock, ledger, dispatch, GRN | E | **all denied** |
+| N3 | Unauthorized role → stock write | E | denied |
+| N4 | Direct REST API → stock write | T | 405 |
+| N5 | `stock_ledger` / `goods_receipts` update or delete | E | denied (`if false`) |
+| N6 | GroupAdmin group-wide read of stock across the group's companies | E | allowed (`groupAdminCanRead`) |
+| N7 | Suspended group → any stock access for its companies | E | **denied** (`groupIsActive`) |
+| N8 | `storage.rules` still mirrors any identity/tenant helper changed in `firestore.rules` | review + E | in sync (§34 danger zone) |
+| N9 | Emulator suite runs 100% green (batched 2–3 runs) | E | pass |
+| N10 | No 1000-expression budget failure on any touched rules block | E | pass |
+
+## O. CROSS-MODULE END-TO-END SMOKE (mandatory from Phase 04 on; full for HIGH phases 03/05d/07)
+
+| # | Flow | Type | Expected |
+|---|---|---|---|
+| O1 | **B2B:** Lead → Customer → Quotation → convert → Order → generate PI → mark PI paid → request Dispatch → verify Dispatch → confirm delivery → close → Tax Invoice | M | every step succeeds; stock moves only at dispatch verify (+ reserve at PI-paid from Phase 07); ledger consistent; reconciliation clean |
+| O2 | **B2C:** Lead → Customer → Project → Survey → Engineering → Quotation → Order → **PO → GRN (stock IN)** → PI → Payment → Dispatch (stock OUT) → Tax Invoice → Installation | M | full lifecycle; procurement IN and dispatch OUT both ledgered; project stage advances |
+| O3 | Order cancel mid-flow (after partial dispatch) | M | dispatched qty returns to stock; reservation remainder released; PI-reversal flags; order line locked throughout |
+| O4 | GRN → immediately dispatch the received stock | M | IN then OUT; `onHandQty` net-correct; two ledger rows; reconciliation clean |
+| O5 | Concurrent operations: two users verify dispatches of the same product from the same warehouse | M | no oversell; `onHandQty` correct; both ledger rows present or one clean rejection |
+| O6 | Run `StockReconciliationEngine` after O1–O5 | M | zero unexplained mismatches (post-Phase-06) |
+
+---
+
+## P. PHASE → REQUIRED ROWS (quick lookup)
+
+| Phase | Minimum matrix rows to verify green |
+|---|---|
+| **00** | Standard gate + capture baseline `vitest` counts + **E1–E3 (role matrix — the deliverable)** + D9, F3, N9 |
+| **01** | D3, D4, D5, K1–K6, K11, C5–C7, E7, N9 + standard gate |
+| **02** | E4, E5, N4 + standard gate |
+| **03** | **J3–J12**, **E1–E3**, E7, D5, D8, C5–C7, N1–N10 (full) + O1, O4 |
+| **04** | **H1–H9**, G2–G5, I1–I3, I5, standard gate + O1, O3 |
+| **05a** | D6, D12, F1, E8(baseline), N9 + standard gate (engine dormant — low bar) |
+| **05b** | J6–J12 **unchanged from 03**, F1, F2, D8 + O4 |
+| **05c** | K2–K6, K11, D4, D8, F1, F2 + O5 |
+| **05d** | **D1–D3, D8, D10, E8**, H6, H7, F2, N9 (full) + O3, O5 |
+| **06** | **D11, F4, F5**, D8 + O6 |
+| **07** | **M1–M10, D10, H3, H5–H7, I3, K7**, N1–N10 (full) + O1, O2, O3 (full) |
+| **08** | **L1–L7**, C4–C7, N1, N2, N9 + O4 |
+| **09** | **A1–A9, B1–B6, C1–C4, J1–J2**, E7, N1–N10 + O1 |
+| **10** | D1, D2, D5, per-sub-feature rows (opening stock: A/D; damage: D + reason; RMA: H6/K + link) + O2 |
+| **11** | **K10 (serial lock)**, A8, D-list latency, N8–N10, index deploy verification + O1 |
+
+---
+*End of INVENTORY_REGRESSION_MATRIX.md — the checklist is permanent; add rows as phases introduce new behavior, never remove a row without documenting why in the STATE file.*
