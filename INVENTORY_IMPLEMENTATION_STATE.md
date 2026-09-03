@@ -25,11 +25,10 @@ APPROVAL NOTES:         Project owner approved INVENTORY_IMPLEMENTATION_PLAN.md 
 
 ```
 CURRENT PHASE:          INVENTORY-00 — Baseline & Safety Lock
-STATUS:                 COMPLETE
-LAST VERIFIED COMMIT:   the HEAD commit titled "test(inventory): baseline harness + role matrix + invariants (INVENTORY-00)"
-                         (a commit cannot embed its own hash — resolve with:  git log --oneline -1 --grep "INVENTORY-00")
+STATUS:                 COMPLETE (verified 2026-09-03 in a checkpoint pass)
+LAST VERIFIED COMMIT:   49123be  test(inventory): baseline harness + role matrix + invariants (INVENTORY-00)
 DATE OF THIS UPDATE:    2026-09-03
-UPDATED BY:             INVENTORY-00 implementation session
+UPDATED BY:             INVENTORY-00 implementation session (+ checkpoint verification pass, hash recorded)
 ```
 
 ---
@@ -40,7 +39,7 @@ UPDATED BY:             INVENTORY-00 implementation session
 |---|---|---|---|---|
 | approval | 2026-09-03 | `ea3f32f` | — | Project owner approved the plan; INVENTORY-00 authorized. |
 | planning baseline | 2026-09-03 | `47c063b` | — | 4 INVENTORY_*.md planning artifacts committed. |
-| **INVENTORY-00** | 2026-09-03 | HEAD `test(inventory): baseline harness + role matrix + invariants (INVENTORY-00)` | **PASS** (JBR java 21, 14 files / 600 assertions, 2 batches, 100%) | Baseline harness (6 test files, 51 tests), stock role matrix (25 tests, P1-3 **CONFIRMED**), invariant predicates. Zero production behavior change. |
+| **INVENTORY-00** | 2026-09-03 | `49123be` | **PASS** (JBR java 21, 14 files / 600 assertions, 2 batches, 100%) | Baseline harness (6 test files, 51 tests), stock role matrix (25 tests, P1-3 **CONFIRMED**), invariant predicates. Zero production behavior change. |
 
 ---
 
@@ -49,10 +48,9 @@ UPDATED BY:             INVENTORY-00 implementation session
 ```
 47c063b  docs(inventory): establish remediation planning baseline   (4 INVENTORY_*.md)
 ea3f32f  docs(inventory): approve remediation plan                  (STATE: PLAN STATUS -> APPROVED)
-HEAD     test(inventory): baseline harness + role matrix + invariants (INVENTORY-00)
+49123be  test(inventory): baseline harness + role matrix + invariants (INVENTORY-00)
 
-LAST VERIFIED COMMIT = the HEAD "…(INVENTORY-00)" commit.  Resolve its hash:
-   git log --oneline -1 --grep "INVENTORY-00"
+LAST VERIFIED COMMIT = 49123be.
 ```
 
 ---
@@ -278,7 +276,7 @@ PLANNING (commit 47c063b, docs only):
 APPROVAL (commit ea3f32f, docs only):
   INVENTORY_IMPLEMENTATION_STATE.md  (PLAN STATUS -> APPROVED)
 
-INVENTORY-00 (commit <this>, tests + harness only — NO production code):
+INVENTORY-00 (commit 49123be, tests + harness only — NO production code):
   ADDED:    src/lib/inventory/INVENTORY_INVARIANTS.ts
   ADDED:    src/lib/inventory/__tests__/baseline/stockIn.baseline.test.ts
   ADDED:    src/lib/inventory/__tests__/baseline/dispatchOut.baseline.test.ts
