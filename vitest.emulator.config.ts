@@ -28,6 +28,7 @@ export default defineConfig({
       'src/lib/__tests__/stockReconciliation.emulator.test.ts',
       'src/lib/__tests__/stockReservationTransaction.emulator.test.ts',
       'src/lib/__tests__/stockTransferTransaction.emulator.test.ts',
+      'src/lib/__tests__/customerReturnTransaction.emulator.test.ts',
       'src/lib/__tests__/productSkuLock.emulator.test.ts',
       'src/lib/__tests__/sensitiveCollectionsRoleEnforcement.emulator.test.ts',
       'src/lib/__tests__/biometricFaceReferences.emulator.test.ts',

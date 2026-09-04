@@ -801,11 +801,11 @@ service cloud.firestore {
       // (Firestore evaluates every matching `match` block for a path and
       // allows the request if ANY grants it — a dedicated block alone does
       // NOT suppress the generic fallback from ALSO applying).
-      // INVENTORY-07/08/09: 'stock_reservations', 'stock_transfers' and
-      // 'product_sku_locks' have their own dedicated blocks below and MUST be
-      // excluded here, or the generic fallback would additively grant any
-      // same-company active user create/update access.
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'product_sku_locks', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
+      // INVENTORY-07/08/09/10: 'stock_reservations', 'stock_transfers',
+      // 'product_sku_locks' and 'customer_returns' have their own dedicated
+      // blocks below and MUST be excluded here, or the generic fallback would
+      // additively grant any same-company active user create/update access.
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'product_sku_locks', 'customer_returns', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
     }
 
     match /companies/{companyId} {
@@ -1640,6 +1640,30 @@ service cloud.firestore {
           || resource.data.toWarehouseId == actorWarehouseScopeId()
         );
       allow delete: if false;
+    }
+
+    match /customer_returns/{returnId} {
+      // INVENTORY-10 (§10e) — customer return / RMA. Written ONLY as a
+      // MovementParticipant inside the stock movement engine's transaction
+      // (the physical SALES_RETURN_IN, and — for a damaged-condition line —
+      // the immediate DAMAGE_OUT write-off, commit atomically with this doc).
+      // A return is a one-shot, immutable event once created — like a ledger
+      // row, never edited afterward (`allow update: if false`); a RETRY of
+      // the SAME `returnId` is the engine-level idempotency path, not a
+      // rules-level update.
+      allow read: if actorIsActive() && (
+        resource == null
+        || ((canReadCompanyScoped() || groupAdminCanRead(resource.data)) && sameWarehouse(resource.data))
+      );
+      allow create: if actorIsActive()
+        && warehouseActorCanCreate(request.resource.data)
+        && warehouseBelongsToCompany(request.resource.data)
+        && sameWarehouse(request.resource.data)
+        && actorRoleMatches('.*Warehouse.*|.*Operations.*|.*Sales.*|.*Account.*|Admin|GroupAdmin')
+        && request.resource.data.orderId is string
+        && request.resource.data.dispatchId is string
+        && request.resource.data.status == 'processed';
+      allow update, delete: if false;
     }
 
     match /notifications/{notificationId} {

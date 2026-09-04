@@ -221,6 +221,7 @@ const WAREHOUSE_SCOPED_COLLECTIONS = new Set<string>([
   COLLECTIONS.STOCK_RESERVATIONS,   // INVENTORY-07
   COLLECTIONS.DISPATCH,
   COLLECTIONS.GOODS_RECEIPTS,
+  COLLECTIONS.CUSTOMER_RETURNS,     // INVENTORY-10 (§10e) — read rule gates on sameWarehouse()
 ]);
 
 // §8.2: warehouse-restricted roles are the existing warehouse-adjacent roles
@@ -435,6 +436,10 @@ const COLLECTION_PERMISSION_MODULE: Record<string, string> = {
   // transfer spans two warehouses of the same company). Company-scoped read;
   // warehouse isolation is enforced on write by the rules.
   [COLLECTIONS.STOCK_TRANSFERS]: 'stock',
+  // INVENTORY-10 (§10e): a customer return is shared operational stock state
+  // (its restock/write-off legs commit through the movement engine, same as
+  // reservations/transfers above) — never per-user record ownership.
+  [COLLECTIONS.CUSTOMER_RETURNS]: 'stock',
   [COLLECTIONS.ORDERS]: 'orders',
   [COLLECTIONS.PROFORMA_INVOICES]: 'invoices',
   [COLLECTIONS.TAX_INVOICES]: 'tax_invoices',
