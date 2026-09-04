@@ -1,7 +1,7 @@
 // features/inventory/hooks/useInventory.ts
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate, resolveWriteGroupId,
+  getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate,
 } from '../../../lib/firestore';
 import { COLLECTIONS } from '../../../lib/firebase';
 // INVENTORY-05a: single canonical stock-summary identity — the local copy was
@@ -171,87 +171,45 @@ export function useSaveStockEntry(onSuccess: () => void) {
 
   return useMutation({
     mutationFn: async (data: StockForm) => {
-      const id = genId.generic('STK');
       const qty = Number(data.qty);
       if (!data.productId) throw new Error('Product is required');
       if (!data.warehouseId) throw new Error('Warehouse is required');
       if (!Number.isFinite(qty) || qty <= 0) throw new Error('Quantity must be greater than zero');
-      const payload = { ...data, qty, createdBy: user.id };
-      const { db } = await import('../../../lib/firebase');
-      const { doc, runTransaction, serverTimestamp } = await import('firebase/firestore');
-      const { sanitizePayload } = await import('../../../lib/sanitizer');
-      const stockId = stockSummaryId(activeCompanyId, data.productId, data.warehouseId);
-      const transactionId = genId.generic('TXN');
-      // Group Admin "cannot add stock" root cause: this write goes through a
-      // raw Firestore transaction, bypassing createDocWithId()'s automatic
-      // groupId stamping (Master Plan §3.4). firestore.rules'
-      // groupAdminCanCreate()/groupAdminCanUpdate() both require a `groupId`
-      // field on the document — without it, a Group Admin's otherwise
-      // rules-supported stock write is silently denied even though the UI
-      // shows "Add Stock"/"Adjust Stock" as available.
-      const groupId = resolveWriteGroupId(activeCompanyId);
 
-      await runTransaction(db, async (transaction) => {
-        const stockRef = doc(db, COLLECTIONS.STOCK, stockId);
-        const ledgerRef = doc(db, COLLECTIONS.STOCK_LEDGER, id);
-        const stockSnap = await transaction.get(stockRef);
-        const existingStock = stockSnap.exists() ? stockSnap.data() : {};
-        const currentAvailable = Number(existingStock.availableQty ?? existingStock.available) || 0;
-        const currentReserved = Number(existingStock.reservedQty ?? existingStock.reserved) || 0;
-        const nextAvailable = data.type === 'IN'
-          ? currentAvailable + qty
-          : currentAvailable - qty;
+      // INVENTORY-05d: manual Add / Adjust Stock now goes through the shared
+      // movement engine — the single stock writer (P1-4). Manual entries have
+      // never been idempotent (INVENTORY-00 baseline), so a fresh idempotency
+      // key is minted on every submission.
+      const { applyStockMovement } = await import('../../../lib/inventory/stockMovementEngine');
+      const movementType = data.type === 'OUT' ? 'ADJUSTMENT_OUT' : 'ADJUSTMENT_IN';
+      const reference = String(data.reference || '').trim();
+      const reasonCode = reference || String(data.notes || '').trim() || `Manual stock ${String(data.type).toLowerCase()}`;
 
-        if (currentAvailable < 0 || currentReserved < 0) {
-          throw new Error('Stock summary is inconsistent');
-        }
-        if (data.type === 'OUT' && nextAvailable < 0) {
-          throw new Error(`Insufficient stock for ${data.product}. Available: ${currentAvailable}, Required: ${qty}`);
-        }
-        const summaryBase = { ...existingStock };
-        delete summaryBase.available;
-        delete summaryBase.reserved;
-
-        transaction.set(ledgerRef, sanitizePayload({
-          ...payload,
-          id,
-          beforeQty: currentAvailable,
-          afterQty: nextAvailable,
-          transactionId,
-          movementAt: serverTimestamp(),
-          companyId: activeCompanyId,
-          ...(groupId ? { groupId } : {}),
-          updatedBy: user.id,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-          isDeleted: false,
-        }));
-
-        transaction.set(stockRef, sanitizePayload({
-          ...summaryBase,
-          id: stockId,
-          productId: data.productId,
-          product: data.product,
-          warehouseId: data.warehouseId,
-          warehouse: data.warehouse,
-          availableQty: nextAvailable,
-          reservedQty: currentReserved,
-          unit: data.unit,
-          companyId: activeCompanyId,
-          ...(groupId ? { groupId } : {}),
-          updatedBy: user.id,
-          updatedAt: serverTimestamp(),
-          createdAt: stockSnap.exists() ? stockSnap.data().createdAt : serverTimestamp(),
-          isDeleted: false,
-        }));
+      const result = await applyStockMovement({
+        movementType,
+        productId: data.productId,
+        warehouseId: data.warehouseId,
+        qty,
+        unit: data.unit,
+        sourceType: 'manual',
+        sourceId: reference || genId.generic('STK'),
+        idempotencyKey: `${movementType}:manual:${genId.generic('STK')}`,
+        companyId: activeCompanyId,
+        actorId: user.id,
+        reasonCode,
+        notes: data.notes,
+        ledgerExtra: {
+          reference, product: data.product || '', warehouse: data.warehouse || '', date: data.date,
+        },
       });
+
       await notifyRoleUsers(
         ['Warehouse', 'Operations'],
         NotificationType.INVENTORY_UPDATED,
         'Inventory updated',
-        `Stock ${data.type} entry ${id} was recorded for ${data.product || data.productId}.`,
+        `Stock ${data.type} entry ${result.ledgerId} was recorded for ${data.product || data.productId}.`,
         'stock',
-        id,
+        result.ledgerId,
         activeCompanyId
       );
     },

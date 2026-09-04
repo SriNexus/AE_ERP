@@ -36,7 +36,6 @@ import { COLLECTIONS, firebaseEnv } from '../firebase';
 import { createDocWithId, genId, getAll, getOne, resolveWriteGroupId, updateDocById } from '../firestore';
 import { sanitizeFirestoreData } from '../sanitizer';
 import { useAppStore } from '../../store/useAppStore';
-import { resolveStockSummaryDocumentId } from '../stockWorkflow';
 import { resolveWorkflowCompanyId, stockSummaryId, type WorkflowRecord } from '../workflow';
 import { buildIdempotencyKey, movementLedgerId } from './idempotency';
 import {
@@ -47,6 +46,23 @@ import {
 } from './types';
 
 const EPSILON = 1e-6;
+
+/**
+ * Given the canonical `SUM-{company}-{product}-{warehouse}` id and every `stock`
+ * summary doc that matches (company, product, warehouse), return the id to
+ * write. A single legacy-id summary is respected; the canonical id is used when
+ * none exists; two live summaries for the same tuple is a hard error.
+ * (Moved here from `stockWorkflow.ts` in INVENTORY-05d to break the import cycle
+ * once `stockWorkflow` started calling the engine.)
+ */
+export function resolveStockSummaryDocumentId(
+  canonicalId: string,
+  matches: Array<{ id?: string; isDeleted?: boolean }>,
+): string {
+  const active = matches.filter((row) => row.isDeleted !== true && String(row.id || '').trim());
+  if (active.length > 1) throw new Error('Duplicate stock summaries exist for the same company, product, and warehouse');
+  return active[0]?.id || canonicalId;
+}
 
 function resolveDirection(movementType: MovementType, signedQty: number): MovementDirection {
   if (movementType === 'RECONCILE_ADJUST') return signedQty >= 0 ? 'IN' : 'OUT';

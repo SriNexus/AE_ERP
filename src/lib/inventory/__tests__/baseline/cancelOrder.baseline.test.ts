@@ -87,14 +87,18 @@ beforeEach(() => {
   });
 });
 
-describe('INVENTORY-00 BASELINE — stockWorkflow.cancelOrder', () => {
-  it('restores dispatched stock (via stockIn, sourceType "return") and marks the order Cancelled', async () => {
+describe('INVENTORY-05d — stockWorkflow.cancelOrder (restore via the movement engine)', () => {
+  it('restores dispatched stock (SALES_RETURN_IN movement) and marks the order Cancelled', async () => {
     const result = await cancelOrder('ORD-1', 'Customer request');
     expect(result).toEqual(expect.objectContaining({ orderId: 'ORD-1', refundRequired: true }));
 
-    // stock restored: a return-type IN ledger row keyed CANCEL:ORD-1:DSP-1:P-1
+    // stock restored: a SALES_RETURN_IN movement keyed order_cancel:ORD-1:DSP-1:P-1
     const returnLedger = mocks.createDocWithId.mock.calls.find((c) => c[0] === 'stock_ledger')?.[2] as Record<string, unknown>;
-    expect(returnLedger).toMatchObject({ type: 'IN', sourceType: 'return', sourceId: 'CANCEL:ORD-1:DSP-1:P-1', qty: 3 });
+    expect(returnLedger).toMatchObject({
+      movementType: 'SALES_RETURN_IN', direction: 'IN', type: 'IN',
+      sourceType: 'order_cancel', sourceId: 'ORD-1:DSP-1:P-1', referenceType: 'OrderCancel', qty: 3,
+    });
+    expect(returnLedger.id).toBe(`STKMV-${encodeURIComponent('SALES_RETURN_IN:order_cancel:ORD-1:DSP-1:P-1')}`);
 
     // dispatch flipped to Returned
     expect(mocks.updateDocById).toHaveBeenCalledWith('dispatch', 'DSP-1', expect.objectContaining({ status: 'Returned', cancellationOrderId: 'ORD-1' }));
@@ -124,11 +128,20 @@ describe('INVENTORY-00 BASELINE — stockWorkflow.cancelOrder', () => {
     expect(collectionsWritten.has('tax_invoices')).toBe(false);
   });
 
-  it('BASELINE (idempotency): a pre-existing return ledger for the same CANCEL key means the item is NOT restored again', async () => {
-    mocks.returnLedgers = [{ id: 'STK-OLD', type: 'IN', sourceType: 'return', sourceId: 'CANCEL:ORD-1:DSP-1:P-1' }];
+  it('idempotency: the engine dedup means a pre-existing SALES_RETURN_IN movement is NOT re-applied', async () => {
+    // the engine's deterministic ledger doc already exists (a prior restore committed)
+    const ledgerId = `STKMV-${encodeURIComponent('SALES_RETURN_IN:order_cancel:ORD-1:DSP-1:P-1')}`;
+    mocks.getOne.mockImplementation(async (collection: string, id: string) => {
+      if (collection === 'orders' && id === 'ORD-1') return mocks.order;
+      if (collection === 'stock') return { id, availableQty: 2, reservedQty: 0 };
+      if (collection === 'stock_ledger' && id === ledgerId) {
+        return { id: ledgerId, movementType: 'SALES_RETURN_IN', onHandBefore: 2, onHandAfter: 5 };
+      }
+      return null;
+    });
     await cancelOrder('ORD-1', 're-run');
     const newReturnRows = mocks.createDocWithId.mock.calls.filter((c) => c[0] === 'stock_ledger');
-    expect(newReturnRows).toHaveLength(0); // already restored -> skipped
+    expect(newReturnRows).toHaveLength(0); // already restored -> no-op
     // the order is still (re-)marked cancelled
     expect(mocks.updateDocById).toHaveBeenCalledWith('orders', 'ORD-1', expect.objectContaining({ status: 'Cancelled' }));
   });

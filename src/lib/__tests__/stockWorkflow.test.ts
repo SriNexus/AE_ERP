@@ -11,8 +11,9 @@ const mocks = vi.hoisted(() => ({
   resolveWorkflowCompanyId: vi.fn(),
   stockSummaryId: vi.fn(),
   getState: vi.fn(),
+  idCounter: 0,
   genId: {
-    generic: vi.fn((prefix: string = 'GEN') => `${prefix}-001`),
+    generic: vi.fn((prefix: string = 'GEN') => `${prefix}-${String(++mocks.idCounter).padStart(3, '0')}`),
   },
 }));
 
@@ -22,6 +23,7 @@ vi.mock('../firestore', () => ({
   getOne: mocks.getOne,
   getAll: mocks.getAll,
   genId: mocks.genId,
+  resolveWriteGroupId: () => 'grp-1',
 }));
 
 vi.mock('../workflow', () => ({
@@ -54,24 +56,32 @@ vi.mock('../firebase', () => ({
 
 import { cancelOrder, stockIn } from '../stockWorkflow';
 
-describe('stockIn', () => {
+/**
+ * INVENTORY-05d: `stockIn` is a thin wrapper over the movement engine (the
+ * single stock writer). These tests characterize the migrated behaviour —
+ * the engine's demo branch writes `stock` + `stock_ledger` via createDocWithId.
+ */
+describe('stockIn (via the movement engine)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.idCounter = 0;
     mocks.getState.mockReturnValue({
       activeCompanyId: 'comp-1',
       company: { id: 'comp-1' },
       user: { id: 'user-1', companyId: 'comp-1' },
     });
     mocks.resolveWorkflowCompanyId.mockReturnValue('comp-1');
-    mocks.stockSummaryId.mockReturnValue('SUM-comp-1-P-1-W-1');
+    mocks.stockSummaryId.mockImplementation((_c: string, p: string, w: string) => `SUM-comp-1-${p}-${w}`);
     mocks.usersByRole.mockResolvedValue([{ id: 'warehouse-1' }]);
     mocks.getAll.mockResolvedValue([]);
-    mocks.getOne.mockResolvedValue({ id: 'SUM-comp-1-P-1-W-1', availableQty: 5, reservedQty: 1 });
+    mocks.getOne.mockImplementation(async (col: string, id: string) =>
+      col === 'stock' ? { id, availableQty: 5, reservedQty: 1 } : null);
   });
 
-  it('updates an existing legacy stock summary instead of creating a duplicate tuple', async () => {
-    mocks.getAll.mockResolvedValue([{ id: 'DEMO-V1-STK-001', companyId: 'comp-1', productId: 'P-1', warehouseId: 'W-1' }]);
-    mocks.getOne.mockResolvedValue({ id: 'DEMO-V1-STK-001', availableQty: 90, reservedQty: 22 });
+  it('reuses an existing legacy stock summary doc id instead of creating a duplicate tuple', async () => {
+    mocks.getAll.mockResolvedValue([{ id: 'DEMO-V1-STK-001', companyId: 'comp-1', productId: 'P-1', warehouseId: 'W-1', availableQty: 90, reservedQty: 22 }]);
+    mocks.getOne.mockImplementation(async (col: string, id: string) =>
+      col === 'stock' ? { id, availableQty: 90, reservedQty: 22 } : null);
 
     await expect(stockIn({ productId: 'P-1', warehouseId: 'W-1', qty: 8, unit: 'PCS', sourceType: 'purchase' }))
       .resolves.toMatchObject({ stockId: 'DEMO-V1-STK-001', beforeQty: 90, afterQty: 98 });
@@ -80,74 +90,46 @@ describe('stockIn', () => {
       1,
       'stock',
       'DEMO-V1-STK-001',
-      expect.objectContaining({ id: 'DEMO-V1-STK-001', availableQty: 98, reservedQty: 22 }),
+      expect.objectContaining({ id: 'DEMO-V1-STK-001', onHandQty: 98, availableQty: 98, reservedQty: 22 }),
     );
   });
-  it('increments the stock summary and writes a ledger entry', async () => {
-    await expect(
-      stockIn({
-        productId: 'P-1',
-        warehouseId: 'W-1',
-        qty: 7,
-        unit: 'PCS',
-        sourceType: 'purchase',
-        sourceId: 'PO-1',
-        notes: 'Incoming stock',
-      })
-    ).resolves.toEqual({
-      stockId: 'SUM-comp-1-P-1-W-1',
-      ledgerId: 'STK-001',
-      transactionId: 'TXN-001',
-      beforeQty: 5,
-      afterQty: 12,
+
+  it('increments on-hand via the engine and writes a PURCHASE_RECEIPT ledger row', async () => {
+    const result = await stockIn({
+      productId: 'P-1', warehouseId: 'W-1', qty: 7, unit: 'PCS',
+      sourceType: 'purchase', sourceId: 'PO-1', notes: 'Incoming stock',
     });
+    expect(result).toMatchObject({ stockId: 'SUM-comp-1-P-1-W-1', beforeQty: 5, afterQty: 12, transactionId: '' });
+    const key = 'PURCHASE_RECEIPT:purchase:PO-1';
+    expect(result.ledgerId).toBe(`STKMV-${encodeURIComponent(key)}`);
 
-    expect(mocks.createDocWithId).toHaveBeenNthCalledWith(
-      1,
-      'stock',
-      'SUM-comp-1-P-1-W-1',
-      expect.objectContaining({
-        id: 'SUM-comp-1-P-1-W-1',
-        companyId: 'comp-1',
-        productId: 'P-1',
-        warehouseId: 'W-1',
-        availableQty: 12,
-        reservedQty: 1,
-        unit: 'PCS',
-        updatedBy: 'user-1',
-        isDeleted: false,
-      })
-    );
+    expect(mocks.createDocWithId).toHaveBeenNthCalledWith(1, 'stock', 'SUM-comp-1-P-1-W-1', expect.objectContaining({
+      id: 'SUM-comp-1-P-1-W-1', companyId: 'comp-1', productId: 'P-1', warehouseId: 'W-1',
+      onHandQty: 12, availableQty: 12, reservedQty: 1, unit: 'PCS', updatedBy: 'user-1', isDeleted: false,
+    }));
+    expect(mocks.createDocWithId).toHaveBeenNthCalledWith(2, 'stock_ledger', result.ledgerId, expect.objectContaining({
+      companyId: 'comp-1', productId: 'P-1', warehouseId: 'W-1',
+      movementType: 'PURCHASE_RECEIPT', direction: 'IN', type: 'IN', qty: 7, unit: 'PCS',
+      onHandBefore: 5, onHandAfter: 12, beforeQty: 5, afterQty: 12,
+      sourceType: 'purchase', sourceId: 'PO-1', idempotencyKey: key, notes: 'Incoming stock', createdBy: 'user-1', isDeleted: false,
+    }));
+  });
 
-    expect(mocks.createDocWithId).toHaveBeenNthCalledWith(
-      2,
-      'stock_ledger',
-      'STK-001',
-      expect.objectContaining({
-        id: 'STK-001',
-        companyId: 'comp-1',
-        productId: 'P-1',
-        warehouseId: 'W-1',
-        type: 'IN',
-        qty: 7,
-        unit: 'PCS',
-        beforeQty: 5,
-        afterQty: 12,
-        transactionId: 'TXN-001',
-        sourceType: 'purchase',
-        sourceId: 'PO-1',
-        notes: 'Incoming stock',
-        createdBy: 'user-1',
-        isDeleted: false,
-      })
-    );
-
+  it('an adjustment carries a reasonCode; manual adds are NOT idempotent (fresh key each call)', async () => {
+    const a = await stockIn({ productId: 'P-1', warehouseId: 'W-1', qty: 2, unit: 'PCS', sourceType: 'adjustment', notes: 'stock count' });
+    const b = await stockIn({ productId: 'P-1', warehouseId: 'W-1', qty: 2, unit: 'PCS', sourceType: 'adjustment', notes: 'stock count' });
+    const rows = mocks.createDocWithId.mock.calls.filter((c) => c[0] === 'stock_ledger');
+    expect(rows).toHaveLength(2);
+    expect(rows[0][2]).toMatchObject({ movementType: 'ADJUSTMENT_IN', reasonCode: 'stock count' });
+    // no explicit sourceId -> a fresh idempotency key per call (no dedupe)
+    expect(a.ledgerId).not.toBe(b.ledgerId);
   });
 });
 
 describe('cancelOrder', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.idCounter = 0;
     mocks.getState.mockReturnValue({
       activeCompanyId: 'comp-1',
       company: { id: 'comp-1' },

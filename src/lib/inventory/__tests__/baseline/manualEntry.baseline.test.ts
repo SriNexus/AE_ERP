@@ -1,85 +1,70 @@
 /**
- * manualEntry.baseline.test.ts — INVENTORY-00 (Baseline & Safety Lock)
- * ===================================================================
+ * manualEntry.baseline.test.ts — INVENTORY-00 baseline, REWRITTEN for INVENTORY-05d
+ * ==============================================================================
  *
- * Freezes the CURRENT behavior of the manual "Add Stock" / "Adjust Stock"
- * write path — src/features/inventory/hooks/useInventory.ts `useSaveStockEntry`.
+ * INVENTORY-00 froze the pre-engine behaviour of `useInventory.useSaveStockEntry`
+ * (its own runTransaction, its own `stockSummaryId` copy, spread-the-raw-form
+ * ledger). INVENTORY-05d routes manual Add / Adjust Stock through the movement
+ * engine — the single stock writer (P1-4). This file now characterizes the
+ * migrated behaviour.
  *
- * The hook returns a react-query mutation; this test drives its `mutationFn`
- * directly (react-query + firebase are mocked). A fake Firestore transaction
- * object stands in for `runTransaction`.
- *
- * Characterization only. DO NOT fix anything here.
- *
- * Known-defect / structure coverage:
- *   - P1-4 : this is a SECOND, parallel stock-write implementation, distinct
- *            from stockWorkflow.stockIn, with its own `stockSummaryId` copy
- *            and its own ledger field set (spreads the raw form `data`).
- *   - P0-3 : `reservedQty` is carried forward (currentReserved), never changed.
- *   - idempotency: each call mints a fresh STK id; nothing dedups a repeat.
+ *   - IN  → ADJUSTMENT_IN  movement (onHand += qty)
+ *   - OUT → ADJUSTMENT_OUT movement (onHand -= qty; below zero → aborts, INV-1)
+ *   - `reservedQty` still only carried forward (P0-3 — Phase 07)
+ *   - each submission mints a fresh idempotency key (no dedupe — Phase-00 parity)
+ *   - the form `reference` is preserved on the ledger row (via ledgerExtra)
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const store: Record<string, Record<string, any>> = {};
+const col = (name: string) => (store[name] = store[name] || {});
 const mocks = vi.hoisted(() => ({
   invalidateQueries: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
   notifyRoleUsers: vi.fn(),
-  resolveWriteGroupId: vi.fn(() => 'grp-1'),
   idCounter: 0,
-  txSet: vi.fn(),
-  stockExists: true,
-  stockData: { availableQty: 10, reservedQty: 4, createdAt: 'orig' } as Record<string, unknown>,
 }));
 
 vi.mock('@tanstack/react-query', () => ({
-  useMutation: (opts: any) => opts, // expose mutationFn / onError directly
+  useMutation: (opts: any) => opts,
   useQuery: () => ({ data: [] }),
   useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries }),
 }));
 vi.mock('../../../firestore', () => ({
-  getAll: vi.fn(async () => []),
-  createDocWithId: vi.fn(),
-  updateDocById: vi.fn(),
+  getAll: vi.fn(async (c: string) => Object.values(col(c)).map((d) => ({ ...d }))),
+  getOne: vi.fn(async (c: string, id: string) => (col(c)[id] ? { ...col(c)[id] } : null)),
+  createDocWithId: vi.fn(async (c: string, id: string, data: any) => { col(c)[id] = { ...data, id }; }),
+  updateDocById: vi.fn(async (c: string, id: string, patch: any) => { col(c)[id] = { ...(col(c)[id] || { id }), ...patch }; }),
   deleteDocById: vi.fn(),
   fmtDate: (v: unknown) => String(v ?? ''),
-  resolveWriteGroupId: mocks.resolveWriteGroupId,
+  resolveWriteGroupId: () => 'grp-1',
   genId: { generic: (p = 'GEN') => `${p}-${++mocks.idCounter}` },
+}));
+vi.mock('../../../workflow', () => ({
+  resolveWorkflowCompanyId: () => 'comp-1',
+  stockSummaryId: (c: string, p: string, w: string) => `SUM-${c}-${p}-${w}`,
 }));
 vi.mock('../../../firebase', () => ({
   db: {},
   COLLECTIONS: { STOCK: 'stock', STOCK_LEDGER: 'stock_ledger', PRODUCTS: 'products' },
+  firebaseEnv: { isConfigured: false },
 }));
-vi.mock('../../../../store/useAppStore', () => ({
-  useAppStore: (sel: (s: any) => unknown) => sel({ activeCompanyId: 'comp-1' }),
-  useCurrentUser: () => ({ id: 'user-1' }),
-}));
+vi.mock('../../../../store/useAppStore', () => {
+  const useAppStore: any = (sel: (s: any) => unknown) => sel({ activeCompanyId: 'comp-1' });
+  useAppStore.getState = () => ({ user: { id: 'user-1' }, activeCompanyId: 'comp-1' });
+  return { useAppStore, useCurrentUser: () => ({ id: 'user-1' }) };
+});
 vi.mock('../../../queryKeys', () => ({
   queryKeys: { forCompany: () => ({ stock: ['stock'], stockLedger: ['stock_ledger'], productsRoot: ['p'], productsAll: ['pa'], categories: ['c'], warehouses: ['w'] }) },
 }));
 vi.mock('../../../../config/company', () => ({ UNITS: ['PCS', 'Nos'] }));
 vi.mock('react-hot-toast', () => ({ default: { success: mocks.toastSuccess, error: mocks.toastError } }));
 vi.mock('../../../notifications', () => ({ notifyRoleUsers: mocks.notifyRoleUsers }));
-vi.mock('../../../sanitizer', () => ({ sanitizePayload: (x: unknown) => x }));
-vi.mock('firebase/firestore', () => ({
-  doc: (_db: unknown, col: string, id: string) => ({ _col: col, _id: id }),
-  serverTimestamp: () => 'TS',
-  runTransaction: async (_db: unknown, cb: (tx: any) => Promise<void>) => {
-    const tx = {
-      get: async () => ({ exists: () => mocks.stockExists, data: () => mocks.stockData }),
-      set: mocks.txSet,
-    };
-    return cb(tx);
-  },
-}));
+vi.mock('../../../sanitizer', () => ({ sanitizeFirestoreData: (x: unknown) => x, sanitizePayload: (x: unknown) => x }));
 
 import { useSaveStockEntry } from '../../../../features/inventory/hooks/useInventory';
 
-/**
- * The mocked `useMutation` (above) returns the options object verbatim, so the
- * hook result carries `.mutationFn` at runtime. The production return type does
- * not expose it — hence this cast, isolated to one helper.
- */
 type MutationLike = { mutationFn: (data: Record<string, unknown>) => Promise<void> };
 const saveEntry = (): MutationLike => useSaveStockEntry(() => {}) as unknown as MutationLike;
 
@@ -90,74 +75,71 @@ const FORM = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  for (const k of Object.keys(store)) delete store[k];
   mocks.idCounter = 0;
-  mocks.stockExists = true;
-  mocks.stockData = { availableQty: 10, reservedQty: 4, createdAt: 'orig' };
+  vi.clearAllMocks();
 });
 
-describe('INVENTORY-00 BASELINE — useInventory.useSaveStockEntry (manual stock adjust)', () => {
-  it('IN: nextAvailable = currentAvailable + qty; writes ledger + summary in the transaction', async () => {
-    const m = saveEntry();
-    await m.mutationFn({ ...FORM, type: 'IN', qty: '5' });
+function seed(availableQty: number, reservedQty = 0) {
+  col('stock')['SUM-comp-1-P-1-W-1'] = {
+    id: 'SUM-comp-1-P-1-W-1', companyId: 'comp-1', productId: 'P-1', warehouseId: 'W-1',
+    availableQty, reservedQty, createdAt: 'orig', isDeleted: false,
+  };
+}
 
-    const [ledgerCall, summaryCall] = mocks.txSet.mock.calls;
-    // ledger row: spreads the raw form data + before/after
-    expect(ledgerCall[1]).toMatchObject({ type: 'IN', qty: 5, beforeQty: 10, afterQty: 15, reference: 'REF-1', companyId: 'comp-1', createdBy: 'user-1' });
-    // summary
-    expect(summaryCall[0]).toMatchObject({ _col: 'stock' });
-    expect(summaryCall[1]).toMatchObject({ availableQty: 15, reservedQty: 4, productId: 'P-1', warehouseId: 'W-1', companyId: 'comp-1', isDeleted: false });
+describe('INVENTORY-05d — useInventory.useSaveStockEntry (manual stock adjust via the engine)', () => {
+  it('IN: ADJUSTMENT_IN movement, onHand += qty; ledger + summary written', async () => {
+    seed(10, 4);
+    await saveEntry().mutationFn({ ...FORM, type: 'IN', qty: '5' });
+    expect(col('stock')['SUM-comp-1-P-1-W-1']).toMatchObject({ onHandQty: 15, availableQty: 15, reservedQty: 4 });
+    const row = Object.values(col('stock_ledger'))[0] as any;
+    expect(row).toMatchObject({
+      movementType: 'ADJUSTMENT_IN', direction: 'IN', type: 'IN', qty: 5,
+      onHandBefore: 10, onHandAfter: 15, beforeQty: 10, afterQty: 15,
+      reference: 'REF-1', reasonCode: 'REF-1', companyId: 'comp-1', createdBy: 'user-1',
+    });
   });
 
-  it('OUT: nextAvailable = currentAvailable - qty', async () => {
-    const m = saveEntry();
-    await m.mutationFn({ ...FORM, type: 'OUT', qty: '3' });
-    const summaryCall = mocks.txSet.mock.calls[1];
-    expect(summaryCall[1]).toMatchObject({ availableQty: 7, reservedQty: 4 });
+  it('OUT: ADJUSTMENT_OUT movement, onHand -= qty', async () => {
+    seed(10, 4);
+    await saveEntry().mutationFn({ ...FORM, type: 'OUT', qty: '3' });
+    expect(col('stock')['SUM-comp-1-P-1-W-1']).toMatchObject({ onHandQty: 7, availableQty: 7, reservedQty: 4 });
+    expect((Object.values(col('stock_ledger'))[0] as any).movementType).toBe('ADJUSTMENT_OUT');
   });
 
-  it('OUT below zero throws "Insufficient stock" and nothing is written', async () => {
-    const m = saveEntry();
-    await expect(m.mutationFn({ ...FORM, type: 'OUT', qty: '99' })).rejects.toThrow('Insufficient stock');
-    expect(mocks.txSet).not.toHaveBeenCalled();
+  it('OUT below zero throws "Insufficient stock" and nothing is written (INV-1)', async () => {
+    seed(2);
+    await expect(saveEntry().mutationFn({ ...FORM, type: 'OUT', qty: '99' })).rejects.toThrow(/Insufficient stock/);
+    expect(col('stock_ledger')).toEqual({});
+    expect(col('stock')['SUM-comp-1-P-1-W-1'].availableQty).toBe(2);   // unchanged
   });
 
-  it('BASELINE (P0-3): reservedQty (currentReserved) is carried forward unchanged', async () => {
-    mocks.stockData = { availableQty: 10, reservedQty: 7, createdAt: 'orig' };
-    const m = saveEntry();
-    await m.mutationFn({ ...FORM, type: 'IN', qty: '1' });
-    expect(mocks.txSet.mock.calls[1][1]).toMatchObject({ reservedQty: 7, availableQty: 11 });
+  it('BASELINE (P0-3): reservedQty is carried forward unchanged', async () => {
+    seed(10, 7);
+    await saveEntry().mutationFn({ ...FORM, type: 'IN', qty: '1' });
+    expect(col('stock')['SUM-comp-1-P-1-W-1']).toMatchObject({ onHandQty: 11, reservedQty: 7 });
   });
 
-  it('throws "Stock summary is inconsistent" when the existing summary has negative qty', async () => {
-    mocks.stockData = { availableQty: -1, reservedQty: 0, createdAt: 'orig' };
-    const m = saveEntry();
-    await expect(m.mutationFn({ ...FORM, type: 'IN', qty: '1' })).rejects.toThrow('inconsistent');
-  });
-
-  it('validates inputs before opening the transaction', async () => {
+  it('validates inputs before touching the engine', async () => {
     const m = saveEntry();
     await expect(m.mutationFn({ ...FORM, productId: '' })).rejects.toThrow('Product is required');
     await expect(m.mutationFn({ ...FORM, warehouseId: '' })).rejects.toThrow('Warehouse is required');
     await expect(m.mutationFn({ ...FORM, qty: '0' })).rejects.toThrow('greater than zero');
     await expect(m.mutationFn({ ...FORM, qty: '-2' })).rejects.toThrow('greater than zero');
-    expect(mocks.txSet).not.toHaveBeenCalled();
+    expect(col('stock_ledger')).toEqual({});
   });
 
-  it('BASELINE (P1-4): uses its OWN stockSummaryId (SUM-{enc}-{enc}-{enc}) — a local copy, not stockWorkflow\'s import', async () => {
-    const m = saveEntry();
-    await m.mutationFn({ ...FORM, productId: 'P/1', warehouseId: 'W 1' }); // chars that get URL-encoded
-    const summaryRef = mocks.txSet.mock.calls[1][0];
-    expect(summaryRef._id).toBe('SUM-comp-1-P%2F1-W%201');
+  it('writes the summary at the canonical stockSummaryId (no local copy)', async () => {
+    await saveEntry().mutationFn({ ...FORM, productId: 'P/1', warehouseId: 'W 1' });
+    // the shared stockSummaryId (mocked here as SUM-{c}-{p}-{w}) — NOT a local encodeURIComponent copy
+    expect(col('stock')['SUM-comp-1-P/1-W 1']).toBeTruthy();
   });
 
-  it('BASELINE: no idempotency — a fresh STK id is generated on every call, nothing dedups a repeat', async () => {
-    const m = saveEntry();
-    await m.mutationFn({ ...FORM, type: 'IN', qty: '2' });
-    mocks.stockData = { availableQty: 12, reservedQty: 4, createdAt: 'orig' };
-    await m.mutationFn({ ...FORM, type: 'IN', qty: '2' });
-
-    const ledgerIds = mocks.txSet.mock.calls.filter((c) => c[0]._col === 'stock_ledger').map((c) => c[0]._id);
-    expect(new Set(ledgerIds).size).toBe(2); // two distinct ledger rows for two identical submissions
+  it('BASELINE: no idempotency — a fresh key per submission, two identical submissions → two ledger rows', async () => {
+    seed(10);
+    await saveEntry().mutationFn({ ...FORM, type: 'IN', qty: '2' });
+    await saveEntry().mutationFn({ ...FORM, type: 'IN', qty: '2' });
+    expect(Object.values(col('stock_ledger'))).toHaveLength(2);
+    expect(col('stock')['SUM-comp-1-P-1-W-1'].onHandQty).toBe(14);
   });
 });
