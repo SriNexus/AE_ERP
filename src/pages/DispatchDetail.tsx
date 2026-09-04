@@ -13,7 +13,7 @@
  *   Tracking | Vehicle Details | Delivery Proof
  */
 
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -33,6 +33,7 @@ import {
   Map,
   ShieldCheck,
   ClipboardList,
+  RotateCcw,
 } from 'lucide-react';
 import { getOne, getAll, fmtDate, fmtCurrency } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';
@@ -47,6 +48,12 @@ import { Button } from '../components/ui/Button';
 import { WorkspaceShell, useWorkspace } from '../components/shared';
 import type { TabId } from '../components/shared/WorkspaceTabs';
 import { DISPATCH_TABS, buildDispatchQuickActions } from '../features/dispatch/utils/workspaceConfig';
+import { ProcessReturnModal } from '../features/inventory/components/ProcessReturnModal';
+
+// INVENTORY-10 (§10e): a dispatch is only returnable once its lines actually
+// carry a verified/dispatched quantity (executeAndVerifyDispatch has run) —
+// matches customerReturnWorkflow.ts's own `verifiedQty` expectation.
+const RETURNABLE_DISPATCH_STATUSES = ['Dispatched', 'In Transit', 'Delivered'];
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -285,6 +292,10 @@ export default function DispatchDetail() {
   const canEdit = perms.canEdit('dispatch');
   const canCreate = perms.canCreate('dispatch');
   const canViewPricing = perms.canViewPricing('dispatch');
+  // INVENTORY-10 (§10e) — a return moves physical stock, so it's gated on the
+  // 'stock' module (same as the Adjust Stock / Reconcile actions), not 'dispatch'.
+  const canProcessReturn = perms.canEdit('stock');
+  const [returnOpen, setReturnOpen] = useState(false);
 
   // ── Workspace state ──────────────────────────────────────
   const workspace = useWorkspace('dispatch', id, 'overview');
@@ -328,6 +339,11 @@ export default function DispatchDetail() {
   const materialValue = dispatch?.items
     ? (dispatch.items as any[]).reduce((sum: number, item: any) => sum + (Number(item.total || item.price || 0) * (Number(item.qty || item.quantity || 0))), 0)
     : 0;
+  // INVENTORY-10 (§10e) — returnable once dispatched (verifiedQty stamped by
+  // executeAndVerifyDispatch) and not already fully returned/closed out.
+  const dispatchItems: Array<{ productId?: string; product?: string; unit?: string; verifiedQty?: number }> = dispatch?.items || [];
+  const isReturnable = orderId != null && RETURNABLE_DISPATCH_STATUSES.includes(status)
+    && dispatchItems.some((item) => (Number(item.verifiedQty) || 0) > 0);
 
   // ── Quick action handlers ────────────────────────────────
   // The Dispatch management popup was retired (Dispatch Workspace Migration) —
@@ -565,6 +581,12 @@ export default function DispatchDetail() {
               Invoices
             </Button>
           )}
+          {isReturnable && canProcessReturn && (
+            <Button variant="outline" size="sm" icon={<RotateCcw className="h-3.5 w-3.5" />}
+              onClick={() => setReturnOpen(true)}>
+              Process Return
+            </Button>
+          )}
         </div>
       </div>
     </div>
@@ -609,6 +631,18 @@ export default function DispatchDetail() {
           moduleTabContent,
         }}
       />
+
+      {isReturnable && orderId && (
+        <ProcessReturnModal
+          open={returnOpen}
+          onClose={() => setReturnOpen(false)}
+          orderId={orderId}
+          dispatchId={dispatchId}
+          items={dispatchItems.map((item) => ({
+            productId: String(item.productId || ''), product: item.product, unit: item.unit, verifiedQty: item.verifiedQty,
+          }))}
+        />
+      )}
     </div>
   );
 }
