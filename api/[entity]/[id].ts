@@ -11,10 +11,14 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getAdminDb } from '../_lib/firebase';
 import { verifyAuthToken } from '../_lib/auth';
 import { requirePermission } from '../_lib/permissions';
-import { ENTITY_REGISTRY, isGlobalCollection } from '../_lib/registry';
+import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked } from '../_lib/registry';
 import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
 import { isHiddenOwnerRecord } from '../../src/lib/ownerAccess';
-import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, buildWritableUpdatePayload } from '../_lib/response';
+import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, sendMethodNotAllowed, buildWritableUpdatePayload } from '../_lib/response';
+
+const READ_ONLY_ENTITY_MESSAGE =
+  'This resource is read-only through the REST API. Inventory quantities and ledger movements ' +
+  'are written only by the authorized application inventory workflow, never the generic REST endpoint.';
 
 // ── CORS headers ───────────────────────────────────────────────
 function setCorsHeaders(res: VercelResponse) {
@@ -45,6 +49,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const config = ENTITY_REGISTRY[entityName];
+
+  // INVENTORY-02 (P0-2): read-only entities (stock, stock_ledger) reject
+  // PUT / PATCH / DELETE with 405 BEFORE any auth / rate-limit / DB access.
+  if (isRestWriteBlocked(entityName, req.method)) {
+    return sendMethodNotAllowed(res, READ_ONLY_ENTITY_MESSAGE);
+  }
 
   // Authenticate
   const user = await verifyAuthToken(req.headers.authorization, req.headers['x-api-key'] as string | undefined);
@@ -131,6 +141,10 @@ export async function handleUpdate(
   resourceId: string,
   user: any,
 ) {
+  // INVENTORY-02: defense in depth — a read-only entity never accepts an update.
+  if (config?.readOnly === true) {
+    return sendMethodNotAllowed(res, READ_ONLY_ENTITY_MESSAGE);
+  }
   await requirePermission(user, 'edit', config.module as any);
 
   const db = getAdminDb();
@@ -173,6 +187,10 @@ async function handleDelete(
   resourceId: string,
   user: any,
 ) {
+  // INVENTORY-02: defense in depth — a read-only entity never accepts a delete.
+  if (config?.readOnly === true) {
+    return sendMethodNotAllowed(res, READ_ONLY_ENTITY_MESSAGE);
+  }
   await requirePermission(user, 'delete', config.module as any);
 
   const db = getAdminDb();

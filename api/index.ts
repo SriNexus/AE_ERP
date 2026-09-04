@@ -7,6 +7,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { isAdminConfigured } from './_lib/firebase';
 import { verifyAuthToken } from './_lib/auth';
+import { ENTITY_REGISTRY } from './_lib/registry';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Set CORS headers
@@ -43,7 +44,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const supportedEntities = [
     'projects', 'leads', 'customers', 'quotations', 'orders', 'dispatch',
-    'products', 'stock', 'users', 'vendors',
+    'products', 'stock', 'stock_ledger', 'users', 'vendors',
     'purchase_orders', 'goods_receipts', 'invoices', 'tax_invoices', 'payments',
     'employees', 'attendance', 'payroll', 'warehouses',
     'surveys', 'engineering_designs', 'installations',
@@ -51,6 +52,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     'handovers', 'amc_contracts', 'service_tickets', 'generation_readings',
     'roles', 'companies', 'notifications', 'channel_partners',
   ];
+
+  // INVENTORY-02: entities the REST API serves GET only (writes -> 405).
+  const readOnlyEntities = Object.keys(ENTITY_REGISTRY).filter((k) => ENTITY_REGISTRY[k].readOnly === true);
 
   return res.status(200).json({
     success: true,
@@ -70,6 +74,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       },
       endpoints,
       supported_entities: supportedEntities,
+      read_only_entities: readOnlyEntities,
     },
   });
 }

@@ -109,6 +109,13 @@ export function sendConflict(res: VercelResponse, message: string) {
 }
 
 /**
+ * Send a 405 Method Not Allowed.
+ */
+export function sendMethodNotAllowed(res: VercelResponse, message: string) {
+  return sendError(res, 405, 'METHOD_NOT_ALLOWED', message);
+}
+
+/**
  * Send a 500 Internal Server Error.
  */
 export function sendInternalError(res: VercelResponse, message = 'Internal server error') {

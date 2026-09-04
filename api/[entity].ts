@@ -11,7 +11,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getAdminDb } from './_lib/firebase';
 import { verifyAuthToken } from './_lib/auth';
 import { requirePermission } from './_lib/permissions';
-import { ENTITY_REGISTRY, isGlobalCollection } from './_lib/registry';
+import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked } from './_lib/registry';
 import { checkRateLimit, getRateLimitKey } from './_lib/rateLimit';
 import { filterManageableUsers, isOwnerEmail } from '../src/lib/ownerAccess';
 import {
@@ -19,10 +19,15 @@ import {
   sendCreated,
   sendBadRequest,
   sendInternalError,
+  sendMethodNotAllowed,
   parsePagination,
   parseSearch,
   sanitizeCreateBody,
 } from './_lib/response';
+
+const READ_ONLY_ENTITY_MESSAGE =
+  'This resource is read-only through the REST API. Inventory quantities and ledger movements ' +
+  'are written only by the authorized application inventory workflow, never the generic REST endpoint.';
 
 // ── Route handler ────────────────────────────────────────────
 
@@ -50,6 +55,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const config = ENTITY_REGISTRY[entityName];
+
+  // INVENTORY-02 (P0-2): read-only entities (stock, stock_ledger) reject every
+  // mutating method with 405 BEFORE any auth / rate-limit / DB access — there
+  // is no generic REST write path for them at all.
+  if (isRestWriteBlocked(entityName, req.method)) {
+    return sendMethodNotAllowed(res, READ_ONLY_ENTITY_MESSAGE);
+  }
 
   // Authenticate
   const user = await verifyAuthToken(req.headers.authorization, req.headers['x-api-key'] as string | undefined);
@@ -197,6 +209,11 @@ async function handleList(req: VercelRequest, res: VercelResponse, config: typeo
 }
 
 async function handleCreate(req: VercelRequest, res: VercelResponse, config: typeof ENTITY_REGISTRY[string], user: any) {
+  // INVENTORY-02: defense in depth — a read-only entity never accepts a create,
+  // regardless of how this handler is reached.
+  if (config?.readOnly === true) {
+    return sendMethodNotAllowed(res, READ_ONLY_ENTITY_MESSAGE);
+  }
   await requirePermission(user, 'create', config.module as any);
 
   const db = getAdminDb();

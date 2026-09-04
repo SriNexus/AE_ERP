@@ -9,6 +9,15 @@ export interface EntityConfig {
   collection: string;
   module: string;
   searchFields: string[];
+  /**
+   * INVENTORY-02: when true, the generic REST handlers serve GET only.
+   * Any mutating method (POST / PUT / PATCH / DELETE) returns 405 — the
+   * collection's writes MUST go through the authorized application inventory
+   * workflow (Firestore SDK under firestore.rules), never the Admin-SDK
+   * generic entity path which bypasses the ledger, transaction safety, FK
+   * validation and security rules (audit P0-2).
+   */
+  readOnly?: boolean;
 }
 
 export const ENTITY_REGISTRY: Record<string, EntityConfig> = {
@@ -19,7 +28,13 @@ export const ENTITY_REGISTRY: Record<string, EntityConfig> = {
   orders: { collection: 'orders', module: 'orders', searchFields: ['orderNumber', 'customer', 'id'] },
   dispatch: { collection: 'dispatch', module: 'dispatch', searchFields: ['id', 'customer', 'vehicleNo', 'lrNumber'] },
   products: { collection: 'products', module: 'products', searchFields: ['name', 'sku', 'category'] },
-  stock: { collection: 'stock', module: 'stock', searchFields: ['product', 'productId', 'warehouse'] },
+  // INVENTORY-02 (P0-2): stock and stock_ledger are READ-ONLY over the REST API.
+  // Stock quantities and ledger movements are written only by the application
+  // inventory workflows (stockWorkflow / dispatchWorkflow / goodsReceiptWorkflow
+  // / useInventory) which run under firestore.rules with transaction safety and
+  // a matching ledger entry — never through the generic Admin-SDK entity path.
+  stock: { collection: 'stock', module: 'stock', searchFields: ['product', 'productId', 'warehouse'], readOnly: true },
+  stock_ledger: { collection: 'stock_ledger', module: 'stock', searchFields: ['productId', 'warehouseId', 'referenceId', 'sourceId', 'type'], readOnly: true },
   users: { collection: 'users', module: 'users', searchFields: ['name', 'email', 'phone'] },
   vendors: { collection: 'vendors', module: 'vendors', searchFields: ['name', 'gstin', 'vendorId'] },
   purchase_orders: { collection: 'purchase_orders', module: 'purchase_orders', searchFields: ['purchaseOrderId', 'vendorName', 'id'] },
@@ -71,6 +86,24 @@ export function getEntityConfig(entityName: string): EntityConfig | undefined {
  */
 export function isGlobalCollection(collection: string): boolean {
   return GLOBAL_COLLECTIONS.has(collection);
+}
+
+/**
+ * INVENTORY-02: mutating HTTP methods that the generic entity handlers can
+ * perform. Anything in this set against a `readOnly` entity is rejected 405.
+ */
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/**
+ * Returns true when this method against this registered entity must be
+ * rejected with 405 because the entity is read-only over the REST API.
+ * `method` is case-insensitive; a missing/unknown entity returns false
+ * (the caller already handles "unknown entity" as 400).
+ */
+export function isRestWriteBlocked(entityName: string, method: string | undefined): boolean {
+  const config = ENTITY_REGISTRY[entityName];
+  if (!config || config.readOnly !== true) return false;
+  return MUTATING_METHODS.has(String(method || '').toUpperCase());
 }
 export type ApiTenantIdentity = { companyId: string; isSuperAdmin?: boolean };
 
