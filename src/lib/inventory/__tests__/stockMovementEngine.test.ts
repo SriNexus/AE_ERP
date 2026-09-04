@@ -17,6 +17,7 @@ vi.mock('../../firebase', () => ({
 }));
 vi.mock('../../firestore', () => ({
   createDocWithId: vi.fn(async (c: string, id: string, data: any) => { col(c)[id] = { ...data, id }; }),
+  updateDocById: vi.fn(async (c: string, id: string, patch: any) => { col(c)[id] = { ...(col(c)[id] || { id }), ...patch }; }),
   getOne: vi.fn(async (c: string, id: string) => (col(c)[id] ? { ...col(c)[id] } : null)),
   getAll: vi.fn(async (c: string) => Object.values(col(c)).map((d) => ({ ...d }))),
   genId: { generic: (p: string) => `${p}-${++mocks.counter}` },
@@ -31,9 +32,9 @@ vi.mock('../../workflow', async () => {
 });
 
 import { readFileSync } from 'node:fs';
-import { applyStockMovement } from '../stockMovementEngine';
+import { applyStockMovement, applyStockMovements } from '../stockMovementEngine';
 import { buildIdempotencyKey, movementLedgerId } from '../idempotency';
-import { MOVEMENT_TYPES, REASON_CODE_REQUIRED } from '../types';
+import { MOVEMENT_TYPES, REASON_CODE_REQUIRED, type MovementParticipant } from '../types';
 
 describe('INVENTORY-05a — stockSummaryId consolidation (pure de-dup)', () => {
   it('there is ONE stockSummaryId — useInventory imports it, no local copy', () => {
@@ -170,7 +171,7 @@ describe('INVENTORY-05a — tenant + ledger shape', () => {
     expect(col('stock')['SUM-COMP-OTHER-P-1-WH-1']).toBeTruthy();
   });
 
-  it('legacy dual-write: type / referenceType / referenceId / date present alongside movementType / direction', async () => {
+  it('legacy dual-write: type / referenceType / referenceId / date / beforeQty / afterQty present alongside movementType / direction', async () => {
     await applyStockMovement({ ...base, movementType: 'PURCHASE_RECEIPT', qty: 8, sourceType: 'goods_receipt', sourceId: 'GRN-L', lineKey: 0 });
     const row = Object.values(col('stock_ledger'))[0] as any;
     expect(row).toMatchObject({
@@ -179,9 +180,118 @@ describe('INVENTORY-05a — tenant + ledger shape', () => {
       idempotencyKey: 'PURCHASE_RECEIPT:goods_receipt:GRN-L:0',
       // legacy
       type: 'IN', referenceType: 'goods_receipt', referenceId: 'GRN-L',
+      beforeQty: 0, afterQty: 8,
       transactionId: expect.any(String), isDeleted: false,
     });
     expect(row.date).toBeTruthy();
     expect(row.movementAt).toBeTruthy();
+  });
+
+  it('ledgerExtra: caller pass-through fields land on the ledger row (legacy consumer compat)', async () => {
+    await applyStockMovement({
+      ...base, movementType: 'PURCHASE_RECEIPT', qty: 3, sourceType: 'goods_receipt', sourceId: 'GRN-X', lineKey: 0,
+      ledgerExtra: { referenceType: 'GoodsReceipt', purchaseOrderId: 'PO-9', grnLineIndex: 0 },
+    });
+    const row = Object.values(col('stock_ledger'))[0] as any;
+    expect(row).toMatchObject({ referenceType: 'GoodsReceipt', purchaseOrderId: 'PO-9', grnLineIndex: 0, movementType: 'PURCHASE_RECEIPT' });
+  });
+});
+
+describe('INVENTORY-05a.1 — generic transaction participant', () => {
+  const poParticipant = (poId: string, opts: { validate?: (po: any) => boolean | void; onCommit?: (po: any, applied: number) => void } = {}): MovementParticipant<any> => ({
+    async read(ctx) { return ctx.get('purchase_orders', poId); },
+    validate(po, plan) {
+      if (opts.validate) return opts.validate(po);
+      // default: over-receipt guard against the authoritative PO
+      const appliedQty = plan.filter((p) => p.applied).reduce((s, p) => s + p.qty, 0);
+      const ordered = Number(po?.items?.[0]?.qty) || 0;
+      const received = Number(po?.items?.[0]?.receivedQty) || 0;
+      if (received + appliedQty > ordered + 1e-6) throw new Error('over-receipt');
+    },
+    commit(po, plan, writer) {
+      const applied = plan.filter((p) => p.applied).reduce((s, p) => s + p.qty, 0);
+      opts.onCommit?.(po, applied);
+      writer.set('purchase_orders', poId, {
+        items: [{ ...po.items[0], receivedQty: (Number(po.items[0].receivedQty) || 0) + applied }],
+      }, { merge: true });
+    },
+  });
+
+  beforeEach(() => { store['purchase_orders'] = { 'PO-1': { id: 'PO-1', items: [{ productId: 'P-1', qty: 10, receivedQty: 0 }] } }; });
+
+  it('participant reads an authoritative doc, validates, and commits its OWN write atomically with stock + ledger', async () => {
+    const seen: any[] = [];
+    const r = await applyStockMovements(
+      [{ ...base, movementType: 'PURCHASE_RECEIPT', qty: 6, sourceType: 'goods_receipt', sourceId: 'GRN-P1', lineKey: 0 }],
+      poParticipant('PO-1', { onCommit: (po, applied) => seen.push([po.id, applied]) }),
+    );
+    expect(r).toMatchObject({ applied: true, skipped: false });
+    expect(seen).toEqual([['PO-1', 6]]);
+    expect(col('stock')[SUM].onHandQty).toBe(6);
+    expect(Object.values(col('stock_ledger'))).toHaveLength(1);
+    expect(col('purchase_orders')['PO-1'].items[0].receivedQty).toBe(6);
+  });
+
+  it('participant.validate throwing aborts the whole batch — no stock, no ledger, no participant write', async () => {
+    col('purchase_orders')['PO-1'].items[0].receivedQty = 8;
+    await expect(applyStockMovements(
+      [{ ...base, movementType: 'PURCHASE_RECEIPT', qty: 5, sourceType: 'goods_receipt', sourceId: 'GRN-P2', lineKey: 0 }],
+      poParticipant('PO-1'),
+    )).rejects.toThrow('over-receipt');
+    expect(col('stock')).toEqual({});
+    expect(col('stock_ledger')).toEqual({});
+    expect(col('purchase_orders')['PO-1'].items[0].receivedQty).toBe(8);
+  });
+
+  it('participant.validate returning false skips the batch BENIGNLY — nothing written, results marked skipped', async () => {
+    const r = await applyStockMovements(
+      [{ ...base, movementType: 'DISPATCH_OUT', qty: 1, sourceType: 'dispatch', sourceId: 'DSP-P', lineKey: 'P-1' }],
+      { read: () => ({}), validate: () => false, commit: () => { throw new Error('commit must not run'); } },
+    );
+    expect(r).toMatchObject({ applied: false, skipped: true });
+    expect(r.results[0]).toMatchObject({ applied: false, skipped: true });
+    expect(col('stock')).toEqual({});
+    expect(col('stock_ledger')).toEqual({});
+  });
+
+  it('a participant may NOT write stock / stock_ledger — the engine is the sole owner', async () => {
+    await expect(applyStockMovements(
+      [{ ...base, movementType: 'PURCHASE_RECEIPT', qty: 1, sourceType: 'goods_receipt', sourceId: 'GRN-P3', lineKey: 0 }],
+      { read: () => ({}), commit: (_c, _p, writer) => writer.set('stock', SUM, { onHandQty: 999 }) },
+    )).rejects.toThrow(/sole owner|may not write/);
+  });
+
+  it('idempotent with a participant: the same movement twice applies stock once and the participant sees applied 0 the second time', async () => {
+    const calls: number[] = [];
+    const mv = { ...base, movementType: 'PURCHASE_RECEIPT' as const, qty: 4, sourceType: 'goods_receipt', sourceId: 'GRN-P4', lineKey: 0 };
+    await applyStockMovements([mv], poParticipant('PO-1', { onCommit: (_po, applied) => calls.push(applied) }));
+    // a re-submitted identical receipt (same deterministic idempotency key)
+    const second = await applyStockMovements([mv], poParticipant('PO-1', { onCommit: (_po, applied) => calls.push(applied) }));
+    expect(second.applied).toBe(false);              // nothing applied the 2nd time
+    expect(calls).toEqual([4]);                      // commit only ran when there was something to apply
+    expect(col('stock')[SUM].onHandQty).toBe(4);     // NOT 8
+    expect(Object.values(col('stock_ledger'))).toHaveLength(1);
+    expect(col('purchase_orders')['PO-1'].items[0].receivedQty).toBe(4);  // NOT 8 — idempotent replay is a no-op
+  });
+
+  it('multi-line batch: all lines + the participant write commit together (one PO update reflecting every line)', async () => {
+    col('purchase_orders')['PO-1'].items = [{ productId: 'P-1', qty: 10, receivedQty: 0 }, { productId: 'P-2', qty: 5, receivedQty: 0 }];
+    const participant: MovementParticipant<any> = {
+      async read(ctx) { return ctx.get('purchase_orders', 'PO-1'); },
+      commit(po, plan, writer) {
+        const items = po.items.map((it: any, idx: number) => {
+          const add = plan.filter((p) => p.applied && p.input.lineKey === idx).reduce((s, p) => s + p.qty, 0);
+          return { ...it, receivedQty: (Number(it.receivedQty) || 0) + add };
+        });
+        writer.set('purchase_orders', 'PO-1', { items }, { merge: true });
+      },
+    };
+    const r = await applyStockMovements([
+      { ...base, productId: 'P-1', movementType: 'PURCHASE_RECEIPT', qty: 10, sourceType: 'goods_receipt', sourceId: 'GRN-M', lineKey: 0 },
+      { ...base, productId: 'P-2', movementType: 'PURCHASE_RECEIPT', qty: 5, sourceType: 'goods_receipt', sourceId: 'GRN-M', lineKey: 1 },
+    ], participant);
+    expect(r.results.map((x) => x.applied)).toEqual([true, true]);
+    expect(col('purchase_orders')['PO-1'].items.map((it: any) => it.receivedQty)).toEqual([10, 5]);
+    expect(Object.values(col('stock_ledger'))).toHaveLength(2);
   });
 });

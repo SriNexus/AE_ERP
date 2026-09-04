@@ -214,3 +214,140 @@ describe('INVENTORY-05a — stock movement engine (emulator)', () => {
     await assertFails(setDoc(doc(db, 'stock_ledger', r.ledgerId), { id: r.ledgerId, companyId: CO_A, groupId: GRP_A, productId: P1, warehouseId: WH_A, qty: 999, transactionId: 'X', movementAt: serverTimestamp() }));
   });
 });
+
+/**
+ * INVENTORY-05a.1 — the generic transaction participant runs INSIDE the engine's
+ * single runTransaction. This replicates `applyBatchConfigured` with a
+ * `purchase_orders` participant (the shape 05b's GRN migration uses) and proves:
+ *  - the participant's PO write commits atomically with stock + ledger under the
+ *    CURRENT firestore.rules (no rules change);
+ *  - a participant `validate` throw aborts the WHOLE transaction — stock, ledger
+ *    AND the PO are all unchanged (zero partial mutation).
+ */
+const PO_ID = 'PO-SME-1';
+
+async function seedPo(ordered: number, received = 0) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'purchase_orders', PO_ID), {
+      id: PO_ID, purchaseOrderId: PO_ID, companyId: CO_A, groupId: GRP_A, vendorId: 'V1', vendorName: 'V',
+      status: 'Sent', statusHistory: [],
+      items: [{ productId: P1, product: 'Panel', qty: ordered, unit: 'Nos', price: 10, tax: 0, discount: 0, taxableValue: 10, taxAmount: 0, total: 10, receivedQty: received }],
+    });
+  });
+}
+
+/** Mirrors applyBatchConfigured for ONE PURCHASE_RECEIPT line + a PO participant. */
+async function receiptWithParticipantTxn(
+  db: ReturnType<typeof dbFor>,
+  opts: { qty: number; actorId: string; grnId: string; lineIndex?: number },
+): Promise<{ applied: boolean; skipped: boolean }> {
+  const lineIndex = opts.lineIndex ?? 0;
+  const key = buildIdempotencyKey('PURCHASE_RECEIPT', 'goods_receipt', opts.grnId, lineIndex);
+  const ledgerId = movementLedgerId(key);
+  const stockId = `SUM-${CO_A}-${P1}-${WH_A}`;
+
+  return runTransaction(db, async (tx) => {
+    // READ PHASE
+    const ledgerSnap = await tx.get(doc(db, 'stock_ledger', ledgerId));
+    const stockSnap = await tx.get(doc(db, 'stock', stockId));
+    const poSnap = await tx.get(doc(db, 'purchase_orders', PO_ID));           // participant.read
+    if (!poSnap.exists()) throw new Error('po not found');
+    const po = poSnap.data() as Record<string, any>;
+
+    const ledgerExists = ledgerSnap.exists();
+    const onHandBefore = Number(stockSnap.data()?.onHandQty ?? stockSnap.data()?.availableQty) || 0;
+    const applied = !ledgerExists;
+    const onHandAfter = applied ? onHandBefore + opts.qty : onHandBefore;
+
+    // participant.validate — INV-13 over-receipt guard against the authoritative PO
+    if (applied) {
+      const item = po.items[lineIndex];
+      if ((Number(item.receivedQty) || 0) + opts.qty > (Number(item.qty) || 0) + EPSILON) {
+        throw new Error(`over-receipt line ${lineIndex}`);
+      }
+    }
+    if (!applied) return { applied: false, skipped: false };
+    if (onHandAfter < -EPSILON) throw new Error('Insufficient stock');
+
+    // WRITE PHASE — engine owns stock + ledger
+    const base = { ...(stockSnap.data() || {}) };
+    delete (base as Record<string, unknown>).available;
+    delete (base as Record<string, unknown>).reserved;
+    tx.set(doc(db, 'stock', stockId), {
+      ...base, id: stockId, companyId: CO_A, groupId: GRP_A, productId: P1, warehouseId: WH_A, unit: 'Nos',
+      onHandQty: onHandAfter, reservedQty: 0, availableQty: onHandAfter,
+      updatedBy: opts.actorId, updatedAt: serverTimestamp(), createdAt: stockSnap.data()?.createdAt ?? serverTimestamp(), isDeleted: false,
+    });
+    tx.set(doc(db, 'stock_ledger', ledgerId), {
+      id: ledgerId, companyId: CO_A, groupId: GRP_A, productId: P1, warehouseId: WH_A, stockId, unit: 'Nos',
+      movementType: 'PURCHASE_RECEIPT', direction: 'IN', qty: opts.qty,
+      onHandBefore, onHandAfter, reservedBefore: 0, reservedAfter: 0,
+      sourceType: 'goods_receipt', sourceId: opts.grnId, idempotencyKey: key,
+      actorId: opts.actorId, transactionId: `TXN-${ledgerId}`, movementAt: serverTimestamp(),
+      createdAt: serverTimestamp(), createdBy: opts.actorId, isDeleted: false,
+      type: 'IN', referenceType: 'GoodsReceipt', referenceId: opts.grnId, purchaseOrderId: PO_ID,
+      beforeQty: onHandBefore, afterQty: onHandAfter, date: new Date().toISOString(), notes: '',
+    });
+
+    // participant.commit — the engine's guarded writer forwards this to the SAME txn
+    const items = po.items.map((it: Record<string, any>, idx: number) =>
+      (idx === lineIndex ? { ...it, receivedQty: (Number(it.receivedQty) || 0) + opts.qty } : it));
+    const status = items.every((it: Record<string, any>) => (Number(it.receivedQty) || 0) >= (Number(it.qty) || 0)) ? 'Received' : 'PartiallyReceived';
+    tx.set(doc(db, 'purchase_orders', PO_ID), { items, status, updatedBy: opts.actorId }, { merge: true });
+
+    return { applied: true, skipped: false };
+  });
+}
+
+async function readPoState() {
+  let out: { po: any; summary: any; ledgerRows: any[] } = { po: null, summary: null, ledgerRows: [] };
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    out.po = (await getDoc(doc(db, 'purchase_orders', PO_ID))).data();
+    out.summary = (await getDoc(doc(db, 'stock', `SUM-${CO_A}-${P1}-${WH_A}`))).data();
+    out.ledgerRows = (await getDocs(query(collection(db, 'stock_ledger'), where('companyId', '==', CO_A)))).docs.map((d) => ({ id: d.id, ...d.data() }));
+  });
+  return out;
+}
+
+describe('INVENTORY-05a.1 — transaction participant (emulator)', () => {
+  it('a participant PO write commits atomically with stock + ledger under the CURRENT rules', async () => {
+    await seed();
+    await seedPo(10, 0);
+    const r = await receiptWithParticipantTxn(dbFor(WH_USER), { qty: 6, actorId: WH_USER.userId, grnId: 'GRN-A1' });
+    expect(r).toMatchObject({ applied: true, skipped: false });
+    const s = await readPoState();
+    expect(s.summary).toMatchObject({ onHandQty: 6, availableQty: 6 });
+    expect(s.ledgerRows).toHaveLength(1);
+    expect(s.po.items[0].receivedQty).toBe(6);
+    expect(s.po.status).toBe('PartiallyReceived');
+  });
+
+  it('a participant.validate throw aborts the WHOLE transaction — stock, ledger AND the PO unchanged', async () => {
+    await seed(4);                     // 4 already on hand
+    await seedPo(10, 8);               // 8 of 10 already received
+    await expect(receiptWithParticipantTxn(dbFor(WH_USER), { qty: 5, actorId: WH_USER.userId, grnId: 'GRN-A2' }))
+      .rejects.toThrow('over-receipt');
+    const s = await readPoState();
+    expect(s.summary.onHandQty).toBe(4);          // unchanged
+    expect(s.ledgerRows).toHaveLength(0);         // no ledger row
+    expect(s.po.items[0].receivedQty).toBe(8);    // PO unchanged
+    expect(s.po.status).toBe('Sent');
+  });
+
+  it('two concurrent distinct over-receipts (7 + 6 against ordered 10) — one aborts entirely, no stranded stock, Σledger == PO.receivedQty', async () => {
+    await seed();
+    await seedPo(10, 0);
+    const db = dbFor(WH_USER);
+    const results = await Promise.allSettled([
+      receiptWithParticipantTxn(db, { qty: 7, actorId: WH_USER.userId, grnId: 'GRN-A3a' }),
+      receiptWithParticipantTxn(db, { qty: 6, actorId: WH_USER.userId, grnId: 'GRN-A3b' }),
+    ]);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    const s = await readPoState();
+    expect(s.po.items[0].receivedQty).toBeLessThanOrEqual(10);
+    const sigmaLedger = s.ledgerRows.reduce((sum, l) => sum + Number((l as any).qty), 0);
+    expect(sigmaLedger).toBe(s.po.items[0].receivedQty);            // stock reflects exactly the accepted receipt
+    expect(Number(s.summary.onHandQty)).toBe(s.po.items[0].receivedQty);
+  });
+});

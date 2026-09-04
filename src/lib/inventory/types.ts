@@ -76,6 +76,14 @@ export interface StockMovementInput {
    * reservedQty stays 0). Phase 07 flips this on.
    */
   reservationsEnabled?: boolean;
+  /**
+   * Extra fields merged onto the `stock_ledger` row AFTER the engine's standard
+   * + legacy fields (so a caller can keep a legacy consumer working — e.g. GRN's
+   * `referenceType:'GoodsReceipt'` + `purchaseOrderId`). Generic pass-through:
+   * the engine never interprets these. MUST NOT be used to change `qty`,
+   * `onHandBefore/After`, `movementType`, `direction` or `idempotencyKey`.
+   */
+  ledgerExtra?: Record<string, unknown>;
 }
 
 export interface MovementResult {
@@ -95,4 +103,78 @@ export interface MovementResult {
   reservedBefore: number;
   reservedAfter: number;
   availableAfter: number;
+  /** true = a participant aborted the whole batch benignly (no stock/ledger write). */
+  skipped?: boolean;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * INVENTORY-05a.1 — generic transaction-participation contract.
+ *
+ * A caller (GRN, dispatch, …) that must atomically read + validate + write its
+ * OWN business state alongside the stock movement passes a `MovementParticipant`
+ * to `applyStockMovements`. The participant runs INSIDE the engine's single
+ * `runTransaction` (configured branch) — its reads happen in the read phase,
+ * its writes in the write phase — but it NEVER writes `stock` / `stock_ledger`:
+ * the `MovementWriter` it is handed rejects those two collections, so the engine
+ * stays the sole owner of every stock-summary and ledger mutation (Plan §4.1).
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** Read-only view of the movement transaction, handed to `participant.read`. */
+export interface MovementReadContext {
+  /** Read one authoritative document inside the movement transaction. */
+  get<T = Record<string, unknown>>(collection: string, id: string): Promise<T | null>;
+}
+
+/** Restricted writer handed to `participant.commit`. `stock` / `stock_ledger`
+ *  refs are rejected — only the engine writes those. */
+export interface MovementWriter {
+  set(collection: string, id: string, data: Record<string, unknown>, options?: { merge?: boolean }): void;
+  update(collection: string, id: string, data: Record<string, unknown>): void;
+}
+
+/** One planned movement — the computed effect of a single `StockMovementInput`
+ *  within the batch, handed to `participant.validate` / `participant.commit`. */
+export interface MovementPlanEntry {
+  input: StockMovementInput;
+  /** false = idempotent no-op: the ledger row already existed, no stock change this txn. */
+  applied: boolean;
+  direction: MovementDirection;
+  /** absolute quantity of this movement */
+  qty: number;
+  stockId: string;
+  ledgerId: string;
+  idempotencyKey: string;
+  onHandBefore: number;
+  onHandAfter: number;
+  reservedBefore: number;
+  reservedAfter: number;
+}
+
+export interface MovementParticipant<C = unknown> {
+  /**
+   * READ PHASE — read authoritative documents via `ctx.get`. Runs after the
+   * engine's own ledger + stock reads, before any write. MUST NOT mutate.
+   * Whatever it returns is passed to `validate` / `commit`.
+   */
+  read(ctx: MovementReadContext): Promise<C> | C;
+  /**
+   * VALIDATE PHASE — after ALL reads, before ANY write. Throw to abort the whole
+   * transaction with an error (zero partial mutation). Return `false` to abort
+   * the batch BENIGNLY (no writes; every result is `applied:false, skipped:true`).
+   */
+  validate?(ctx: C, plan: readonly MovementPlanEntry[]): boolean | void;
+  /**
+   * WRITE PHASE — enqueue the participant's own dependent writes through
+   * `writer`. Runs only when at least one input actually applied stock. `writer`
+   * rejects `stock` / `stock_ledger` — the engine owns those.
+   */
+  commit?(ctx: C, plan: readonly MovementPlanEntry[], writer: MovementWriter): void;
+}
+
+export interface BatchMovementResult {
+  /** true = at least one input applied a stock change this call. */
+  applied: boolean;
+  /** true = a participant's `validate` returned false — nothing was written. */
+  skipped: boolean;
+  results: MovementResult[];
 }
