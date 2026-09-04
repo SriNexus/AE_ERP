@@ -5,7 +5,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Archive, Copy, Download, Edit2, GitMerge, Layers3, Mail, MessageCircle, Package, Phone, Plus, Trash2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Badge, Button, Card, ConfirmDialog, Input, Modal, Pagination, Select, Textarea, statusBadge } from '../../ui';
-import { useCategories } from '../../../features/categories/hooks/useCategories';
+import { useCategories, saveCategoryWithRenameCascade, deleteCategoryWithGuard } from '../../../features/categories/hooks/useCategories';
 import { CATEGORY_FORM_DEFAULT, type Category, type CategoryForm } from '../../../features/categories/types';
 import { exportProductsCSV, useProducts } from '../../../features/inventory/hooks/useInventory';
 import { COLLECTIONS } from '../../../lib/firebase';
@@ -221,38 +221,14 @@ export function MobileCategoryWorkspace({ mode }: { mode: Mode }) {
     });
   }, [categories]);
 
+  // INVENTORY-09: mobile shares the SAME authoritative workflow desktop uses
+  // (src/features/categories/hooks/useCategories.ts) — no mobile-only
+  // business logic. Rename cascade + the delete guard live there once, not
+  // duplicated here.
   const saveCategory = useMutation({
     mutationFn: async () => {
-      const payload = {
-        name: form.name.trim(),
-        description: form.description?.trim() || '',
-        parentCategory: form.parentCategory?.trim() || '',
-        order: Number(form.order) || 0,
-      };
-      if (!payload.name) throw new Error('Name required');
-      if (editingCategory) {
-        const current = (categories as Category[]).find((category) => category.id === editingCategory.id);
-        if (!current) throw new Error('Category not found');
-        if (payload.name !== current.name) {
-          const descendants = collectDescendantIds(current, categories as Category[]);
-          const sourceAliases = new Set(categoryKeys(current));
-          await Promise.all([
-            ...(products as Product[])
-              .filter((product: any) => sourceAliases.has(normalize(product.categoryId)) || sourceAliases.has(normalize(product.category)))
-              .map((product) => updateDocById(COLLECTIONS.PRODUCTS, product.id, { category: payload.name, categoryId: current.id })),
-            ...(categories as Category[])
-              .filter((child) => descendants.has(child.id))
-              .map((child) => updateDocById(COLLECTIONS.PRODUCT_CATEGORIES, child.id, {
-                parentCategory: child.parentCategory && normalize(child.parentCategory) === normalize(current.name) ? payload.name : child.parentCategory,
-              })),
-          ]);
-        }
-        await updateDocById(COLLECTIONS.PRODUCT_CATEGORIES, current.id, payload);
-        return current.id;
-      }
-      const id = genId.generic('CAT');
-      await createDocWithId(COLLECTIONS.PRODUCT_CATEGORIES, id, { ...payload, id, createdBy: user?.id || 'system' });
-      return id;
+      if (!form.name.trim()) throw new Error('Name required');
+      return saveCategoryWithRenameCascade(editingCategory?.id || null, form, user?.id || 'system');
     },
     onSuccess: (savedId) => {
       void qc.invalidateQueries({ queryKey: ['product_categories'] });
@@ -267,7 +243,7 @@ export function MobileCategoryWorkspace({ mode }: { mode: Mode }) {
   });
 
   const archiveMutation = useMutation({
-    mutationFn: async (categoryId: string) => deleteDocById(COLLECTIONS.PRODUCT_CATEGORIES, categoryId),
+    mutationFn: (categoryId: string) => deleteCategoryWithGuard(categoryId),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['product_categories'] });
       void qc.invalidateQueries({ queryKey: keys.categories });
@@ -397,6 +373,7 @@ export function MobileCategoryWorkspace({ mode }: { mode: Mode }) {
       name: category.name || '',
       description: category.description || '',
       parentCategory: category.parentCategory || '',
+      parentCategoryId: category.parentCategoryId || '',
       order: String(category.order || 0),
     });
     setDirty(false);

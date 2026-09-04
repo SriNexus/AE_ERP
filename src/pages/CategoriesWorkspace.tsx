@@ -54,7 +54,7 @@ import {
   WorkspaceHero,
 } from '../components/ui';
 import { CategoryDetailsModal, CategoryMergeModal } from '../features/categories/components/CategoryWorkspaceParts';
-import { useCategories } from '../features/categories/hooks/useCategories';
+import { useCategories, useSaveCategory, deleteCategoryWithGuard } from '../features/categories/hooks/useCategories';
 import {
   DATE_RANGE_OPTIONS,
   categoryKeys,
@@ -161,37 +161,13 @@ export function CategoriesWorkspace({ embedded = false }: { embedded?: boolean }
     setForm({ ...CATEGORY_FORM_DEFAULT });
   }
 
-  const saveMut = useMutation({
-    mutationFn: async (data: CategoryFormValues) => {
-      const payload = {
-        name: data.name.trim(),
-        description: data.description?.trim() || '',
-        parentCategory: data.parentCategory?.trim() || '',
-        order: Number(data.order) || 0,
-      };
-      if (editId) {
-        await updateDocById(COLLECTIONS.PRODUCT_CATEGORIES, editId, payload);
-        return editId;
-      } else {
-        const id = genId.generic('CAT');
-        await createDocWithId(COLLECTIONS.PRODUCT_CATEGORIES, id, { ...payload, id, createdBy: user?.id || 'system' });
-        return id;
-      }
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['product_categories'] });
-      qc.invalidateQueries({ queryKey: queryKeys.forCompany(activeCompanyId).productsRoot });
-      qc.invalidateQueries({ queryKey: queryKeys.forCompany(activeCompanyId).productsAll });
-      toast.success(editId ? 'Category updated' : 'Category added');
-      closeForm();
-    },
-    onError: (error: any) => toast.error(error?.message || 'Category save failed'),
-  });
-
+  // INVENTORY-09: category create/edit/archive now go through the SHARED
+  // useCategories.ts workflow (rename cascade onto linked products' display
+  // name on edit; a delete guard on archive) — the single authoritative path,
+  // not a page-local duplicate of the same Firestore writes.
+  const saveMut = useSaveCategory(editId, closeForm);
   const archiveMut = useMutation({
-    mutationFn: async (categoryId: string) => {
-      await deleteDocById(COLLECTIONS.PRODUCT_CATEGORIES, categoryId);
-    },
+    mutationFn: (categoryId: string) => deleteCategoryWithGuard(categoryId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['product_categories'] });
       qc.invalidateQueries({ queryKey: queryKeys.forCompany(activeCompanyId).productsRoot });
@@ -521,6 +497,7 @@ export function CategoriesWorkspace({ embedded = false }: { embedded?: boolean }
       name: category.name || '',
       description: category.description || '',
       parentCategory: category.parentCategory || '',
+      parentCategoryId: category.parentCategoryId || '',
       order: String(category.order || 0),
     });
     setEditId(category.id);
@@ -1015,12 +992,21 @@ export function CategoriesWorkspace({ embedded = false }: { embedded?: boolean }
           </div>
           <div>
             <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-1">Parent Category</label>
-            <input
-              value={form.parentCategory}
-              onChange={(e) => setForm({ ...form, parentCategory: e.target.value })}
-              placeholder="Leave empty for root"
+            {/* INVENTORY-09 (P2-3): parentCategoryId is the stable FK; parentCategory
+                stays the denormalized display name, resolved here at selection time. */}
+            <select
+              value={form.parentCategoryId}
+              onChange={(e) => {
+                const selected = (categories as Category[]).find((c) => c.id === e.target.value);
+                setForm({ ...form, parentCategoryId: e.target.value, parentCategory: selected?.name || '' });
+              }}
               className="w-full h-8 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
-            />
+            >
+              <option value="">Root (no parent)</option>
+              {(categories as Category[])
+                .filter((c) => c.isDeleted !== true && c.id !== editId)
+                .map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
           </div>
           <div>
             <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-1">Order</label>
