@@ -222,6 +222,7 @@ const WAREHOUSE_SCOPED_COLLECTIONS = new Set<string>([
   COLLECTIONS.DISPATCH,
   COLLECTIONS.GOODS_RECEIPTS,
   COLLECTIONS.CUSTOMER_RETURNS,     // INVENTORY-10 (§10e) — read rule gates on sameWarehouse()
+  COLLECTIONS.DISPATCH_SERIALS,     // INVENTORY-11 (§11a) — read rule gates on sameWarehouse()
 ]);
 
 // §8.2: warehouse-restricted roles are the existing warehouse-adjacent roles
@@ -440,6 +441,11 @@ const COLLECTION_PERMISSION_MODULE: Record<string, string> = {
   // (its restock/write-off legs commit through the movement engine, same as
   // reservations/transfers above) — never per-user record ownership.
   [COLLECTIONS.CUSTOMER_RETURNS]: 'stock',
+  // INVENTORY-11 (§11a): a dispatch serial lock is shared operational
+  // integrity state (written by the movement engine's dispatch participant,
+  // never per-user ownership) — same 'stock' module as every other
+  // engine-written collection above.
+  [COLLECTIONS.DISPATCH_SERIALS]: 'stock',
   [COLLECTIONS.ORDERS]: 'orders',
   [COLLECTIONS.PROFORMA_INVOICES]: 'invoices',
   [COLLECTIONS.TAX_INVOICES]: 'tax_invoices',

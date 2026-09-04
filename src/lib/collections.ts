@@ -49,6 +49,7 @@ export const COLLECTIONS = {
   STOCK_TRANSFERS:    'stock_transfers',
   PRODUCT_SKU_LOCKS:  'product_sku_locks',
   CUSTOMER_RETURNS:   'customer_returns',
+  DISPATCH_SERIALS:   'dispatch_serials',
   ORDERS:             'orders',
   ORDER_ITEMS:        'order_items',
   PROFORMA_INVOICES:  'proforma_invoices',

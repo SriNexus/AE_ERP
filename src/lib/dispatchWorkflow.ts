@@ -1,4 +1,4 @@
-import { createDocWithId, updateDocById, genId, getAll, getOne, resolveWriteCompanyId } from './firestore';
+import { createDocWithId, updateDocById, genId, getOne, resolveWriteCompanyId, resolveWriteGroupId } from './firestore';
 import { COLLECTIONS, firebaseEnv } from './firebase';
 import { sanitizeFirestoreData } from './sanitizer';
 import { useAppStore } from '../store/useAppStore';
@@ -10,6 +10,7 @@ import { buildProjectStageAdvancePatch } from './projectLifecycle';
 import { applyStockMovements } from './inventory/stockMovementEngine';
 import { buildIdempotencyKey, movementLedgerId } from './inventory/idempotency';
 import { isReservationsEnabled } from './inventory/reservationConfig';
+import { normalizeSerial, dispatchSerialLockId, lockHeldByAnotherDispatch, type DispatchSerialLockDoc } from './inventory/serialLock';
 import {
   applyReservationDelta, buildDispatchConsumeInputs, docIdsByProduct, fetchOrderReservations,
   type StockReservationRecord,
@@ -230,37 +231,59 @@ export async function approveDispatch(dispatchId: string) {
 }
 
 /**
- * Rejects verification if any serial in verifiedItems is (a) typed more than
- * once in this same batch, or (b) already recorded against another dispatch
- * for this company. Nothing previously checked this — dispatch.items[].serials
- * is free-text captured at verification time with no uniqueness guard, so
- * the same physical serial could be typed into two different dispatches
- * with no error.
+ * INVENTORY-11 (§11a) — in-batch duplicate check ONLY: rejects verification
+ * if the SAME serial (compared NORMALIZED — `normalizeSerial`, so "SN-100"
+ * and "sn-100" collide too) is typed more than once in this one
+ * verification call. A fast, non-transactional pre-validate for a friendlier
+ * error on the common case.
+ *
+ * The REAL cross-dispatch uniqueness guard — "already recorded against
+ * another dispatch for this company" — used to be a `getAll(DISPATCH)` full
+ * collection scan run BEFORE the stock transaction even opened (a classic
+ * "query → check → write" race: two concurrent verifications of the same
+ * serial could both pass this check, then both commit, landing the same
+ * serial on two different dispatches). It is now the
+ * `dispatch_serials/{companyId}_{normalizedSerial}` lock doc — read,
+ * validated, and written INSIDE `dispatchDocParticipant`, the SAME
+ * transaction as the DISPATCH_OUT movements (see `collectSerialClaims` +
+ * `dispatchDocParticipant` below) — a genuine transactional guarantee, not
+ * an app-layer race.
  */
-async function assertNoDuplicateSerials(dispatch: any, verifiedItems: any[], companyId: string) {
-  const newSerials = verifiedItems.flatMap((item) => (Array.isArray(item.serials) ? item.serials : []));
-  if (newSerials.length === 0) return;
-
+function assertNoDuplicateSerialsInBatch(verifiedItems: any[]) {
   const seen = new Set<string>();
-  for (const serial of newSerials) {
-    if (seen.has(serial)) throw new Error(`Serial number ${serial} was entered more than once in this verification.`);
-    seen.add(serial);
-  }
-
-  const allDispatches = await getAll<WorkflowRecord & { id: string; items?: any[] }>(COLLECTIONS.DISPATCH);
-  const existingSerials = new Set<string>();
-  for (const other of allDispatches) {
-    if (other.id === dispatch.id) continue;
-    if (companyId && other.companyId && other.companyId !== companyId) continue;
-    for (const item of other.items || []) {
-      for (const serial of Array.isArray(item.serials) ? item.serials : []) {
-        existingSerials.add(serial);
-      }
+  for (const item of verifiedItems) {
+    for (const raw of Array.isArray(item.serials) ? item.serials : []) {
+      const serial = String(raw || '').trim();
+      if (!serial) continue;
+      const normalizedSerial = normalizeSerial(serial);
+      if (seen.has(normalizedSerial)) throw new Error(`Serial number ${serial} was entered more than once in this verification.`);
+      seen.add(normalizedSerial);
     }
   }
-  for (const serial of newSerials) {
-    if (existingSerials.has(serial)) throw new Error(`Serial number ${serial} has already been dispatched on another order.`);
+}
+
+interface SerialClaim { serial: string; normalizedSerial: string; productId: string; }
+
+/** Every distinct (normalized) serial across `verifiedItems`, blank entries
+ *  skipped (never locked — mirrors the SKU-lock precedent for an absent
+ *  value). Duplicates within the batch are already rejected by
+ *  `assertNoDuplicateSerialsInBatch` before this is ever called, so the
+ *  first occurrence of each normalized serial is authoritative. */
+function collectSerialClaims(verifiedItems: any[]): SerialClaim[] {
+  const claims: SerialClaim[] = [];
+  const seen = new Set<string>();
+  for (const item of verifiedItems) {
+    const productId = String(item.productId || '');
+    for (const raw of Array.isArray(item.serials) ? item.serials : []) {
+      const serial = String(raw || '').trim();
+      if (!serial) continue;
+      const normalizedSerial = normalizeSerial(serial);
+      if (seen.has(normalizedSerial)) continue;
+      seen.add(normalizedSerial);
+      claims.push({ serial, normalizedSerial, productId });
+    }
   }
+  return claims;
 }
 
 // INVENTORY-01 (P0-1): a dispatch that has reached any of these states has
@@ -305,16 +328,20 @@ async function assertDispatchReferencesValid(companyId: string, warehouseId: str
 }
 
 /**
- * INVENTORY-01 (P0-1) → INVENTORY-05c: dispatch stock-OUT, transaction-safe,
- * on the shared movement engine.
+ * INVENTORY-01 (P0-1) → INVENTORY-05c → INVENTORY-11 (§11a): dispatch
+ * stock-OUT, transaction-safe, on the shared movement engine.
  *
  * Each line's decrement is a `DISPATCH_OUT` movement; `applyStockMovements`
- * runs every line + the dispatch-doc status flip (the `dispatchDocParticipant`)
- * inside ONE `runTransaction` — the Phase-01 atomic boundary, preserved. Two
- * concurrent verifications of the same line cannot both decrement (deterministic
- * ledger id); insufficient stock aborts the whole transaction with no partial
- * mutation (INV-1); a concurrent verify that finds the dispatch already terminal
- * is a benign no-op (the participant's `validate` returns false).
+ * runs every line + the dispatch-doc status flip + the serial-lock claims
+ * (all via THIS ONE `dispatchDocParticipant`) inside ONE `runTransaction` —
+ * the Phase-01 atomic boundary, preserved. Two concurrent verifications of
+ * the same line cannot both decrement (deterministic ledger id); insufficient
+ * stock aborts the whole transaction with no partial mutation (INV-1); a
+ * concurrent verify that finds the dispatch already terminal is a benign
+ * no-op (the participant's `validate` returns false); a serial already
+ * locked by a DIFFERENT dispatch aborts the whole transaction (no partial
+ * mutation — the same "throw = abort everything" guarantee INV-13's GRN
+ * participant and INV-11's transfer participant already rely on).
  *
  * The order-items update + project patch + notifications stay AFTER the engine
  * call (Phase-01 shape — Plan §811 "keep the order-items/dispatch-doc sequence").
@@ -322,6 +349,16 @@ async function assertDispatchReferencesValid(companyId: string, warehouseId: str
 interface DispatchParticipantCtx {
   dispatch: WorkflowRecord | null;
   rsv: Map<string, Record<string, unknown> | null>;
+  serialLocks: Map<string, DispatchSerialLockDoc | null>;
+}
+
+interface SerialClaimContext {
+  claims: SerialClaim[];
+  companyId: string;
+  groupId?: string;
+  orderId?: string;
+  warehouseId?: string;
+  projectId?: string;
 }
 
 function dispatchDocParticipant(
@@ -330,20 +367,34 @@ function dispatchDocParticipant(
   actorId: string,
   nowIso: string,
   reservations: StockReservationRecord[] = [],
+  serialCtx: SerialClaimContext = { claims: [], companyId: '' },
 ): MovementParticipant<DispatchParticipantCtx> {
   const rsvIds = reservations.map((r) => r.id);
   return {
     async read(rc) {
       const rsv = new Map<string, Record<string, unknown> | null>();
       for (const id of rsvIds) rsv.set(id, await rc.get(COLLECTIONS.STOCK_RESERVATIONS, id));
-      return { dispatch: await rc.get<WorkflowRecord>(COLLECTIONS.DISPATCH, dispatchId), rsv };
+      const serialLocks = new Map<string, DispatchSerialLockDoc | null>();
+      for (const claim of serialCtx.claims) {
+        const lockId = dispatchSerialLockId(serialCtx.companyId, claim.normalizedSerial);
+        serialLocks.set(claim.normalizedSerial, await rc.get<DispatchSerialLockDoc>(COLLECTIONS.DISPATCH_SERIALS, lockId));
+      }
+      return { dispatch: await rc.get<WorkflowRecord>(COLLECTIONS.DISPATCH, dispatchId), rsv, serialLocks };
     },
     validate(ctx) {
       const status = String((ctx.dispatch?.status ?? '') || '');
       // A concurrent verification already issued this dispatch — benign no-op
       // (do NOT decrement stock again, do NOT re-bump the order, do NOT
-      // re-consume the reservation).
+      // re-consume the reservation, do NOT re-claim any serial).
       if ((TERMINAL_DISPATCH_STATUSES as readonly string[]).includes(status)) return false;
+      // INVENTORY-11 (§11a) — the REAL cross-dispatch serial-uniqueness guard:
+      // a lock already held by a DIFFERENT dispatch aborts the WHOLE
+      // transaction (zero partial write), same class as INV-1/INV-13.
+      for (const claim of serialCtx.claims) {
+        if (lockHeldByAnotherDispatch(ctx.serialLocks.get(claim.normalizedSerial), dispatchId)) {
+          throw new Error(`Serial number ${claim.serial} has already been dispatched on another order.`);
+        }
+      }
     },
     commit(ctx, plan, writer) {
       writer.set(COLLECTIONS.DISPATCH, dispatchId, {
@@ -361,6 +412,25 @@ function dispatchDocParticipant(
           writer, mode: 'consume', actorId, nowIso, matchSourceType: 'dispatch_consume',
         });
       }
+      // INVENTORY-11 (§11a) — claim every new serial ATOMICALLY with the
+      // stock decrement + dispatch-doc write above. A claim already owned by
+      // THIS dispatch (a resumed retry after a partial prior commit) is
+      // harmlessly re-written with the same identity — never re-validated
+      // against a different owner here, `validate` already cleared that.
+      for (const claim of serialCtx.claims) {
+        const lockId = dispatchSerialLockId(serialCtx.companyId, claim.normalizedSerial);
+        writer.set(COLLECTIONS.DISPATCH_SERIALS, lockId, {
+          // warehouseId is REQUIRED, not conditional: a dispatch always has
+          // one by the time a serial claim reaches commit (validated earlier
+          // in executeAndVerifyDispatch) — the `sameWarehouse()` rules gate
+          // for warehouse-restricted-role reads depends on it being present.
+          id: lockId, companyId: serialCtx.companyId, ...(serialCtx.groupId ? { groupId: serialCtx.groupId } : {}),
+          serial: claim.serial, dispatchId, productId: claim.productId, warehouseId: serialCtx.warehouseId || '',
+          ...(serialCtx.orderId ? { orderId: serialCtx.orderId } : {}),
+          ...(serialCtx.projectId ? { projectId: serialCtx.projectId } : {}),
+          status: 'assigned', isDeleted: false, createdAt: nowIso, createdBy: actorId,
+        });
+      }
     },
   };
 }
@@ -369,9 +439,20 @@ export async function executeAndVerifyDispatch(dispatch: any, verifiedItems: any
   const state = useAppStore.getState();
   const companyId = resolveWriteCompanyId() || String(dispatch.companyId || '');
   const actorId = state.user?.id || 'system';
-  await assertNoDuplicateSerials(dispatch, verifiedItems, state.activeCompanyId || dispatch.companyId || '');
+  assertNoDuplicateSerialsInBatch(verifiedItems);
 
   const stockLines = (verifiedItems || []).filter((it) => Number(it.verifiedQty) > 0);
+  const serialClaims = collectSerialClaims(verifiedItems);
+  // INVENTORY-11 (§11a) — a serial can only be locked ATOMICALLY with a
+  // DISPATCH_OUT movement (the participant only runs when at least one
+  // input actually applies — see `applyStockMovements`). A serial captured
+  // against a zero-qty line would otherwise be written onto the dispatch
+  // doc's `items` completely UNLOCKED — reject instead of silently
+  // accepting an unguarded serial (never silently discard/accept invalid
+  // serial data).
+  if (!stockLines.length && serialClaims.length) {
+    throw new Error('Serial numbers require a verified quantity greater than zero.');
+  }
 
   // Authoritative dispatch state — a sequential double-click / retry after a
   // successful verification is rejected here with a clear message.
@@ -393,7 +474,13 @@ export async function executeAndVerifyDispatch(dispatch: any, verifiedItems: any
   const reservations = isReservationsEnabled() && dispatch.orderId
     ? await fetchOrderReservations(String(dispatch.orderId))
     : [];
-  const participant = dispatchDocParticipant(String(dispatch.id), verifiedItems, actorId, now, reservations);
+  const groupId = resolveWriteGroupId(companyId);
+  const participant = dispatchDocParticipant(String(dispatch.id), verifiedItems, actorId, now, reservations, {
+    claims: serialClaims, companyId, groupId,
+    orderId: dispatch.orderId ? String(dispatch.orderId) : undefined,
+    warehouseId: dispatch.warehouseId ? String(dispatch.warehouseId) : undefined,
+    projectId: dispatch.projectId ? String(dispatch.projectId) : undefined,
+  });
 
   if (!stockLines.length) {
     // Nothing to decrement — still flip the dispatch status (Phase-01 parity).

@@ -60,9 +60,11 @@ vi.mock('../firebase', () => ({
   db: {},
   COLLECTIONS: {
     DISPATCH: 'dispatch',
+    DISPATCH_SERIALS: 'dispatch_serials',
     ORDERS: 'orders',
     STOCK: 'stock',
     STOCK_LEDGER: 'stock_ledger',
+    STOCK_RESERVATIONS: 'stock_reservations',
     USERS: 'users',
     WAREHOUSES: 'warehouses',
     PRODUCTS: 'products',
@@ -238,14 +240,77 @@ describe('executeAndVerifyDispatch — duplicate serial protection', () => {
     expect(mocks.updateDocById).not.toHaveBeenCalled();
   });
 
+  it('rejects a same-batch duplicate that only matches after normalization (case-insensitive)', async () => {
+    mocks.getAll.mockResolvedValue([]);
+    const verifiedItems = [
+      { productId: 'P-1', product: 'Panel', verifiedQty: 2, serials: ['sn-100', 'SN-100'] },
+    ];
+    await expect(executeAndVerifyDispatch(dispatch, verifiedItems)).rejects.toThrow('entered more than once');
+    expect(mocks.updateDocById).not.toHaveBeenCalled();
+  });
+
   it('rejects verification when a serial is already recorded on another dispatch for the same company', async () => {
-    mocks.getAll.mockResolvedValue([
-      { id: 'DSP-009', companyId: 'comp-1', items: [{ productId: 'P-1', serials: ['SN-200'] }] },
-    ]);
+    // INVENTORY-11 (§11a): the guard is now the `dispatch_serials` lock doc,
+    // read INSIDE the movement-engine transaction (via the participant's
+    // `read`) — not a `getAll(DISPATCH)` scan. Stub the specific lock doc id
+    // (`{companyId}_{normalizedSerial}`) as already held by a DIFFERENT
+    // dispatch, and give the engine a real stock summary so the rejection is
+    // provably the SERIAL conflict, not a masking insufficient-stock error.
+    const lockId = 'comp-1_SN-200';
+    mocks.getOne.mockImplementation(async (collection: string, id: string) => {
+      if (collection === 'dispatch' && id === 'DSP-010') return { id: 'DSP-010', status: 'Pending Verification', companyId: 'comp-1' };
+      if (collection === 'warehouses' && id === 'W-1') return { id: 'W-1', companyId: 'comp-1', isDeleted: false };
+      if (collection === 'products') return { id, companyId: 'comp-1', isDeleted: false };
+      if (collection === 'stock_ledger') return null;
+      if (collection === 'orders') return null;
+      if (collection === 'dispatch_serials' && id === lockId) {
+        return { id: lockId, companyId: 'comp-1', dispatchId: 'DSP-009', serial: 'SN-200', productId: 'P-1', status: 'assigned', isDeleted: false };
+      }
+      return null;
+    });
+    mocks.getAll.mockImplementation((collection: string) => {
+      if (collection === 'stock') return Promise.resolve([{ id: 'STOCK-1', productId: 'P-1', warehouseId: 'W-1', companyId: 'comp-1', onHandQty: 10, availableQty: 10, reservedQty: 0 }]);
+      return Promise.resolve([]);
+    });
     const verifiedItems = [
       { productId: 'P-1', product: 'Panel', verifiedQty: 1, serials: ['SN-200'] },
     ];
     await expect(executeAndVerifyDispatch(dispatch, verifiedItems)).rejects.toThrow('already been dispatched');
+    expect(mocks.updateDocById).not.toHaveBeenCalled();
+    // No stock/ledger mutation from the aborted transaction (validate threw
+    // before any write) — zero partial mutation, same as INV-1/INV-13.
+    expect(mocks.createDocWithId).not.toHaveBeenCalledWith('stock', expect.anything(), expect.anything());
+  });
+
+  it('a serial already held by THIS SAME dispatch (a resumed retry) is not treated as a conflict', async () => {
+    const lockId = 'comp-1_SN-450';
+    mocks.getOne.mockImplementation(async (collection: string, id: string) => {
+      if (collection === 'dispatch' && id === 'DSP-010') return { id: 'DSP-010', status: 'Pending Verification', companyId: 'comp-1' };
+      if (collection === 'warehouses' && id === 'W-1') return { id: 'W-1', companyId: 'comp-1', isDeleted: false };
+      if (collection === 'products') return { id, companyId: 'comp-1', isDeleted: false };
+      if (collection === 'stock_ledger') return null;
+      if (collection === 'orders') return null;
+      if (collection === 'dispatch_serials' && id === lockId) {
+        return { id: lockId, companyId: 'comp-1', dispatchId: 'DSP-010', serial: 'SN-450', productId: 'P-1', status: 'assigned', isDeleted: false };
+      }
+      return null;
+    });
+    mocks.getAll.mockImplementation((collection: string) => {
+      if (collection === 'stock') return Promise.resolve([{ id: 'STOCK-1', productId: 'P-1', warehouseId: 'W-1', companyId: 'comp-1', onHandQty: 10, availableQty: 10, reservedQty: 0 }]);
+      return Promise.resolve([]);
+    });
+    const verifiedItems = [
+      { productId: 'P-1', product: 'Panel', verifiedQty: 1, serials: ['SN-450'] },
+    ];
+    const result = await executeAndVerifyDispatch(dispatch, verifiedItems);
+    expect(result).toMatchObject({ dispatchId: 'DSP-010', alreadyVerified: false });
+  });
+
+  it('rejects a serial captured against a zero-quantity line (never silently un-locked)', async () => {
+    const verifiedItems = [
+      { productId: 'P-1', product: 'Panel', verifiedQty: 0, serials: ['SN-999'] },
+    ];
+    await expect(executeAndVerifyDispatch(dispatch, verifiedItems)).rejects.toThrow('verified quantity greater than zero');
     expect(mocks.updateDocById).not.toHaveBeenCalled();
   });
 

@@ -801,11 +801,12 @@ service cloud.firestore {
       // (Firestore evaluates every matching `match` block for a path and
       // allows the request if ANY grants it — a dedicated block alone does
       // NOT suppress the generic fallback from ALSO applying).
-      // INVENTORY-07/08/09/10: 'stock_reservations', 'stock_transfers',
-      // 'product_sku_locks' and 'customer_returns' have their own dedicated
-      // blocks below and MUST be excluded here, or the generic fallback would
-      // additively grant any same-company active user create/update access.
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'product_sku_locks', 'customer_returns', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
+      // INVENTORY-07/08/09/10/11: 'stock_reservations', 'stock_transfers',
+      // 'product_sku_locks', 'customer_returns' and 'dispatch_serials' have
+      // their own dedicated blocks below and MUST be excluded here, or the
+      // generic fallback would additively grant any same-company active user
+      // create/update access.
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'product_sku_locks', 'customer_returns', 'dispatch_serials', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
     }
 
     match /companies/{companyId} {
@@ -1663,6 +1664,37 @@ service cloud.firestore {
         && request.resource.data.orderId is string
         && request.resource.data.dispatchId is string
         && request.resource.data.status == 'processed';
+      allow update, delete: if false;
+    }
+
+    match /dispatch_serials/{lockId} {
+      // INVENTORY-11 (§11a) — dispatch serial-number uniqueness lock, mirrors
+      // `product_sku_locks`/`customer_returns`: `{companyId}_{normalizedSerial}`
+      // doc id, written ONLY as a MovementParticipant INSIDE the stock
+      // movement engine's transaction (`dispatchDocParticipant`, alongside the
+      // DISPATCH_OUT movements + the dispatch-doc status flip) — the engine
+      // stays the sole `stock`/`stock_ledger` writer; this participant may
+      // touch only this collection + the dispatch doc. `resource == null`
+      // guard: the participant's FIRST read of a not-yet-claimed lock doc
+      // would otherwise hard-deny the whole transaction (the established
+      // F4/G2/J2/K3 class). Permanently claimed once assigned — mirrors the
+      // PRIOR (pre-11) full-scan check's own semantics, which never released
+      // a serial either (a cancelled/returned dispatch's serials stayed
+      // "seen" forever); a release-on-cancel policy would be a separate,
+      // explicitly-scoped decision, not assumed here.
+      allow read: if actorIsActive() && (
+        resource == null
+        || ((canReadCompanyScoped() || groupAdminCanRead(resource.data)) && sameWarehouse(resource.data))
+      );
+      allow create: if actorIsActive()
+        && warehouseActorCanCreate(request.resource.data)
+        && warehouseBelongsToCompany(request.resource.data)
+        && sameWarehouse(request.resource.data)
+        && actorRoleMatches('.*Warehouse.*|.*Operations.*|Admin|GroupAdmin')
+        && request.resource.data.serial is string
+        && request.resource.data.dispatchId is string
+        && request.resource.data.productId is string
+        && request.resource.data.status == 'assigned';
       allow update, delete: if false;
     }
 
