@@ -168,8 +168,24 @@ async function handleList(req: VercelRequest, res: VercelResponse, config: typeo
 
     return sendPaginated(res, paged, estimatedTotal, page, perPage);
   } catch (error: any) {
-    // Fallback: if Firestore index is missing, fetch all and paginate in-memory
+    // Fallback: if Firestore index is missing, fetch all and paginate in-memory.
+    // INVENTORY-11 (§11b / BRAIN.md API-6): this silently degrades to an
+    // UNSCOPED full-collection read (every tenant's raw documents pulled into
+    // this function before the companyId filter is applied in-memory below) —
+    // "make it loud" per Plan §14 11b, so a missing composite index is a
+    // visible, actionable signal instead of a permanently-masked cost/latency
+    // problem. The fallback behavior itself is intentionally UNCHANGED (this
+    // stays a resilience path, not a hard 500, for every registered entity —
+    // removing it outright is a broader REST-API behavior change than this
+    // inventory-scoped phase should make) — only the visibility changes.
     if (error.code === 'failed-precondition' || (error.message && error.message.includes('index'))) {
+      console.error(
+        `[api/${config.collection}] Firestore composite index MISSING for handleList ` +
+        `(companyId+isDeleted+${sortBy || 'createdAt'}${status ? '+status' : ''}) — ` +
+        `falling back to a full-collection read. Add the matching composite index to ` +
+        `firestore.indexes.json and deploy it.`,
+        { collection: config.collection, sortBy: sortBy || 'createdAt', status: status || null, code: error.code },
+      );
       try {
         const allSnap = await db.collection(config.collection).get();
         let allDocs = allSnap.docs
