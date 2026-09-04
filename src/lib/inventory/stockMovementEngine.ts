@@ -516,8 +516,10 @@ async function applyBatchDemo(
   }
   const existingByStockId = new Map<string, WorkflowRecord | null>();
   for (const stockId of distinctStockIds) {
-    let row: WorkflowRecord | null = null;
-    try { row = await getOne<WorkflowRecord & { id: string }>(COLLECTIONS.STOCK, stockId); } catch { row = null; }
+    let row: WorkflowRecord | null = allStock.find((r) => r.id === stockId) || null;
+    if (!row) {
+      try { row = await getOne<WorkflowRecord & { id: string }>(COLLECTIONS.STOCK, stockId); } catch { row = null; }
+    }
     existingByStockId.set(stockId, row);
   }
 

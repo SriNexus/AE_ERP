@@ -1,12 +1,15 @@
-import { createDocWithId, updateDocById, genId, getAll, getOne, resolveWriteCompanyId, resolveWriteGroupId } from './firestore';
+import { createDocWithId, updateDocById, genId, getAll, getOne, resolveWriteCompanyId } from './firestore';
 import { COLLECTIONS, firebaseEnv } from './firebase';
 import { sanitizeFirestoreData } from './sanitizer';
 import { useAppStore } from '../store/useAppStore';
 import { NotificationType } from '../types';
 import { canDo } from './permissions';
-import { generateDeliveryOTP, hashOTP, isDispatchImmutable, logActivity, notifyUsers, resolveWorkflowCompanyId, stockSummaryId, text, timestampMillis, usersByRole, type WorkflowRecord } from './workflow';
+import { generateDeliveryOTP, hashOTP, isDispatchImmutable, logActivity, notifyUsers, resolveWorkflowCompanyId, text, timestampMillis, usersByRole, type WorkflowRecord } from './workflow';
 import { propagateCaseIdFromChain } from './casePropagation';
 import { buildProjectStageAdvancePatch } from './projectLifecycle';
+import { applyStockMovements } from './inventory/stockMovementEngine';
+import { buildIdempotencyKey, movementLedgerId } from './inventory/idempotency';
+import type { MovementParticipant, StockMovementInput } from './inventory/types';
 
 type DispatchRequestPayload = { orderId: string; customerId: string; customer: string; warehouseId: string; warehouse: string; vehicleNo: string; driverName: string; driverPhone: string; transporterId: string; lrNumber: string; items: Array<{ productId: string; product: string; requestedQty: number; trackingType: string; unit: string }>; notes: string; projectId?: string; projectName?: string };
 export function projectDispatchPatch(project: any, dispatchId: string, userId: string, now = new Date().toISOString()) {
@@ -261,15 +264,16 @@ async function assertNoDuplicateSerials(dispatch: any, verifiedItems: any[], com
 export const TERMINAL_DISPATCH_STATUSES = ['Dispatched', 'In Transit', 'Delivered', 'Returned', 'Closed'] as const;
 
 /**
- * INVENTORY-01: deterministic `stock_ledger` document id for a dispatch-OUT
- * line — one id per (dispatch, product). A retried or concurrent verification
- * of the same line resolves to the SAME ledger doc, so the movement is applied
- * at most once (the transaction reads this ref first; `stock_ledger` rules also
- * forbid updating an existing row). Sanitised for use as a Firestore doc id.
+ * INVENTORY-01 / INVENTORY-05c: deterministic `stock_ledger` document id for a
+ * dispatch-OUT line — one id per (dispatch, product). A retried or concurrent
+ * verification of the same line resolves to the SAME ledger doc, so the
+ * movement is applied at most once. INVENTORY-05c routes this through the
+ * movement engine, so the id is now the engine's injective
+ * `STKMV-{enc(DISPATCH_OUT:dispatch:{dispatchId}:{productId})}` (the idempotency
+ * key is byte-identical to the INVENTORY-01 key).
  */
 export function dispatchOutLedgerId(dispatchId: string, productId: string): string {
-  const part = (v: string) => encodeURIComponent(String(v || '').trim());
-  return `STKOUT-${part(dispatchId)}-${part(productId)}`;
+  return movementLedgerId(buildIdempotencyKey('DISPATCH_OUT', 'dispatch', String(dispatchId || '').trim(), String(productId || '').trim()));
 }
 
 /**
@@ -296,22 +300,49 @@ async function assertDispatchReferencesValid(companyId: string, warehouseId: str
 }
 
 /**
- * INVENTORY-01 (P0-1): dispatch stock-OUT, transaction-safe.
+ * INVENTORY-01 (P0-1) → INVENTORY-05c: dispatch stock-OUT, transaction-safe,
+ * on the shared movement engine.
  *
- * Every line that reduces stock does so inside ONE Firestore transaction that
- * (a) re-reads the dispatch and each stock summary, (b) rejects if the dispatch
- * is already terminal, (c) rejects if any line is short, then (d) writes the
- * decremented summary + a DETERMINISTIC ledger row + the dispatch status — all
- * atomically. Two concurrent verifications of the same line cannot both
- * decrement; a retry of an already-processed line is a no-op; insufficient
- * stock aborts the whole transaction with no partial mutation.
+ * Each line's decrement is a `DISPATCH_OUT` movement; `applyStockMovements`
+ * runs every line + the dispatch-doc status flip (the `dispatchDocParticipant`)
+ * inside ONE `runTransaction` — the Phase-01 atomic boundary, preserved. Two
+ * concurrent verifications of the same line cannot both decrement (deterministic
+ * ledger id); insufficient stock aborts the whole transaction with no partial
+ * mutation (INV-1); a concurrent verify that finds the dispatch already terminal
+ * is a benign no-op (the participant's `validate` returns false).
  *
- * Interim production-safety fix. Phase 05c later routes this through the
- * unified movement engine (`applyStockMovement('DISPATCH_OUT')`).
+ * The order-items update + project patch + notifications stay AFTER the engine
+ * call (Phase-01 shape — Plan §811 "keep the order-items/dispatch-doc sequence").
  */
+function dispatchDocParticipant(
+  dispatchId: string,
+  verifiedItems: any[],
+  actorId: string,
+  nowIso: string,
+): MovementParticipant<WorkflowRecord | null> {
+  return {
+    async read(rc) {
+      return rc.get<WorkflowRecord>(COLLECTIONS.DISPATCH, dispatchId);
+    },
+    validate(current) {
+      const status = String((current?.status ?? '') || '');
+      // A concurrent verification already issued this dispatch — benign no-op
+      // (do NOT decrement stock again, do NOT re-bump the order).
+      if ((TERMINAL_DISPATCH_STATUSES as readonly string[]).includes(status)) return false;
+    },
+    commit(_current, _plan, writer) {
+      writer.set(COLLECTIONS.DISPATCH, dispatchId, {
+        status: 'Dispatched', items: verifiedItems, verifiedBy: actorId, dispatchedAt: nowIso,
+        updatedBy: actorId,
+      }, { merge: true });
+    },
+  };
+}
+
 export async function executeAndVerifyDispatch(dispatch: any, verifiedItems: any[]) {
   const state = useAppStore.getState();
   const companyId = resolveWriteCompanyId() || String(dispatch.companyId || '');
+  const actorId = state.user?.id || 'system';
   await assertNoDuplicateSerials(dispatch, verifiedItems, state.activeCompanyId || dispatch.companyId || '');
 
   const stockLines = (verifiedItems || []).filter((it) => Number(it.verifiedQty) > 0);
@@ -326,135 +357,67 @@ export async function executeAndVerifyDispatch(dispatch: any, verifiedItems: any
 
   await assertDispatchReferencesValid(companyId, String(dispatch.warehouseId || ''), stockLines.map((it) => String(it.productId || '')));
 
-  const groupId = resolveWriteGroupId(companyId);
   const now = new Date().toISOString();
-  const applied: Array<{ productId: string; appliedQty: number }> = [];
-  let alreadyVerified = false;
+  let applied: Array<{ productId: string; appliedQty: number }> = [];
+  const participant = dispatchDocParticipant(String(dispatch.id), verifiedItems, actorId, now);
 
-  if (!firebaseEnv.isConfigured) {
-    // Demo / non-configured branch: same guards, best-effort sequencing.
-    for (const item of stockLines) {
-      const ledgerId = dispatchOutLedgerId(dispatch.id, String(item.productId));
-      const existingLedger = await getOne<WorkflowRecord & { id: string }>(COLLECTIONS.STOCK_LEDGER, ledgerId).catch(() => null);
-      if (existingLedger) { applied.push({ productId: String(item.productId), appliedQty: 0 }); continue; }
-
-      const rows = await getAll<WorkflowRecord & { id: string }>(COLLECTIONS.STOCK);
-      const stock = rows.find((row) => (
-        row.productId === item.productId && row.warehouseId === dispatch.warehouseId && row.companyId === (companyId || dispatch.companyId)
-      ));
-      if (!stock) throw new Error(`Stock not found for ${item.product}`);
-      const available = Number(stock.availableQty ?? stock.available) || 0;
-      if (available < item.verifiedQty) throw new Error(`Insufficient stock for ${item.product}. Available: ${available}, Required: ${item.verifiedQty}`);
-      const newQty = available - item.verifiedQty;
-      await updateDocById(COLLECTIONS.STOCK, stock.id, { availableQty: newQty, reservedQty: Number(stock.reservedQty ?? stock.reserved) || 0 });
-      await createDocWithId(COLLECTIONS.STOCK_LEDGER, ledgerId, sanitizeFirestoreData({
-        id: ledgerId, companyId: companyId || dispatch.companyId || '', ...(groupId ? { groupId } : {}),
-        productId: item.productId, product: item.product, warehouseId: dispatch.warehouseId, warehouse: dispatch.warehouse,
-        type: 'OUT', qty: item.verifiedQty, beforeQty: available, afterQty: newQty,
-        transactionId: genId.generic('TXN'), movementAt: now, unit: item.unit,
-        referenceType: 'Dispatch', referenceId: dispatch.id, sourceType: 'dispatch', sourceId: dispatch.id,
-        idempotencyKey: `DISPATCH_OUT:dispatch:${dispatch.id}:${item.productId}`,
-        date: now, notes: `Dispatch verification for Order ${dispatch.orderId}`, createdBy: state.user?.id || 'system', isDeleted: false,
-      }));
-      applied.push({ productId: String(item.productId), appliedQty: item.verifiedQty });
+  if (!stockLines.length) {
+    // Nothing to decrement — still flip the dispatch status (Phase-01 parity).
+    const cur = authoritative ?? (await getOne<WorkflowRecord & { id: string; status?: string }>(COLLECTIONS.DISPATCH, dispatch.id).catch(() => null));
+    if (cur && (TERMINAL_DISPATCH_STATUSES as readonly string[]).includes(String(cur.status || ''))) {
+      return { dispatchId: dispatch.id, alreadyVerified: true, applied: [] as Array<{ productId: string; appliedQty: number }> };
     }
+    await updateDocById(COLLECTIONS.DISPATCH, dispatch.id, sanitizeFirestoreData({
+      status: 'Dispatched', items: verifiedItems, verifiedBy: state.user?.id, dispatchedAt: now, updatedBy: actorId,
+    }));
   } else {
-    const { db } = await import('./firebase');
-    const { collection, doc, getDocs, query, runTransaction, serverTimestamp, where } = await import('firebase/firestore');
+    // ---- ATOMIC: every line's DISPATCH_OUT + the dispatch-doc status flip, ONE engine txn.
+    const inputs: StockMovementInput[] = stockLines.map((item) => ({
+      movementType: 'DISPATCH_OUT' as const,
+      productId: String(item.productId),
+      warehouseId: String(dispatch.warehouseId || ''),
+      qty: Number(item.verifiedQty),
+      unit: String(item.unit || 'PCS'),
+      sourceType: 'dispatch',
+      sourceId: String(dispatch.id),
+      lineKey: String(item.productId),
+      companyId,
+      actorId,
+      notes: `Dispatch verification for Order ${dispatch.orderId}`,
+      ledgerExtra: {
+        referenceType: 'Dispatch', referenceId: String(dispatch.id),
+        product: item.product, warehouse: dispatch.warehouse,
+      },
+    }));
 
-    // Resolve each line's authoritative stock summary doc id OUTSIDE the txn
-    // (a query cannot run inside runTransaction) — mirrors stockWorkflow.stockIn.
-    const lineRefs: Array<{ item: any; stockId: string; ledgerId: string }> = [];
-    for (const item of stockLines) {
-      const canonical = stockSummaryId(companyId, String(item.productId), String(dispatch.warehouseId));
-      const matches = await getDocs(query(
-        collection(db, COLLECTIONS.STOCK),
-        where('companyId', '==', companyId),
-        where('productId', '==', item.productId),
-        where('warehouseId', '==', dispatch.warehouseId),
-      ));
-      const active = matches.docs.filter((d) => (d.data() as any).isDeleted !== true);
-      if (active.length > 1) throw new Error(`Duplicate stock summaries exist for ${item.product}`);
-      lineRefs.push({ item, stockId: active[0]?.id || canonical, ledgerId: dispatchOutLedgerId(dispatch.id, String(item.productId)) });
+    let batch;
+    try {
+      batch = await applyStockMovements(inputs, participant);
+    } catch (err) {
+      // Preserve the Phase-01 error phrasing for an insufficient-stock abort.
+      const msg = String((err as Error)?.message || err);
+      if (/Insufficient stock|onHandQty/i.test(msg)) {
+        const short = stockLines[0];
+        throw new Error(`Insufficient stock for ${short?.product ?? 'a line'}. ${msg}`);
+      }
+      throw err;
     }
 
-    const dispatchRef = doc(db, COLLECTIONS.DISPATCH, dispatch.id);
+    if (batch.skipped) {
+      // A concurrent verification won the race — do NOT double-apply order qty.
+      return { dispatchId: dispatch.id, alreadyVerified: true, applied: [] as Array<{ productId: string; appliedQty: number }> };
+    }
+    applied = batch.results.map((r) => ({ productId: r.productId, appliedQty: r.applied ? r.qty : 0 }));
 
-    await runTransaction(db, async (transaction) => {
-      // ---- READS (all reads must precede all writes) ----
-      const dispatchSnap = await transaction.get(dispatchRef);
-      if (!dispatchSnap.exists()) throw new Error(`Dispatch ${dispatch.id} not found`);
-      const txStatus = String((dispatchSnap.data() as any).status || '');
-      if ((TERMINAL_DISPATCH_STATUSES as readonly string[]).includes(txStatus)) {
-        alreadyVerified = true;
-        return; // another verification already issued this dispatch — no-op
-      }
-      const perLine: Array<{ ref: typeof lineRefs[number]; item: any; stockRef: any; ledgerRef: any; ledgerExists: boolean; available: number; existing: any }> = [];
-      for (const lr of lineRefs) {
-        const stockRef = doc(db, COLLECTIONS.STOCK, lr.stockId);
-        const ledgerRef = doc(db, COLLECTIONS.STOCK_LEDGER, lr.ledgerId);
-        const ledgerSnap = await transaction.get(ledgerRef);
-        const stockSnap = await transaction.get(stockRef);
-        perLine.push({
-          ref: lr, item: lr.item, stockRef, ledgerRef,
-          ledgerExists: ledgerSnap.exists(),
-          available: stockSnap.exists() ? (Number((stockSnap.data() as any).availableQty ?? (stockSnap.data() as any).available) || 0) : Number.NaN,
-          existing: stockSnap.exists() ? stockSnap.data() : null,
-        });
-      }
-
-      // ---- VALIDATE (no writes yet — an abort here leaves everything unchanged) ----
-      for (const l of perLine) {
-        if (l.ledgerExists) continue; // idempotent no-op for this line
-        if (!l.existing || Number.isNaN(l.available)) throw new Error(`Stock not found for ${l.item.product}`);
-        if (l.available < Number(l.item.verifiedQty)) {
-          throw new Error(`Insufficient stock for ${l.item.product}. Available: ${l.available}, Required: ${l.item.verifiedQty}`);
-        }
-      }
-
-      // ---- WRITES ----
-      for (const l of perLine) {
-        if (l.ledgerExists) { applied.push({ productId: String(l.item.productId), appliedQty: 0 }); continue; }
-        const qty = Number(l.item.verifiedQty);
-        const newQty = l.available - qty; // guaranteed >= 0 by the validation loop
-        const summaryBase = { ...(l.existing || {}) };
-        delete (summaryBase as any).available;
-        delete (summaryBase as any).reserved;
-        transaction.set(l.stockRef, sanitizeFirestoreData({
-          ...summaryBase,
-          id: l.ref.stockId, companyId, ...(groupId ? { groupId } : {}),
-          productId: l.item.productId, warehouseId: dispatch.warehouseId,
-          availableQty: newQty,
-          reservedQty: Number((l.existing as any).reservedQty ?? (l.existing as any).reserved) || 0,
-          unit: l.item.unit || (l.existing as any).unit,
-          updatedBy: state.user?.id || 'system', updatedAt: serverTimestamp(),
-          createdAt: (l.existing as any).createdAt ?? serverTimestamp(),
-          isDeleted: false,
-        }));
-        transaction.set(l.ledgerRef, sanitizeFirestoreData({
-          id: l.ref.ledgerId, companyId, ...(groupId ? { groupId } : {}),
-          productId: l.item.productId, product: l.item.product, warehouseId: dispatch.warehouseId, warehouse: dispatch.warehouse,
-          type: 'OUT', qty, beforeQty: l.available, afterQty: newQty,
-          transactionId: genId.generic('TXN'), movementAt: serverTimestamp(), unit: l.item.unit,
-          referenceType: 'Dispatch', referenceId: dispatch.id, sourceType: 'dispatch', sourceId: dispatch.id,
-          idempotencyKey: `DISPATCH_OUT:dispatch:${dispatch.id}:${l.item.productId}`,
-          date: now, notes: `Dispatch verification for Order ${dispatch.orderId}`,
-          createdBy: state.user?.id || 'system', createdAt: serverTimestamp(), isDeleted: false,
-        }));
-        applied.push({ productId: String(l.item.productId), appliedQty: qty });
-      }
-
-      transaction.set(dispatchRef, sanitizeFirestoreData({
-        status: 'Dispatched', items: verifiedItems, verifiedBy: state.user?.id, dispatchedAt: serverTimestamp(),
-        updatedBy: state.user?.id || 'system',
-      }), { merge: true });
-    });
-  }
-
-  if (alreadyVerified) {
-    // A concurrent verification won the race and already updated the order /
-    // dispatch — do NOT double-apply the order quantities.
-    return { dispatchId: dispatch.id, alreadyVerified: true, applied: [] as Array<{ productId: string; appliedQty: number }> };
+    if (!applied.some((a) => a.appliedQty > 0)) {
+      // Every line was an idempotent no-op → the engine skipped the
+      // dispatch-doc participant. Flip the status here for Phase-01 parity
+      // (recovery after a partial failure where the ledger rows committed but
+      // the status write did not). Idempotent.
+      await updateDocById(COLLECTIONS.DISPATCH, dispatch.id, sanitizeFirestoreData({
+        status: 'Dispatched', items: verifiedItems, verifiedBy: state.user?.id, dispatchedAt: now, updatedBy: actorId,
+      }));
+    }
   }
 
   const totalApplied = applied.reduce((s, a) => s + a.appliedQty, 0);
@@ -477,12 +440,9 @@ export async function executeAndVerifyDispatch(dispatch: any, verifiedItems: any
     await updateDocById(COLLECTIONS.ORDERS, order.id, { items: updatedOrderItems, status: allDispatched ? 'Dispatched' : 'Partial Dispatch' });
   }
 
-  if (!firebaseEnv.isConfigured) {
-    // Demo branch: the dispatch status is not written inside a transaction — do it here.
-    await updateDocById(COLLECTIONS.DISPATCH, dispatch.id, {
-      status: 'Dispatched', items: verifiedItems, verifiedBy: state.user?.id, dispatchedAt: now,
-    });
-  }
+  // (The dispatch-doc status flip happens inside the engine transaction via
+  //  dispatchDocParticipant — INVENTORY-05c — for both the configured and demo
+  //  branches; no separate write here.)
 
   if (dispatch.projectId) {
     const project = await getOne<WorkflowRecord>(COLLECTIONS.PROJECTS, dispatch.projectId);

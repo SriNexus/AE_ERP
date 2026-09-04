@@ -44,7 +44,10 @@ const WH_B = 'WH-DISPOUT-B';
 const PRODUCT_ID = 'PRD-DISPOUT-1';
 const DISPATCH_ID = 'DSP-DISPOUT-1';
 const STOCK_ID = `SUM-${COMPANY_ID}-${PRODUCT_ID}-${WH_A}`;
-const LEDGER_ID = `STKOUT-${DISPATCH_ID}-${PRODUCT_ID}`;
+// INVENTORY-05c: the movement engine's injective ledger id (the idempotency key
+// is byte-identical to the INVENTORY-01 key `DISPATCH_OUT:dispatch:{id}:{pid}`).
+const DISPATCH_OUT_KEY = `DISPATCH_OUT:dispatch:${DISPATCH_ID}:${PRODUCT_ID}`;
+const LEDGER_ID = `STKMV-${encodeURIComponent(DISPATCH_OUT_KEY)}`;
 
 const UID_WH = 'uid-dispout-wh';
 const USER_WH = 'user-dispout-wh';
@@ -92,7 +95,14 @@ afterAll(async () => {
 
 const dbFor = (uid: string, email: string) => env.authenticatedContext(uid, { email }).firestore();
 
-/** The exact single-line transaction shape executeAndVerifyDispatch issues (configured branch). */
+/**
+ * INVENTORY-05c: mirrors executeAndVerifyDispatch after the movement-engine
+ * migration — ONE runTransaction: the engine reads the deterministic ledger +
+ * the stock summary, the `dispatch`-doc PARTICIPANT reads the dispatch (terminal
+ * check), then the engine writes stock + stock_ledger and the participant writes
+ * the dispatch status — committed together. NO firestore.rules change from
+ * INVENTORY-01.
+ */
 async function verifyLineTxn(
   db: ReturnType<typeof dbFor>,
   opts: { qty: number; actorId: string; stockId?: string; warehouseId?: string; companyId?: string },
@@ -105,39 +115,40 @@ async function verifyLineTxn(
     const ledgerRef = doc(db, 'stock_ledger', LEDGER_ID);
     const stockRef = doc(db, 'stock', stockId);
 
-    const dSnap = await tx.get(dispatchRef);
-    if (!dSnap.exists()) throw new Error('dispatch not found');
-    if (TERMINAL.includes(String(dSnap.data().status || ''))) return { applied: 0, alreadyVerified: true };
-
+    // READ PHASE — engine ledger + stock, then participant dispatch read.
     const ledgerSnap = await tx.get(ledgerRef);
     const stockSnap = await tx.get(stockRef);
+    const dSnap = await tx.get(dispatchRef);
+    if (!dSnap.exists()) throw new Error('dispatch not found');
 
-    if (ledgerSnap.exists()) {
-      tx.set(dispatchRef, { status: 'Dispatched', verifiedBy: opts.actorId, dispatchedAt: serverTimestamp(), updatedBy: opts.actorId }, { merge: true });
-      return { applied: 0, alreadyVerified: false };
-    }
+    // participant.validate — a terminal dispatch is a benign no-op (skip).
+    if (TERMINAL.includes(String(dSnap.data().status || ''))) return { applied: 0, alreadyVerified: true };
+
+    if (ledgerSnap.exists()) return { applied: 0, alreadyVerified: false };  // idempotent no-op
+
     if (!stockSnap.exists()) throw new Error('stock not found');
-    const available = Number(stockSnap.data().availableQty ?? 0) || 0;
-    if (available < opts.qty) throw new Error(`insufficient (available ${available}, need ${opts.qty})`);
-    const newQty = available - opts.qty;
+    const onHandBefore = Number(stockSnap.data().onHandQty ?? stockSnap.data().availableQty ?? 0) || 0;
+    if (onHandBefore < opts.qty) throw new Error(`insufficient (available ${onHandBefore}, need ${opts.qty})`);
+    const onHandAfter = onHandBefore - opts.qty;
 
+    // WRITE PHASE — engine owns stock + stock_ledger.
     const base = { ...stockSnap.data() };
     delete (base as Record<string, unknown>).available;
     delete (base as Record<string, unknown>).reserved;
     tx.set(stockRef, {
-      ...base, id: stockId, companyId, groupId: GROUP_ID, productId: PRODUCT_ID, warehouseId,
-      availableQty: newQty, reservedQty: Number(stockSnap.data().reservedQty ?? 0) || 0, unit: 'PCS',
+      ...base, id: stockId, companyId, groupId: GROUP_ID, productId: PRODUCT_ID, warehouseId, unit: 'PCS',
+      onHandQty: onHandAfter, reservedQty: Number(stockSnap.data().reservedQty ?? 0) || 0, availableQty: onHandAfter,
       updatedBy: opts.actorId, updatedAt: serverTimestamp(),
       createdAt: stockSnap.data().createdAt ?? serverTimestamp(), isDeleted: false,
     });
     tx.set(ledgerRef, {
-      id: LEDGER_ID, companyId, groupId: GROUP_ID, productId: PRODUCT_ID, product: 'Panel', warehouseId, warehouse: 'WH A',
-      type: 'OUT', qty: opts.qty, beforeQty: available, afterQty: newQty,
-      transactionId: `TXN-${LEDGER_ID}`, movementAt: serverTimestamp(), unit: 'PCS',
-      referenceType: 'Dispatch', referenceId: DISPATCH_ID, sourceType: 'dispatch', sourceId: DISPATCH_ID,
-      idempotencyKey: `DISPATCH_OUT:dispatch:${DISPATCH_ID}:${PRODUCT_ID}`,
-      date: new Date().toISOString(), notes: 'x', createdBy: opts.actorId, createdAt: serverTimestamp(), isDeleted: false,
+      id: LEDGER_ID, companyId, groupId: GROUP_ID, productId: PRODUCT_ID, product: 'Panel', warehouseId, warehouse: 'WH A', stockId, unit: 'PCS',
+      movementType: 'DISPATCH_OUT', direction: 'OUT', qty: opts.qty, onHandBefore, onHandAfter, reservedBefore: 0, reservedAfter: 0,
+      sourceType: 'dispatch', sourceId: DISPATCH_ID, idempotencyKey: DISPATCH_OUT_KEY,
+      actorId: opts.actorId, transactionId: `TXN-${LEDGER_ID}`, movementAt: serverTimestamp(), createdAt: serverTimestamp(), createdBy: opts.actorId, isDeleted: false,
+      type: 'OUT', referenceType: 'Dispatch', referenceId: DISPATCH_ID, beforeQty: onHandBefore, afterQty: onHandAfter, date: new Date().toISOString(), notes: 'x',
     });
+    // participant.commit — the engine's guarded writer forwards this to the SAME txn.
     tx.set(dispatchRef, { status: 'Dispatched', verifiedBy: opts.actorId, dispatchedAt: serverTimestamp(), updatedBy: opts.actorId }, { merge: true });
     return { applied: opts.qty, alreadyVerified: false };
   });

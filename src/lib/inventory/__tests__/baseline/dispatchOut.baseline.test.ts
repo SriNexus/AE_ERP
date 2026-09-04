@@ -101,28 +101,31 @@ beforeEach(() => {
 });
 
 describe('INVENTORY-01 BASELINE — dispatchWorkflow.executeAndVerifyDispatch (stock OUT, demo branch)', () => {
-  it('decrements availableQty and appends a DETERMINISTIC OUT ledger row', async () => {
+  it('INVENTORY-05c: decrements on-hand via the movement engine + appends a DISPATCH_OUT ledger row', async () => {
     const result = await executeAndVerifyDispatch(dispatchDoc(), [{ productId: 'P-1', product: 'Panel', unit: 'PCS', verifiedQty: 3, serials: [] }]);
 
     expect(result).toMatchObject({ dispatchId: 'DSP-1', alreadyVerified: false, applied: [{ productId: 'P-1', appliedQty: 3 }] });
-    expect(mocks.updateDocById).toHaveBeenCalledWith('stock', 'SUM-1', expect.objectContaining({ availableQty: 7 }));
+    expect(mocks.createDocWithId).toHaveBeenCalledWith('stock', 'SUM-1', expect.objectContaining({ onHandQty: 7, availableQty: 7 }));
 
     const [ledgerCol, ledgerId, ledger] = mocks.createDocWithId.mock.calls.find((c) => c[0] === 'stock_ledger')!;
     expect(ledgerCol).toBe('stock_ledger');
     expect(ledgerId).toBe(dispatchOutLedgerId('DSP-1', 'P-1'));
-    expect(ledgerId).toBe('STKOUT-DSP-1-P-1');
+    expect(ledgerId).toBe(`STKMV-${encodeURIComponent('DISPATCH_OUT:dispatch:DSP-1:P-1')}`);
     expect(ledger).toMatchObject({
-      type: 'OUT', qty: 3, beforeQty: 10, afterQty: 7,
+      movementType: 'DISPATCH_OUT', direction: 'OUT', qty: 3, onHandBefore: 10, onHandAfter: 7,
+      type: 'OUT', beforeQty: 10, afterQty: 7,
       referenceType: 'Dispatch', referenceId: 'DSP-1',
       sourceType: 'dispatch', sourceId: 'DSP-1',
       idempotencyKey: 'DISPATCH_OUT:dispatch:DSP-1:P-1',
       groupId: 'grp-1',
     });
+    // dispatch-doc status flip is the engine participant (atomic with stock)
+    expect(mocks.updateDocById).toHaveBeenCalledWith('dispatch', 'DSP-1', expect.objectContaining({ status: 'Dispatched' }));
   });
 
   it('P0-3 (still deferred): reservedQty is carried forward, never consumed by the OUT', async () => {
     await executeAndVerifyDispatch(dispatchDoc(), [{ productId: 'P-1', product: 'Panel', unit: 'PCS', verifiedQty: 3, serials: [] }]);
-    const stockWrite = mocks.updateDocById.mock.calls.find((c) => c[0] === 'stock')![2] as Record<string, unknown>;
+    const stockWrite = mocks.createDocWithId.mock.calls.find((c) => c[0] === 'stock')![2] as Record<string, unknown>;
     expect(stockWrite.reservedQty).toBe(4);
     expect(stockWrite.availableQty).toBe(7);
   });
@@ -201,7 +204,7 @@ describe('INVENTORY-01 BASELINE — dispatchWorkflow.executeAndVerifyDispatch (s
     expect(mocks.updateDocById).not.toHaveBeenCalledWith('orders', expect.anything(), expect.anything());
   });
 
-  it('dispatchOutLedgerId sanitizes ids containing slashes / spaces', () => {
-    expect(dispatchOutLedgerId('DSP/1', 'P 1')).toBe('STKOUT-DSP%2F1-P%201');
+  it('dispatchOutLedgerId is the movement engine\'s injective id (slashes / spaces encoded)', () => {
+    expect(dispatchOutLedgerId('DSP/1', 'P 1')).toBe(`STKMV-${encodeURIComponent('DISPATCH_OUT:dispatch:DSP/1:P 1')}`);
   });
 });

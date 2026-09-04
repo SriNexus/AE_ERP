@@ -263,7 +263,7 @@ describe('executeAndVerifyDispatch — duplicate serial protection', () => {
     ];
     const result = await executeAndVerifyDispatch(dispatch, verifiedItems);
     expect(result).toMatchObject({ dispatchId: 'DSP-010', alreadyVerified: false, applied: [{ productId: 'P-1', appliedQty: 1 }] });
-    expect(mocks.updateDocById).toHaveBeenCalledWith('stock', 'STOCK-1', expect.objectContaining({ availableQty: 9 }));
+    expect(mocks.createDocWithId).toHaveBeenCalledWith('stock', 'STOCK-1', expect.objectContaining({ onHandQty: 9, availableQty: 9 }));
   });
 
   it('allows verification of items with no serials at all (non-serial-tracked products)', async () => {
@@ -276,7 +276,7 @@ describe('executeAndVerifyDispatch — duplicate serial protection', () => {
     ];
     const result = await executeAndVerifyDispatch(dispatch, verifiedItems);
     expect(result).toMatchObject({ dispatchId: 'DSP-010', alreadyVerified: false });
-    expect(mocks.updateDocById).toHaveBeenCalledWith('stock', 'STOCK-1', expect.objectContaining({ availableQty: 5 }));
+    expect(mocks.createDocWithId).toHaveBeenCalledWith('stock', 'STOCK-1', expect.objectContaining({ onHandQty: 5, availableQty: 5 }));
   });
 
   it('INVENTORY-01: rejects re-verification when the dispatch is already in a terminal status', async () => {
@@ -347,15 +347,21 @@ describe('executeAndVerifyDispatch — duplicate serial protection', () => {
     expect(mocks.createDocWithId).not.toHaveBeenCalled();
   });
 
-  it('INVENTORY-01: the OUT ledger row uses the deterministic id STKOUT-{dispatch}-{product} and carries an idempotencyKey', async () => {
+  it('INVENTORY-05c: the OUT ledger row is a DISPATCH_OUT movement with a deterministic id + unified + legacy fields', async () => {
     mocks.getAll.mockImplementation((collection: string) => {
       if (collection === 'dispatch') return Promise.resolve([]);
       return Promise.resolve([{ id: 'STOCK-1', productId: 'P-1', warehouseId: 'W-1', companyId: 'comp-1', availableQty: 10, reservedQty: 0 }]);
     });
-    await executeAndVerifyDispatch(dispatch, [{ productId: 'P-1', product: 'Panel', verifiedQty: 1 }]);
-    expect(mocks.createDocWithId).toHaveBeenCalledWith('stock_ledger', 'STKOUT-DSP-010-P-1', expect.objectContaining({
-      type: 'OUT', qty: 1, beforeQty: 10, afterQty: 9, referenceType: 'Dispatch', referenceId: 'DSP-010',
-      idempotencyKey: 'DISPATCH_OUT:dispatch:DSP-010:P-1',
+    await executeAndVerifyDispatch(dispatch, [{ productId: 'P-1', product: 'Panel', verifiedQty: 1, unit: 'PCS' }]);
+    const key = 'DISPATCH_OUT:dispatch:DSP-010:P-1';
+    expect(mocks.createDocWithId).toHaveBeenCalledWith('stock_ledger', `STKMV-${encodeURIComponent(key)}`, expect.objectContaining({
+      movementType: 'DISPATCH_OUT', direction: 'OUT', qty: 1,
+      onHandBefore: 10, onHandAfter: 9,
+      // legacy compat
+      type: 'OUT', beforeQty: 10, afterQty: 9, referenceType: 'Dispatch', referenceId: 'DSP-010',
+      idempotencyKey: key,
     }));
+    // the dispatch-doc status flip happens inside the engine txn (participant)
+    expect(mocks.updateDocById).toHaveBeenCalledWith('dispatch', 'DSP-010', expect.objectContaining({ status: 'Dispatched' }));
   });
 });
