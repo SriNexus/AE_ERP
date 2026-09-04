@@ -80,6 +80,8 @@ import toast from 'react-hot-toast';
 import type { Product } from '../types';
 import { canDo } from '../lib/permissions';
 import { StockReconciliationReport } from '../features/stock/components/StockReconciliationReport';
+import { DAMAGE_REASON_CODES, DAMAGE_REASON_LABELS } from '../features/inventory/services/stockOperationsWorkflow';
+import { BulkStockAdjustModal } from '../features/inventory/components/BulkStockAdjustModal';
 
 const PER_PAGE = 10;
 
@@ -139,6 +141,9 @@ export default function StockSummary() {
   const [adjustForm, setAdjustForm] = useState<StockForm>({ ...STOCK_FORM_DEFAULT });
   const [reconcileOpen, setReconcileOpen] = useState(false);
   const canViewReconcile = canDo('view', 'stock');
+  // INVENTORY-10 (§10c)
+  const [bulkImportOpen, setBulkImportOpen] = useState(false);
+  const canBulkImport = canDo('edit', 'stock');
 
   // ── Queries ──────────────────────────────────────────────────
   const { data: stockSummary = [], isLoading, refetch } = useStockSummary();
@@ -605,6 +610,11 @@ export default function StockSummary() {
               <Button variant="outline" size="sm" icon={<RefreshCw className="h-4 w-4" />} onClick={() => refetch()}>
                 Refresh
               </Button>
+              {canBulkImport && (
+                <Button variant="outline" size="sm" icon={<Download className="h-4 w-4 rotate-180" />} onClick={() => setBulkImportOpen(true)}>
+                  Bulk Import
+                </Button>
+              )}
               <Button size="sm" data-tour="stock-create" icon={<Plus className="h-4 w-4" />} onClick={() => {
                 setAdjustForm({ ...STOCK_FORM_DEFAULT });
                 setAdjustOpen(true);
@@ -1021,6 +1031,10 @@ export default function StockSummary() {
                 toast.error('Product and qty required');
                 return;
               }
+              if (adjustForm.type === 'DAMAGE' && !adjustForm.damageReasonCode) {
+                toast.error('A damage reason is required');
+                return;
+              }
               saveStockMutation.mutate(adjustForm);
             }
           }}
@@ -1030,13 +1044,31 @@ export default function StockSummary() {
               <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-1">Transaction Type</label>
               <select
                 value={adjustForm.type}
-                onChange={(event) => setAdjustForm({ ...adjustForm, type: event.target.value as 'IN' | 'OUT' })}
+                onChange={(event) => setAdjustForm({ ...adjustForm, type: event.target.value as StockForm['type'], damageReasonCode: '' })}
                 className="w-full h-8 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
               >
                 <option value="IN">IN (Stock In)</option>
                 <option value="OUT">OUT (Stock Out)</option>
+                <option value="OPENING">Opening Stock (first-ever balance)</option>
+                <option value="DAMAGE">Damage / Write-off</option>
               </select>
             </div>
+            {adjustForm.type === 'DAMAGE' && (
+              <div>
+                <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-1">Damage Reason *</label>
+                <select
+                  required
+                  value={adjustForm.damageReasonCode}
+                  onChange={(event) => setAdjustForm({ ...adjustForm, damageReasonCode: event.target.value })}
+                  className="w-full h-8 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
+                >
+                  <option value="">Select Reason</option>
+                  {DAMAGE_REASON_CODES.map((code) => (
+                    <option key={code} value={code}>{DAMAGE_REASON_LABELS[code]}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-1">Product *</label>
@@ -1166,6 +1198,17 @@ export default function StockSummary() {
         <Modal open={reconcileOpen} onClose={() => setReconcileOpen(false)} title="Stock Reconciliation" size="xl">
           {reconcileOpen && <StockReconciliationReport onClose={() => setReconcileOpen(false)} />}
         </Modal>
+
+        {/* ── Bulk Stock Adjust (CSV import) — INVENTORY-10 §10c ──── */}
+        {bulkImportOpen && (
+          <BulkStockAdjustModal
+            open={bulkImportOpen}
+            onClose={() => setBulkImportOpen(false)}
+            products={productsForStock}
+            warehouses={warehousesForStock}
+            onApplied={() => refetch()}
+          />
+        )}
       </div>
     </StockPageBoundary>
   );

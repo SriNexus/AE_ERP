@@ -16,6 +16,7 @@ import {
   type StockForm,
 } from '../../../features/inventory/hooks/useInventory';
 import { useWarehouses } from '../../../features/warehouses/hooks/useWarehouses';
+import { DAMAGE_REASON_CODES, DAMAGE_REASON_LABELS } from '../../../features/inventory/services/stockOperationsWorkflow';
 import { COLLECTIONS } from '../../../lib/firebase';
 import { fmtDate, getAll } from '../../../lib/firestore';
 import { getInventoryMovements, summarizeMovements, type InventoryMovement } from '../../../lib/inventoryMovements';
@@ -431,6 +432,7 @@ export function MobileStockWorkspace({ mode }: { mode: Mode }) {
   function submitAdjustment(event: React.FormEvent) {
     event.preventDefault();
     if (!form.productId || !form.warehouseId || !form.qty) return toast.error('Product, warehouse and quantity are required');
+    if (form.type === 'DAMAGE' && !form.damageReasonCode) return toast.error('A damage reason is required');
     saveStockEntry.mutate(form);
   }
 
@@ -726,7 +728,18 @@ function StockDialogs({ stockInOpen, formOpen, stockInForm, form, productOptions
       <Modal open={formOpen} onClose={onCloseForm} title="Stock Adjustment" size="full">
         <form onSubmit={onAdjustmentSubmit} className="space-y-4">
           <Section title="Adjustment">
-            <Select label="Transaction Type" value={form.type} onChange={(event) => onFormChange({ type: event.target.value as StockForm['type'] })} options={[{ label: 'IN (Stock In)', value: 'IN' }, { label: 'OUT (Stock Out)', value: 'OUT' }]} />
+            <Select label="Transaction Type" value={form.type} onChange={(event) => onFormChange({ type: event.target.value as StockForm['type'], damageReasonCode: '' })} options={[
+              { label: 'IN (Stock In)', value: 'IN' },
+              { label: 'OUT (Stock Out)', value: 'OUT' },
+              { label: 'Opening Stock (first-ever balance)', value: 'OPENING' },
+              { label: 'Damage / Write-off', value: 'DAMAGE' },
+            ]} />
+            {form.type === 'DAMAGE' && (
+              <Select label="Damage Reason" required value={form.damageReasonCode} onChange={(event) => onFormChange({ damageReasonCode: event.target.value })} options={[
+                { label: 'Select reason...', value: '' },
+                ...DAMAGE_REASON_CODES.map((code) => ({ label: DAMAGE_REASON_LABELS[code], value: code })),
+              ]} />
+            )}
             <Select label="Product" required value={form.productId} onChange={(event) => {
               const selected = productOptions.find((option) => option.value === event.target.value);
               onFormChange({ productId: event.target.value, product: selected?.label || '' });

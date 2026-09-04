@@ -278,7 +278,12 @@ export function exportProductsCSV(products: any[]) {
 
 export const STOCK_FORM_DEFAULT = {
   productId: '', product: '', warehouseId: '', warehouse: '',
-  type: 'IN', qty: '', unit: 'PCS', reference: '', notes: '',
+  // INVENTORY-10 (§10a/§10b): 'OPENING' -> applyOpeningStock, 'DAMAGE' ->
+  // applyDamageWriteOff. 'IN'/'OUT' keep the pre-existing ADJUSTMENT_IN/OUT path.
+  type: 'IN' as 'IN' | 'OUT' | 'OPENING' | 'DAMAGE',
+  qty: '', unit: 'PCS', reference: '', notes: '',
+  // §10b — required only when type === 'DAMAGE'; one of DAMAGE_REASON_CODES.
+  damageReasonCode: '',
   date: new Date().toISOString().split('T')[0],
 };
 export type StockForm = typeof STOCK_FORM_DEFAULT;
@@ -333,6 +338,38 @@ export function useSaveStockEntry(onSuccess: () => void) {
       if (!data.productId) throw new Error('Product is required');
       if (!data.warehouseId) throw new Error('Warehouse is required');
       if (!Number.isFinite(qty) || qty <= 0) throw new Error('Quantity must be greater than zero');
+
+      // INVENTORY-10 (§10a/§10b): a dedicated Opening Stock / Damage entry
+      // routes through the new workflow-layer guards (double-entry block /
+      // reason taxonomy + approval threshold) instead of the plain
+      // ADJUSTMENT_IN/OUT path below.
+      if (data.type === 'OPENING') {
+        const { applyOpeningStock } = await import('../services/stockOperationsWorkflow');
+        const result = await applyOpeningStock({
+          productId: data.productId, warehouseId: data.warehouseId, qty, unit: data.unit, notes: data.notes,
+        });
+        await notifyRoleUsers(
+          ['Warehouse', 'Operations'], NotificationType.INVENTORY_UPDATED, 'Inventory updated',
+          `Opening stock entry ${result.ledgerId} was recorded for ${data.product || data.productId}.`,
+          'stock', result.ledgerId, activeCompanyId,
+        );
+        return;
+      }
+      if (data.type === 'DAMAGE') {
+        if (!data.damageReasonCode) throw new Error('A damage reason is required');
+        const { applyDamageWriteOff } = await import('../services/stockOperationsWorkflow');
+        const result = await applyDamageWriteOff({
+          productId: data.productId, warehouseId: data.warehouseId, qty, unit: data.unit,
+          reasonCode: data.damageReasonCode as import('../services/stockOperationsWorkflow').DamageReasonCode,
+          notes: data.notes,
+        });
+        await notifyRoleUsers(
+          ['Warehouse', 'Operations'], NotificationType.INVENTORY_UPDATED, 'Inventory updated',
+          `Damage write-off ${result.ledgerId} was recorded for ${data.product || data.productId}.`,
+          'stock', result.ledgerId, activeCompanyId,
+        );
+        return;
+      }
 
       // INVENTORY-05d: manual Add / Adjust Stock now goes through the shared
       // movement engine — the single stock writer (P1-4). Manual entries have
