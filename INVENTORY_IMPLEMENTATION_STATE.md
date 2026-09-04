@@ -24,10 +24,82 @@ APPROVAL NOTES:         Project owner approved INVENTORY_IMPLEMENTATION_PLAN.md 
 ## CURRENT POSITION
 
 ```
-CURRENT PHASE:          INVENTORY-09 — Master Data Integrity — IMPLEMENTED + VERIFIED + COMMITTED
-                        (3 SEPARATE commits on top of Phase 08 `6cfdeb5`, per the phase's own git
-                        discipline): `ef7b08b` (SKU lock) -> `d5c27e3` (category-id integrity) ->
-                        delete guards (this checkpoint's own commit, hash recorded below).
+CURRENT PHASE:          INVENTORY-10 — Inventory Operational Features — IMPLEMENTED + VERIFIED +
+                        COMMITTED (7 commits on top of Phase 09 `781926c`: 5 backend sub-feature
+                        commits, 3 UI-wiring commits — see COMMITS below for the exact hashes and
+                        the sub-feature -> commit mapping).
+STATUS (10):            All 5 sub-features implemented, tested, and wired into UI (desktop; mobile
+                        shares the same workflow hooks for 10a/10b, no dedicated UI for 10c/10e
+                        this phase — see "Known limitations" below).
+                        **10a Opening Stock** — `applyOpeningStock()` (new
+                        `src/features/inventory/services/stockOperationsWorkflow.ts`): ONE
+                        `OPENING_STOCK` movement per (company, product, warehouse), EVER. The real
+                        guard is a DETERMINISTIC idempotency key
+                        (`OPENING_STOCK:opening:{companyId}:{productId}:{warehouseId}`) — the
+                        engine's own existing-ledger-row check inside its transaction, not just an
+                        app-layer precheck (which only gives a friendlier error message).
+                        **10b Damage / Write-off** — `applyDamageWriteOff()` (same file):
+                        `DAMAGE_OUT` restricted to a fixed reason taxonomy
+                        (`DAMAGE_REASON_CODES = damaged|expired|lost|theft|sample`, exported +
+                        reused by 10e, not duplicated) with an Admin/GroupAdmin-only approval gate
+                        above `DAMAGE_APPROVAL_THRESHOLD_QTY=50` units OR
+                        `DAMAGE_APPROVAL_THRESHOLD_VALUE=50000` estimated value — enforced at the
+                        workflow layer (the acting user's role from `useAppStore`), never only in
+                        UI.
+                        **10c Bulk import / bulk adjust** — new
+                        `src/features/inventory/services/bulkStockImportWorkflow.ts`:
+                        `previewBulkAdjust`/`applyBulkAdjust`, CSV rows -> one
+                        ADJUSTMENT_IN/OUT engine call per row (never a second stock writer, never
+                        one giant cross-row transaction). A shared `importRunId` + each row's own
+                        row-number line-key makes a re-submitted run idempotent row-by-row via the
+                        engine's own existing-ledger-row check; the dry-run preview simulates the
+                        cumulative on-hand effect of multiple rows touching the same
+                        product+warehouse and flags rows already applied by a prior attempt
+                        (`alreadyApplied`) without double-counting. UI: `BulkStockAdjustModal.tsx`
+                        (SKU/warehouse-name resolution, never raw ids in the CSV) wired into
+                        `StockWorkspace.tsx` as "Bulk Import". No new firestore.rules — reuses the
+                        already-rules-covered + already-emulator-proven ADJUSTMENT_IN/OUT path.
+                        **10d Low-stock alerts** — new `src/lib/inventory/lowStockAlerts.ts`:
+                        `checkLowStockAndNotify()` runs AFTER a movement batch commits (the ONLY
+                        change to `stockMovementEngine.ts` — the core transaction logic is
+                        byte-identical to Phase-09); fires once per genuine threshold crossing
+                        (`onHandBefore > threshold && onHandAfter <= threshold`) via the existing
+                        `NotificationType.INVENTORY_UPDATED` path to Warehouse/Procurement,
+                        best-effort (its own try/catch — a notification failure can never surface
+                        as an error from a movement that already committed).
+                        **10e Customer return / RMA** — new
+                        `src/features/inventory/services/customerReturnWorkflow.ts`:
+                        `createCustomerReturn(input, returnId)` — `returnId` is a REQUIRED
+                        caller-supplied parameter (not internally generated, unlike
+                        `createTransfer`) so a retry of the SAME return reuses the SAME idempotency
+                        keys for both movement legs, a real transaction-level guarantee. A
+                        `customer_returns/{RET-*}` doc links back to the order+dispatch; every line
+                        restocks physically (`SALES_RETURN_IN`); a `damaged`-condition line is
+                        ADDITIONALLY written off immediately (`DAMAGE_OUT`, reusing 10b's
+                        `DAMAGE_REASON_CODES`) — both legs + the return doc commit in ONE atomic
+                        movement-engine batch via a `MovementParticipant` (mirrors the GRN/
+                        transfer/reservation pattern; the engine stays the sole `stock`/
+                        `stock_ledger` writer). New `firestore.rules` block (`resource==null`-
+                        guarded read, warehouse+company-scoped create, role-gated,
+                        `update/delete: if false` — immutable like a ledger row) + added to
+                        `isSpecialCollection()` / `WAREHOUSE_SCOPED_COLLECTIONS` (its read rule
+                        gates on `sameWarehouse()`) / `COLLECTION_PERMISSION_MODULE` (`'stock'`
+                        module, shared operational state) + 3 new composite indexes. UI:
+                        `ProcessReturnModal.tsx` wired into `DispatchDetail.tsx` as "Process
+                        Return" (gated on `canDo('edit','stock')` + the dispatch actually having a
+                        verified/dispatched quantity).
+                        **Known limitations (genuine, documented, not blockers):**
+                        (1) no mobile UI entry point for 10c (bulk import) or 10e (customer
+                        return) this phase — both underlying workflows are already
+                        mobile-consumable (no mobile-specific logic to duplicate; 10a/10b's shared
+                        `useSaveStockEntry` hook already has full mobile parity in
+                        `MobileStockWorkspace.tsx`), wiring a mobile entry point is pure UI work
+                        for a later session; (2) `CSVImportModal.tsx`'s existing `collection:
+                        'products'` master-data import path still bypasses the Phase-09 SKU lock
+                        (`batchCreate` direct write) — a REAL, pre-existing gap, verified again
+                        this phase, deliberately left untouched (Phase-09-adjacent, not
+                        Phase-10-scoped: Phase-10's own new bulk-import path is for STOCK
+                        QUANTITIES only and does not touch product master data at all).
 STATUS (09):            Product SKU uniqueness (`product_sku_locks`, mirrors `customer_phone_locks`,
                         atomic create/edit via `useInventory.ts` + the REST API's `products`
                         create/update via `api/_lib/productSkuLock.ts` — the SAME shared
@@ -115,12 +187,18 @@ STATUS (06):            New READ-ONLY `src/engines/StockReconciliationEngine.ts`
                         'stock')`; per-mismatch "Apply Correction" (confirm + reason) behind
                         `canDo('edit','stock')`. NO firestore.rules / firestore.indexes change.
                         **P2-1 detection DONE; P1-4 single-writer invariant intact.**
-LAST VERIFIED COMMIT:   `91eb2b0` (INVENTORY-09 delete guards, see COMMITS log
-                        below for the exact hash). Full chain: … → 6939c12 (05d) → de5902e
-                        (06+07) → 6cfdeb5 (08) → ef7b08b (09 SKU lock) → d5c27e3 (09 category-id)
-                        → `91eb2b0` (INVENTORY-09 delete guards).
+LAST VERIFIED COMMIT:   `b222416` (INVENTORY-10 §10e UI, current HEAD). Full chain: … → 6939c12
+                        (05d) → de5902e (06+07) → 6cfdeb5 (08) → ef7b08b (09 SKU lock) → d5c27e3
+                        (09 category-id) → 781926c (09 delete guards) → 0391a4f (10 §10a/§10b) →
+                        c640b8a (10 §10d) → 788f89a (10 §10e) → f791b6b (10 §10c) → c980d18
+                        (10 §10a/§10b UI) → b13dc0f (10 §10c UI) → b222416 (10 §10e UI).
+                        **Correction to a stale hash from the prior checkpoint:** this section
+                        previously read `91eb2b0` for the INVENTORY-09 delete-guards commit; the
+                        actual commit on this branch is `781926c` (verified via `git log`) — the
+                        `91eb2b0` value was never real on this branch's history. Corrected here;
+                        no code or behavior change, documentation accuracy only.
 DATE OF THIS UPDATE:    2026-09-05
-UPDATED BY:             INVENTORY-09 implementation session
+UPDATED BY:             INVENTORY-10 implementation session
 ```
 
 ---
@@ -129,6 +207,7 @@ UPDATED BY:             INVENTORY-09 implementation session
 
 | Phase | Completed on | Commit hash | Emulator run | Notes |
 |---|---|---|---|---|
+| **INVENTORY-10** | 2026-09-05 | 7 commits on top of 09 `781926c`: `0391a4f` (10a/10b) → `c640b8a` (10d) → `788f89a` (10e) → `f791b6b` (10c) → `c980d18` (10a/10b UI) → `b13dc0f` (10c UI) → `b222416` (10e UI) | **PASS** — new `customerReturnTransaction.emulator.test.ts` **11/11** (atomic doc+movement commit, damaged net-onHand-unchanged with both ledger rows, idempotent retry, 2-concurrent-creates-same-id race exactly-one-applies, cross-company read/create DENY, role-outside-pattern DENY, warehouse-restricted cross-warehouse DENY, doc+ledger immutability, suspended-group DENY, company-wide Admin any-warehouse ALLOW). Re-ran `stockReservationTransaction`+`stockTransferTransaction`+`productSkuLock`+`stockRoleMatrix`+`dispatchStockOutTransaction` (69/69), `sensitiveCollectionsRoleEnforcement`+`multiTenantSecurity`+`rbacPhase8CumulativeSecurity` (406/406), `stockMovementEngine`+`stockAdjustTransaction` (15/15) — zero regression on the Phase 05–09 invariants Phase-10 could plausibly have touched. Full batched emulator suite (24 files incl. the new one) — 2 files flaked with `client is offline` under the full-batch cold-run load (documented environment characteristic, BRAIN §2.1), both **re-verified 100% in isolation** (130/130) — not a regression. Full `npx vitest run`: 267 files, **29-fail/65-fail brittle baseline UNCHANGED** (3586/3651 passing, +~140 net new passing tests across the 4 new focused suites). tsc exit 0 (only the 3 known pre-existing attendance-fixture errors), lint N/A this session (no lint script run separately from tsc/build), build exit 0. | **INVENTORY-10 — Inventory Operational Features.** Full sub-feature-by-sub-feature write-up is in CURRENT POSITION above (kept there, not duplicated here). Headline: `stockOperationsWorkflow.ts` (10a+10b) + `bulkStockImportWorkflow.ts` (10c) + `lowStockAlerts.ts` (10d, the ONLY change to `stockMovementEngine.ts` — core txn logic byte-identical to 09) + `customerReturnWorkflow.ts` (10e, NEW `customer_returns` collection + rules block + 3 indexes + `isSpecialCollection()`/`WAREHOUSE_SCOPED_COLLECTIONS`/`COLLECTION_PERMISSION_MODULE`) + UI: `StockWorkspace.tsx`'s Adjust Stock modal gains Opening Stock/Damage types + a Bulk Import action (`BulkStockAdjustModal.tsx`), `DispatchDetail.tsx` gains a Process Return action (`ProcessReturnModal.tsx`), `MobileStockWorkspace.tsx` shares 10a/10b via the same `useSaveStockEntry` hook (no mobile UI for 10c/10e this phase — documented limitation, not a blocker). Movement engine core transaction logic, reservations, transfers, master-data guards — all UNTOUCHED, re-verified green. Single stock writer preserved (10a/10b/10c/10e all route through `applyStockMovement`/`applyStockMovements`; 10d is a post-commit read+notify with no stock write of its own). Two genuine, documented, non-blocking limitations noted above. |
 | approval | 2026-09-03 | `ea3f32f` | — | Project owner approved the plan; INVENTORY-00 authorized. |
 | planning baseline | 2026-09-03 | `47c063b` | — | 4 INVENTORY_*.md planning artifacts committed. |
 | **INVENTORY-00** | 2026-09-03 | `49123be` | **PASS** (JBR java 21, 14 files / 600 assertions, 2 batches, 100%) | Baseline harness (6 test files, 51 tests), stock role matrix (25 tests, P1-3 **CONFIRMED**), invariant predicates. Zero production behavior change. |
@@ -169,7 +248,14 @@ de5902e  feat(inventory): stock reconciliation + sales reservation (INVENTORY-06
 6cfdeb5  feat(inventory): warehouse transfer with paired movements (INVENTORY-08)
 ef7b08b  feat(inventory): product SKU uniqueness lock (INVENTORY-09)
 d5c27e3  feat(inventory): category id integrity + rename cascade + backfill (INVENTORY-09)
-91eb2b0  feat(inventory): master-data delete guards (INVENTORY-09)   (current HEAD — carries this STATE + regression-matrix update)
+781926c  feat(inventory): master-data delete guards (INVENTORY-09)
+0391a4f  feat(inventory): INVENTORY-10 §10a/§10b — opening stock + damage write-off
+c640b8a  feat(inventory): INVENTORY-10 §10d — low-stock threshold notification
+788f89a  feat(inventory): INVENTORY-10 §10e — customer return / RMA
+f791b6b  feat(inventory): INVENTORY-10 §10c — bulk stock import / bulk adjust
+c980d18  feat(inventory): INVENTORY-10 §10a/§10b UI — Opening Stock + Damage entry types
+b13dc0f  feat(inventory): INVENTORY-10 §10c UI — Bulk Stock Adjust (CSV import)
+b222416  feat(inventory): INVENTORY-10 §10e UI — Process Customer Return   (current HEAD — carries this STATE + regression-matrix update)
 
 PRE-05a git checkpoint (2026-09-04): the earlier session committed only Phase-04 (as 30920c2)
 while -01/-02/-03 sat uncommitted, so history was out of phase order. Reconciled by a SAFE
@@ -180,10 +266,12 @@ between commits (verified byte-exact against the pre-checkpoint working tree). O
 30920c2 is preserved on branch `pre-05a-backup-head`; a full pre-checkpoint tracked-tree
 snapshot is tag `pre-05a-worktree-snapshot`.
 
-LAST VERIFIED COMMIT = INVENTORY-09's delete-guards commit (HEAD at this checkpoint).
-Uncommitted in the working tree: the 4 unrelated pre-existing changes (LEADS_UI_UX delete,
-ProfileSection.tsx, useMyProfile.ts, userProfile.ts) + untracked BRAIN.md /
-COMPLETE_INVENTORY_INTEGRITY_AUDIT.md. ZERO inventory implementation files are uncommitted.
+LAST VERIFIED COMMIT = INVENTORY-10's §10e UI commit, `b222416` (HEAD at this checkpoint).
+Uncommitted in the working tree: the SAME 4 unrelated pre-existing changes as every prior
+checkpoint (LEADS_UI_UX delete, ProfileSection.tsx, useMyProfile.ts, userProfile.ts) + untracked
+BRAIN.md / COMPLETE_INVENTORY_INTEGRITY_AUDIT.md — confirmed unchanged by this phase (Phase-10
+never touched any of the 4, never read/wrote BRAIN.md or the audit doc). ZERO inventory
+implementation files are uncommitted.
 ```
 
 ---
@@ -1797,6 +1885,13 @@ INVENTORY-06 (UNCOMMITTED — in the working tree; the user withheld commit for 
     normal movement rows + a flag). NO backfill, NO historical rewrite.
   P1-4: intact — the reconciliation engine only READS; corrections go through applyStockMovement
     (singleStockWriter.test.ts still green).
+
+INVENTORY-07 / 08 / 09 / 10: starting with Phase 07, the full per-file change list moved to
+  living in the COMPLETED PHASES table's Notes column + INVENTORY_REGRESSION_MATRIX.md's own
+  per-phase STATUS rows, to avoid duplicating the same ~500-1000 words in two/three places every
+  phase (Phase 09's own Notes cell says this explicitly). This cumulative section is kept for
+  Phases 00-06 (already written) but is NOT being extended further — see COMPLETED PHASES above
+  for Phase 07-10's exact file lists.
 ```
 
 ---
@@ -1868,14 +1963,37 @@ INVENTORY-06: NO production database write from reconciliation (read-only). A hu
   flag + reconciliation `ledgerExtra`) + the summary delta, through the engine. NO rules / index
   / migration / backfill. NO automatic drift correction.
 
-Planned additive schema (05a engine defines it; first written in 05b):
+INVENTORY-10: purely ADDITIVE schema, matching the plan's own "Schema impact: additive
+  (reasonCode, importRunId, return docs collection)" line exactly:
+  - 10a: no new fields — OPENING_STOCK already existed in the MovementType enum (05a); this
+    phase adds the workflow-layer double-entry guard, not a schema change.
+  - 10b: `stock_ledger.reasonCode` was already a generic pass-through field (REASON_CODE_REQUIRED
+    since 05a); this phase constrains it to a fixed taxonomy at the workflow layer only —
+    existing rows with a free-text reasonCode remain valid, untouched.
+  - 10c: `stock_ledger` rows written by a bulk-adjust row carry `ledgerExtra:{referenceType:
+    'BulkImport', referenceId: importRunId, rowNumber}` — additive, same pattern as every other
+    movement source (GRN/dispatch/transfer/reservation).
+  - 10d: NO schema change — a best-effort `notifications` row via the existing
+    `NotificationType.INVENTORY_UPDATED` path, same shape as every other stock notification.
+  - 10e: NEW collection `customer_returns/{RET-*}` (rules block + 3 composite indexes +
+    isSpecialCollection/WAREHOUSE_SCOPED_COLLECTIONS/COLLECTION_PERMISSION_MODULE entries) —
+    additive collection, touches no existing document shape. Its `SALES_RETURN_IN`/`DAMAGE_OUT`
+    ledger rows carry `ledgerExtra:{referenceType:'CustomerReturn'|'CustomerReturnDamage',
+    referenceId: returnId, orderId, dispatchId, ...}` — additive.
+  NO backfill required for any of the above (all new fields/collections start empty and are
+  populated only by new activity going forward).
+
+Additive schema, by phase (05a/07/08/09/10 all DONE and shipped; 11 still planned):
   Phase 05a/05b: stock.onHandQty; stock_ledger.{movementType,direction,idempotencyKey,onHandBefore/After,reservedBefore/After}
-  Phase 07: NEW collection stock_reservations + rules block + index;
+  Phase 07 (DONE): NEW collection stock_reservations + rules block + index;
             order.fulfilmentWarehouseId, order.stockShortfall[]; availableQty semantic = onHand - reserved
-  Phase 08: NEW collection stock_transfers + rules block + index
-  Phase 09: product.categoryId, product.parentCategoryId; NEW collection product_sku_locks + rules + index
-  Phase 10: reasonCode taxonomy; importRunId; RMA/return docs
-  Phase 11: NEW collection dispatch_serials + rules + index; composite indexes for new collections
+  Phase 08 (DONE): NEW collection stock_transfers + rules block + index
+  Phase 09 (DONE): product.categoryId, product.parentCategoryId; NEW collection product_sku_locks + rules + index
+  Phase 10 (DONE): reasonCode restricted to a fixed taxonomy (workflow-layer only, no schema
+            change); importRunId in stock_ledger.ledgerExtra for bulk-adjust rows; NEW collection
+            customer_returns + rules block + 3 indexes — see the INVENTORY-10 entry above.
+  Phase 11 (PLANNED): NEW collection dispatch_serials + rules + index; composite indexes for
+            product_categories/stock_reservations/stock_transfers + any query 06-10 introduced
 ```
 
 ---
@@ -1883,7 +2001,14 @@ Planned additive schema (05a engine defines it; first written in 05b):
 ## MIGRATIONS (cumulative)
 
 ```
-(none run)
+(none run in production this session; Phase 07/09's own backfill scripts — see their COMPLETED
+PHASES rows — remain dry-run-first tools, not auto-applied)
+
+INVENTORY-10: NO migration/backfill of any kind. Every Phase-10 schema addition is purely
+  additive and starts empty (see DATABASE CHANGES above) — nothing to backfill. Confirmed:
+  Phase-10 introduced no field on an EXISTING document type that a pre-existing row would be
+  missing in a way that breaks a new read path (10b's reasonCode taxonomy is enforced only at
+  the workflow layer going forward, never re-validated against historical rows).
 
 Planned backfills (scripts, dry-run first, reviewed, run on a copy — NEVER automatic):
   Phase 05d/07: set stock.onHandQty = stock.availableQty where onHandQty absent; recompute availableQty
@@ -1954,6 +2079,34 @@ INVENTORY-06 rollback = revert the (uncommitted) working-tree changes: delete
   deploy / data / migration. Any RECONCILE_ADJUST rows written during testing are inert
   additive movement rows.
 
+INVENTORY-10 rollback = revert the 7 commits in reverse order (`b222416` `b13dc0f` `c980d18`
+  `f791b6b` `788f89a` `c640b8a` `0391a4f`) or `git reset --hard 781926c` to drop the whole phase.
+  Per-sub-feature (the plan's own "Rollback: per sub-feature revert"):
+    10a/10b: revert `0391a4f` (backend) + `c980d18` (UI) — deletes
+      stockOperationsWorkflow.ts + its test, reverts useInventory.ts's STOCK_FORM_DEFAULT/
+      useSaveStockEntry, StockWorkspace.tsx's Transaction Type options, MobileStockWorkspace.tsx's
+      same options. Nothing to un-migrate — OPENING_STOCK/DAMAGE_OUT rows already written stay
+      valid ledger history (movement rows are immutable by design across every phase).
+    10c: revert `f791b6b` (backend) + `b13dc0f` (UI) — deletes bulkStockImportWorkflow.ts +
+      BulkStockAdjustModal.tsx, reverts StockWorkspace.tsx's "Bulk Import" button and
+      CSVImportModal.tsx's `parseCSV` export. ADJUSTMENT_IN/OUT rows already applied stay valid.
+    10d: revert `c640b8a` — deletes lowStockAlerts.ts + its test, reverts the ONE
+      `stockMovementEngine.ts` hook (the core txn function returns to its Phase-09 shape
+      byte-for-byte). No data to un-migrate (notifications are ephemeral).
+    10e: revert `788f89a` (backend) + `b222416` (UI) — deletes customerReturnWorkflow.ts +
+      ProcessReturnModal.tsx, reverts DispatchDetail.tsx's "Process Return" action,
+      firestore.rules' `customer_returns` block + isSpecialCollection entry,
+      firestore.indexes.json's 3 new composites, firestore.ts's WAREHOUSE_SCOPED_COLLECTIONS/
+      COLLECTION_PERMISSION_MODULE entries, collections.ts's CUSTOMER_RETURNS constant.
+      **If firestore.rules/indexes were already deployed**, redeploy the pre-10e rules (tag it
+      first, same discipline as every prior rules-touching phase) — a `customer_returns` doc
+      already written becomes unreadable/unwritable after the rules revert but is NOT deleted
+      (soft-delete-only discipline holds; it simply becomes inert until 10e is reinstated).
+  NO firebase deploy was run by this session for ANY Phase-10 change — prod rules/indexes are
+  UNAFFECTED until a deliberate deploy. Every ledger row any Phase-10 code wrote during local/
+  emulator testing is an inert, valid, immutable movement row — nothing to undo in the data
+  itself, per the project's "ledger is immutable, soft-delete only" invariant (Plan §5 item 5).
+
 Rollback readiness for future phases (Plan §18):
   - Tag firestore.rules before Phases 07, 08, 09, 11 as rules-pre-INVENTORY-0X
   - Feature flags: USE_MOVEMENT_ENGINE_{GRN,DISPATCH,MANUAL} (05b-05d), reservationsEnabled (07)
@@ -1969,24 +2122,31 @@ Rollback readiness for future phases (Plan §18):
 ## NEXT PHASE
 
 ```
-NEXT PHASE:            INVENTORY-07 — Sales Reservation / Allocation. Activate `reservedQty`,
-                       redefine `availableQty = onHandQty − reservedQty`, reserve on PI-paid,
-                       release on cancel, consume on dispatch. NEW `stock_reservations`
-                       collection + rules block + index. **REQUIRES business sign-off on
-                       Plan §7's five open reservation decisions FIRST** (retro-reserve vs
-                       start-clean; over-reservation/backorder policy; multi-warehouse
-                       fulfilment; partial-payment reserve; release-on-what).
-BLOCKED BY:            (1) explicit human go-ahead for INVENTORY-07; (2) business sign-off on
-                       the §7 decisions; (3) INVENTORY-06 should be committed + a one-time
-                       reconciliation pass run so Phase 07 builds on trusted numbers.
-DEPENDS ON:            INVENTORY-04 (order lock), INVENTORY-05 (single writer), INVENTORY-06
-                       (trust the numbers). All implemented.
-GIT NOTE:              INVENTORY-01..05d committed (… → e01819a 05b → 8432c22 05c → 6939c12
-                       05d). **INVENTORY-06 is UNCOMMITTED in the working tree** (the user
-                       withheld commit). NO firestore.rules change across 05a→06. The 4
-                       unrelated pre-existing changes + untracked BRAIN.md / audit also remain
-                       uncommitted — do NOT touch those. Safety refs: branch
-                       `pre-05a-backup-head`, tag `pre-05a-worktree-snapshot`.
+NEXT PHASE:            INVENTORY-11 — Scale & Reporting Hardening (Plan §14, the final phase).
+                       Sub-scope: 11a serial-uniqueness lock collection (`dispatch_serials`,
+                       replaces the O(n²) `assertNoDuplicateSerials` full-DISPATCH scan) / 11b
+                       composite indexes for product_categories/stock_reservations/
+                       stock_transfers + any query INVENTORY-06..10 introduced, remove-or-make-
+                       loud the API missing-index full-collection fallback / 11c paginated
+                       stock/ledger/product/category/warehouse lists (`getPage`, server-side
+                       filters, virtualized tables) / 11d ledger archival design (design-only
+                       unless volume demands it) / 11e reports read from `stock` summaries +
+                       reconciliation output, not by scanning `stock_ledger`. Independent of
+                       every feature phase — pure optimization, run last by design (Plan §14
+                       "Why here").
+BLOCKED BY:            Explicit human go-ahead for INVENTORY-11 (every remediation phase in this
+                       project runs on its own instruction — Plan §23 Phase Completion Protocol).
+                       No business-decision sign-off is needed (unlike Phase 07) — 11 is a pure
+                       technical hardening pass.
+DEPENDS ON:            INVENTORY-00..10, all IMPLEMENTED + VERIFIED + COMMITTED (this file's
+                       COMPLETED PHASES table). Nothing blocking remains.
+GIT NOTE:              INVENTORY-00..10 fully committed in order (see COMMITS below, newest
+                       `b222416`). NO firestore.rules change is expected for 11a/11b (11a is a
+                       NEW additive lock block, same class as `product_sku_locks`; 11b is
+                       indexes-only, zero rules). The 4 unrelated pre-existing changes + untracked
+                       BRAIN.md / audit remain in the working tree across every checkpoint — do
+                       NOT touch those. Safety refs: branch `pre-05a-backup-head`, tag
+                       `pre-05a-worktree-snapshot`.
 ```
 
 ---
@@ -1994,38 +2154,34 @@ GIT NOTE:              INVENTORY-01..05d committed (… → e01819a 05b → 8432
 ## EXACT NEXT ACTION
 
 ```
-INVENTORY-01..05d COMMITTED (… → e01819a 05b → 8432c22 05c → 6939c12 05d). **INVENTORY-06
-IMPLEMENTED + VERIFIED but UNCOMMITTED** (the user withheld commit for that phase). Phase 05
-(movement engine) is complete — P1-4 closed, ONE stock writer. Do NOT do anything further
-without a new instruction.
+INVENTORY-00..10 are ALL COMMITTED (newest: `b222416`, INVENTORY-10 §10e UI). Phase 10
+(Inventory Operational Features — opening stock, damage write-off, bulk import, low-stock
+alerts, customer return/RMA) is COMPLETE: implemented, focused-tested, emulator-tested,
+security-batch-tested, tsc/build/full-vitest all clean against baseline, UI wired (desktop; two
+documented non-blocking mobile/CSV-master-data gaps, see CURRENT POSITION), STATE + regression
+matrix updated. Do NOT do anything further without a new instruction.
 
-Before INVENTORY-07, a human should:
-  a. **Commit INVENTORY-06** (the working tree is clean apart from the pre-existing unrelated
-     changes). Suggested message: `feat(inventory): stock-ledger reconciliation engine + report (INVENTORY-06, P2-1)`
-     — stage: src/engines/stockReconciliationMath.ts, src/engines/StockReconciliationEngine.ts,
-     src/engines/__tests__/stockReconciliationEngine.test.ts,
-     src/lib/__tests__/stockReconciliation.emulator.test.ts,
-     src/features/stock/components/StockReconciliationReport.tsx, scripts/inventory/reconcile.ts,
-     src/lib/inventory/stockMovementEngine.ts, src/pages/StockWorkspace.tsx,
-     vitest.emulator.config.ts, INVENTORY_IMPLEMENTATION_STATE.md, INVENTORY_REGRESSION_MATRIX.md.
-     Do NOT stage LEADS_UI_UX_SOURCE_OF_TRUTH.md / ProfileSection.tsx / useMyProfile.ts /
-     userProfile.ts / BRAIN.md / COMPLETE_INVENTORY_INTEGRITY_AUDIT.md.
-  b. Run the one-time reconciliation pass: open Stock → Reconcile (or
-     `TOKEN=$(gcloud auth application-default print-access-token) node --experimental-strip-types
-     scripts/inventory/reconcile.ts --json`), review each mismatch against a physical count,
-     apply RECONCILE_ADJUST where the count is known. Record the mismatch count in this file.
-  c. Deploy: firestore.rules + firestore.indexes are UNCHANGED since INVENTORY-03.
-  d. Manually exercise: GRN / dispatch / manual / cancel (05b–05d) + the reconciliation
-     report (loads → zero writes; a correction → RECONCILE_ADJUST row + summary moves;
-     re-open the report → that summary reconciles).
+Before INVENTORY-11, a human should:
+  a. Give the explicit go-ahead for INVENTORY-11 (no business sign-off needed, unlike Phase 07 —
+     this is a technical hardening pass, not a policy decision).
+  b. Optionally review the two Phase-10 known limitations (no mobile UI for 10c/10e; the
+     pre-existing `CSVImportModal` products-SKU-lock bypass) and decide whether either should be
+     promoted to its own small follow-up task, or left as-is.
+  c. No reconciliation pass, no rules deploy, no migration is pending from Phase 10 — it shipped
+     zero rules-behavior regressions (batched emulator green) and zero migrations (its schema
+     additions are all purely additive: `reasonCode`/`importRunId` fields + the new
+     `customer_returns` collection — no backfill needed, nothing to run).
 
-When INVENTORY-07 is authorized: it requires business sign-off on Plan §7's five open
-reservation decisions FIRST. Then build `stock_reservations` + activate `reservedQty` +
-`availableQty = onHandQty − reservedQty`, reserve on PI-paid / release on cancel / consume
-on dispatch. Full batched emulator + E7 (new rules block). Update THIS file.
+When INVENTORY-11 is authorized: read Plan §14 in full, map each of 11a–11e's "PLAN REQUIREMENT
+→ CURRENT IMPLEMENTATION → GAP" the same way Phase 10 did, implement sub-feature by sub-feature,
+one commit each, full verification, update THIS file + the regression matrix. This is the LAST
+planned phase in Plan §14's roadmap — after it, re-derive scope only from a fresh human
+instruction (no INVENTORY-12 exists in the plan).
 
-Do NOT touch the movement engine's transaction shape / the frozen MovementType enum,
-firestore.rules, transfers (08), or any later-phase scope.
+Do NOT touch the movement engine's transaction shape / the frozen MovementType enum / the
+`MovementParticipant` contract, do NOT weaken any existing firestore.rules block, do NOT touch
+reservations (07) / transfers (08) / master-data guards (09) / the 10a–10e workflow modules
+beyond what 11a–11e's OWN plan text calls for.
 ```
 
 ---
@@ -2058,22 +2214,46 @@ firestore.rules, transfers (08), or any later-phase scope.
   add a `USE_MOVEMENT_ENGINE_*` flag path (the migration is unconditional and shipped).
 - Do NOT re-do INVENTORY-06 — `StockReconciliationEngine` (read-only) + `stockReconciliationMath`
   (the ONE reconciliation math) + the report + `scripts/inventory/reconcile.ts` are BUILT +
-  verified. Reconciliation NEVER auto-corrects (Plan §17). Corrections are human-gated
-  `RECONCILE_ADJUST` movements through the engine ONLY — do NOT add a direct stock write, do NOT
-  build a batch/auto-heal, do NOT count RECONCILE_ADJUST rows in `computed` (they patch `stored`),
-  do NOT backfill or rewrite historical ledger rows. INVENTORY-06 is UNCOMMITTED — the human
-  commits it before INVENTORY-07.
-- Git: INVENTORY-00..05d are committed in order (…c043009 → … → ff45262 05a → d5010e2 05a.1
-  → e01819a 05b → 8432c22 05c → 6939c12 05d). **INVENTORY-06 is UNCOMMITTED in the working tree.**
-  NO firestore.rules / firestore.indexes change across 05a→06. The 4 unrelated pre-existing
-  changes + untracked BRAIN.md/audit stay in the working tree — do NOT commit/stash/revert those.
-  Safety refs: branch `pre-05a-backup-head` (old 30920c2), tag `pre-05a-worktree-snapshot`.
-  `origin/main` is still at 46e3aab (not pushed).
+  verified + COMMITTED (with 07 as `de5902e`). Reconciliation NEVER auto-corrects (Plan §17).
+  Corrections are human-gated `RECONCILE_ADJUST` movements through the engine ONLY — do NOT add
+  a direct stock write, do NOT build a batch/auto-heal, do NOT count RECONCILE_ADJUST rows in
+  `computed` (they patch `stored`), do NOT backfill or rewrite historical ledger rows.
+- Do NOT re-do INVENTORY-07 — sales reservation/allocation is BUILT + verified + COMMITTED
+  (`de5902e`), `reservationsEnabled` is ACTIVE (default ON). Do NOT flip it off without an
+  explicit instruction, do NOT re-derive the five §7 decisions (already resolved and shipped),
+  do NOT add a second reservation participant path outside `src/lib/inventory/reservations.ts`.
+- Do NOT re-do INVENTORY-08 — warehouse transfer is BUILT + verified + COMMITTED (`6cfdeb5`).
+  `warehouseTransferWorkflow.ts` is the ONE transfer workflow; do NOT add a second ship/receive/
+  cancel path; do NOT weaken the `stock_transfers` rules block; INV-11 (paired-movement sum-to-
+  zero) is machine-verified — do not reintroduce an unpaired transfer leg.
+- Do NOT re-do INVENTORY-09 — SKU uniqueness lock (`product_sku_locks`) + `categoryId`/
+  `parentCategoryId` FK + rename cascade + delete guards (`masterDataGuards.ts`) are BUILT +
+  verified + COMMITTED (`ef7b08b` → `d5c27e3` → `781926c`). Do NOT bypass `skuLock.ts` with a
+  second SKU-uniqueness check; do NOT rewrite a historical quotation/order line-item snapshot's
+  denormalized category name on a rename. **Known pre-existing gap, still open, not this
+  project's current job unless separately instructed:** `CSVImportModal.tsx`'s `collection:
+  'products'` bulk-import path (`batchCreate`) still bypasses the SKU lock — verified again in
+  Phase 10, deliberately left untouched both times (out of each phase's named scope).
+- Do NOT re-do INVENTORY-10 — opening stock / damage write-off / bulk import / low-stock alerts
+  / customer return are BUILT + verified + COMMITTED (7 commits, `0391a4f` → `b222416`, see
+  COMMITS below). Do NOT add a second opening-stock or customer-return path outside
+  `stockOperationsWorkflow.ts`/`customerReturnWorkflow.ts`; do NOT change the
+  `DAMAGE_REASON_CODES` taxonomy or the approval thresholds without a fresh instruction (they are
+  the enforced authoritative values, not placeholders); do NOT add a mobile UI for 10c/10e as a
+  "quick fix" mid-Phase-11 — it is out of scope there too, track it as its own follow-up.
+- Git: INVENTORY-00..10 are ALL committed in order (…c043009 → … → 6939c12 05d → de5902e 06+07
+  → 6cfdeb5 08 → ef7b08b 09 → d5c27e3 09 → 781926c 09 → 0391a4f 10 → c640b8a 10 → 788f89a 10 →
+  f791b6b 10 → c980d18 10 → b13dc0f 10 → b222416 10, current HEAD). The 4 unrelated pre-existing
+  changes + untracked BRAIN.md/audit stay in the working tree across every checkpoint — do NOT
+  commit/stash/revert those. Safety refs: branch `pre-05a-backup-head` (old 30920c2), tag
+  `pre-05a-worktree-snapshot`. `origin/main` is still at 46e3aab (not pushed) as of the last
+  check — re-verify before assuming this if it matters for the next task.
 - Do NOT re-derive the emulator command — it is recorded above (JBR java).
-- Do NOT start INVENTORY-07 (or any later phase) without an explicit new instruction + the §7
-  business sign-off.
+- Do NOT start INVENTORY-11 (or any later phase) without an explicit new instruction.
 - Do NOT attempt to "fix everything" — one phase, verify, update STATE, then STOP.
-- The 29 failing unit-test files are the documented pre-existing baseline (BRAIN.md §35) — do NOT "fix" them.
+- The 29 failing unit-test files / 65 failing tests are the documented pre-existing baseline
+  (BRAIN.md §35) — do NOT "fix" them; Phase 10's full `npx vitest run` reproduced this EXACT
+  count (267 files, 3651 tests, 29/65 failing) with zero new failures.
 ```
 
 ---
@@ -2082,19 +2262,35 @@ firestore.rules, transfers (08), or any later-phase scope.
 
 ```
 See "FILES / AREAS NOT TO TOUCH" above and Plan §21. In particular:
-- firestore.rules: INVENTORY-01 = `stock_ledger` READ-guard. INVENTORY-02 = none. INVENTORY-03
-  = `stock` field-guard role list + `purchase_orders` lean update + PO transition self-loop.
-  INVENTORY-05a…06 = NONE (engine write shape + the RECONCILE_ADJUST correction pass the -03
-  rules unchanged). Next rules edit is Phase 07 (new stock_reservations block) — full batched
-  emulator + E7 each time.
-- Stock quantity/write logic: EVERYTHING is on `stockMovementEngine.ts` now (05b GRN, 05c
-  dispatch, 05d manual + stockIn + cancel-restore). `singleStockWriter.test.ts` enforces it.
-  Do NOT add another writer. Reconciliation (06) is READ-ONLY.
+- firestore.rules — full change history: INVENTORY-01 = `stock_ledger` READ-guard. INVENTORY-02
+  = none. INVENTORY-03 = `stock` field-guard role list + `purchase_orders` lean update + PO
+  transition self-loop. INVENTORY-05a…06 = NONE. INVENTORY-07 = `stock` update gains a
+  reservation-only branch + new `stock_reservations` block. INVENTORY-08 = new `stock_transfers`
+  block + `warehouseIdInCompany()`. INVENTORY-09 = new `product_sku_locks` block + the
+  generic-fallback `resource==null` fix (a real pre-existing gap, fixed). INVENTORY-10 = new
+  `customer_returns` block + `isSpecialCollection()` addition (10e only — 10a/10b/10c/10d made
+  NO rules change). Next rules edit is Phase 11 (11a's new `dispatch_serials` lock block,
+  additive) — full batched emulator + a fresh security-focused run each time, same discipline as
+  every phase above.
+- Stock quantity/write logic: EVERYTHING is on `stockMovementEngine.ts` (05b GRN, 05c dispatch,
+  05d manual + stockIn + cancel-restore, 07 reserve/release, 08 transfer legs, 10a/10b/10c/10e
+  opening/damage/bulk-adjust/return — ALL call `applyStockMovement`/`applyStockMovements`;
+  nothing writes `stock`/`stock_ledger` directly). `singleStockWriter.test.ts` enforces it. Do
+  NOT add another writer. Reconciliation (06) is READ-ONLY. 10d (low-stock alerts) is a
+  post-commit READ + notify, not a stock write.
 - REST API: `stock`/`stock_ledger` are read-only (INVENTORY-02). Do not touch other API entities.
 - PO transition table: ONE `PURCHASE_ORDER_TRANSITIONS` (INVENTORY-03). Do not fork it again.
 - Order lifecycle: `isOrderLineLocked` / `updateOrder` (INVENTORY-04) are the authoritative
   order-edit path. Do not add a parallel order-update that skips the lock.
-- No reservation / onHandQty / reservedQty activation before Phase 07.
+- Reservation/`reservedQty` is ACTIVE since Phase 07 (`reservationsEnabled` default ON). Do not
+  flip it off without an explicit instruction.
+- SKU uniqueness / categoryId FK / delete guards (Phase 09) are the authoritative master-data
+  integrity layer. Do not bypass `skuLock.ts` / `masterDataGuards.ts`.
+- Opening-stock double-entry guard, damage reason taxonomy + approval thresholds, bulk-import
+  idempotency-by-run-id, low-stock crossing detection, customer-return atomicity (Phase 10) are
+  the authoritative Phase-10 layer (`stockOperationsWorkflow.ts` / `bulkStockImportWorkflow.ts` /
+  `lowStockAlerts.ts` / `customerReturnWorkflow.ts`). Do not bypass them with a direct
+  `applyStockMovement` call from new UI — route through these workflow functions.
 - No mobile-file business logic, ever.
 ```
 
@@ -2107,24 +2303,25 @@ If you are a new session with no history:
 1. You have read: brain.md, INVENTORY_IMPLEMENTATION_PLAN.md, this file, INVENTORY_REGRESSION_MATRIX.md,
    INVENTORY_PHASE_DEPENDENCY_MAP.md.
 2. PLAN STATUS: APPROVED. Overall approval exists, BUT each phase runs on its own explicit instruction.
-3. CURRENT PHASE = INVENTORY-06 (read-only stock↔ledger reconciliation + human-approved
-   RECONCILE_ADJUST). STATUS = IMPLEMENTED + VERIFIED but **UNCOMMITTED** (the user withheld
-   commit for this phase). Phase 05 (movement engine) is COMPLETE + committed
-   (… → e01819a 05b → 8432c22 05c → 6939c12 05d); P1-4 closed, one stock writer.
-   NEXT PHASE = INVENTORY-07 (reservations — needs the §7 business sign-off first).
-   -> If the user asks to run INVENTORY-07, first confirm the §7 sign-off + that -06 is committed.
-   -> If they ask to commit -06, use the message + file list in "EXACT NEXT ACTION a".
-   -> Otherwise STOP and report: -06 implemented + verified, uncommitted; -07 awaits sign-off.
-4. `git log --oneline -12` shows the ordered inventory commits (05d = 6939c12).
-   `git status --short` shows: the INVENTORY-06 working-tree files (src/engines/stockReconciliation*,
-   src/engines/__tests__/stockReconciliationEngine.test.ts,
-   src/lib/__tests__/stockReconciliation.emulator.test.ts,
-   src/features/stock/components/StockReconciliationReport.tsx, scripts/inventory/reconcile.ts,
-   + modified src/lib/inventory/stockMovementEngine.ts / src/pages/StockWorkspace.tsx /
-   vitest.emulator.config.ts / the two INVENTORY_*.md) PLUS the 4 unrelated pre-existing
-   changes (LEADS_UI_UX delete, ProfileSection.tsx, useMyProfile.ts, userProfile.ts) +
-   untracked BRAIN.md / COMPLETE_INVENTORY_INTEGRITY_AUDIT.md — do NOT commit, revert, or
-   stash the unrelated / untracked items.
+3. CURRENT PHASE = INVENTORY-10 (Inventory Operational Features — opening stock, damage
+   write-off, bulk import, low-stock alerts, customer return/RMA). STATUS = IMPLEMENTED +
+   VERIFIED + **COMMITTED** (7 commits, `0391a4f` → `b222416`). INVENTORY-00 through
+   INVENTORY-09 are ALL implemented + verified + committed (this file's COMPLETED PHASES table
+   has every hash). Single stock writer intact through Phase 10 — `singleStockWriter.test.ts`
+   still passes; 10d is the only Phase-10 touch to `stockMovementEngine.ts` (a post-commit
+   read+notify hook, not a write).
+   NEXT PHASE = INVENTORY-11 (Scale & Reporting Hardening — the LAST phase in Plan §14's
+   roadmap; no business sign-off needed, unlike Phase 07).
+   -> If the user asks to run INVENTORY-11, confirm explicit go-ahead, then follow "EXACT NEXT
+      ACTION" above and Plan §14 in full.
+   -> Otherwise STOP and report: Phase 10 complete + committed; Phase 11 (final phase) awaits an
+      explicit instruction.
+4. `git log --oneline -20` shows the ordered inventory commits (10 = `0391a4f`…`b222416`, newest
+   `b222416`). `git status --short` shows ONLY the 4 unrelated pre-existing changes (LEADS_UI_UX
+   delete, ProfileSection.tsx, useMyProfile.ts, userProfile.ts) + untracked BRAIN.md /
+   COMPLETE_INVENTORY_INTEGRITY_AUDIT.md — the SAME 4+2 items every checkpoint since before
+   Phase 10 began. ZERO inventory-implementation files are uncommitted. Do NOT commit, revert,
+   or stash the unrelated / untracked items.
 5. Do not touch any phase beyond the one you were told to run. End with Plan §23. Update this
    file. STOP.
 6. Emulator: use the JBR-java command in ROLLBACK STATUS / WHAT WAS VERIFIED. Do not re-derive it.
