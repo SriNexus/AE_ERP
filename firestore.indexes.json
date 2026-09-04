@@ -411,6 +411,22 @@
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "companyId", "order": "ASCENDING" },
+        { "fieldPath": "purchaseOrderId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "goods_receipts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "companyId", "order": "ASCENDING" },
+        { "fieldPath": "purchaseOrderId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "stock_ledger",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "companyId", "order": "ASCENDING" },
         { "fieldPath": "isDeleted", "order": "ASCENDING" },
         { "fieldPath": "movementType", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }

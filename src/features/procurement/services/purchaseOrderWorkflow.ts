@@ -8,10 +8,26 @@ import { logActivity, notifyUsers, usersByRole } from '../../../lib/workflow';
 import { buildProjectStageAdvancePatch, isProjectStageAtOrPast } from '../../../lib/projectLifecycle';
 import type { PurchaseOrderFormValues, PurchaseOrderItem, PurchaseOrderRecord, PurchaseOrderStatus, VendorRecord } from '../types';
 
+/**
+ * INVENTORY-03 (P2-4): the ONE authoritative Purchase Order state machine.
+ *
+ * Consumed by:
+ *   - `transitionPurchaseOrder()` (this file) — manual status changes.
+ *   - `src/engines/ProcurementValidationEngine.ts` — orphan/status repair.
+ *   - `firestore.rules` `match /purchase_orders` `validPurchaseOrderTransition()`
+ *     — mirrored by hand (a different language); keep the two in sync.
+ *
+ * `PartiallyReceived -> PartiallyReceived` is a legal self-transition: a second
+ * partial goods receipt that still leaves quantity outstanding re-writes the PO
+ * (incrementing `items[].receivedQty`) without changing the status. `Draft` is
+ * freely editable while it stays `Draft` (see `updatePurchaseOrder`), so the
+ * Draft self-edit is handled at the workflow + rules layer, not listed here as
+ * a "transition".
+ */
 export const PURCHASE_ORDER_TRANSITIONS: Record<PurchaseOrderStatus, PurchaseOrderStatus[]> = {
   Draft: ['Sent', 'Cancelled'],
   Sent: ['PartiallyReceived', 'Received', 'Cancelled'],
-  PartiallyReceived: ['Received', 'Cancelled'],
+  PartiallyReceived: ['PartiallyReceived', 'Received', 'Cancelled'],
   Received: [],
   Cancelled: [],
 };

@@ -118,6 +118,12 @@ export interface GoodsReceiptRecord extends BaseRecord {
   notes: string;
   receivedItems: GoodsReceiptItem[];
   stockEntries: GoodsReceiptStockEntry[];
+  /**
+   * INVENTORY-03 (P1-1 / J12): the deterministic `stock_ledger` ids this GRN
+   * owns — the authoritative "this receipt has been applied" marker. A retry
+   * finds these rows already present and applies no further stock movement.
+   */
+  stockApplied?: string[];
 }
 
 export interface GoodsReceiptFormValues {

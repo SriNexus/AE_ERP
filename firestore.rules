@@ -1462,47 +1462,29 @@ service cloud.firestore {
         && sameWarehouse(resource.data)
         && (
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['availableQty', 'reservedQty'])
-          || actorRoleMatches('.*Warehouse.*')
-          || actorRoleMatches('.*Operations.*')
-          // Admin OR GroupAdmin, via ONE call to the same lean,
-          // authMapPath()-cached actorRoleMatches() helper already used for
-          // Warehouse/Operations above — deliberately NOT isAdmin() and NOT
-          // groupAdminCanUpdate(). Two compounding findings here, live-
-          // verified 2026-08-21 (admin@neozy.in / Ashish Enterprises), NEITHER
-          // of them actually about Group Admin scoping being wrong:
+          // INVENTORY-03 (P1-3 / P2-6 resolution): the canonical `stock`
+          // write-role list. A quantity change on an EXISTING summary is
+          // limited to inventory-operational roles —
+          //   Warehouse | Operations | Procurement | Admin | GroupAdmin
+          // Procurement is ADDED here (superset of the prior list) so a
+          // Procurement-role Goods Receipt can post stock IN into a
+          // product/warehouse pair that already has a summary (INVENTORY-00
+          // emulator matrix confirmed the prior 3-pattern guard denied it).
+          // Sales / Accounts / Manager stay DENIED — receiving goods and
+          // cancelling orders do not justify broad stock-summary write
+          // authority (least privilege; cancel-restore role alignment is
+          // owned by a later phase's movement engine).
           //
-          // 1. isAdmin() checks currentUser().role == 'Admin' literally, so
-          //    it never matched a 'GroupAdmin' actor — the originally
-          //    reported symptom ("Group Admin cannot Adjust Stock").
-          //
-          // 2. Fixing that with the logically-correct groupAdminCanUpdate()
-          //    (or even two separate actorRoleMatches() calls) still failed
-          //    — with Firestore's own "maximum of 1000 expressions...
-          //    reached" error. Reproduced directly against the emulator with
-          //    the real two-document transaction shape (stock_ledger create
-          //    + stock update, exactly as useSaveStockEntry()/stockIn()
-          //    issue it): a PLAIN 'Admin' actor (no GroupAdmin involved at
-          //    all) hit the IDENTICAL limit on the IDENTICAL transaction —
-          //    this is a PRE-EXISTING cost problem in this collection's
-          //    rules, compounded by the generic wildcard fallback's
-          //    documented (see match /{collectionId}/{documentId} below)
-          //    non-short-circuiting re-evaluation of
-          //    canUpdateCompanyScoped()/groupAdminCanUpdate() for every write
-          //    to a "special" collection, even though that fallback can
-          //    never actually grant stock/stock_ledger access. Never caught
-          //    before because no existing test exercised the real
-          //    two-document transaction (every prior stock rules test used a
-          //    single-document setDoc()).
-          //
-          // The fix that stayed under budget for BOTH roles: a single
-          // actorRoleMatches('Admin|GroupAdmin') call. isAdmin()'s only
-          // value beyond a plain role check — its isOwnerIdentity()/
-          // isSuperAdmin() bypass — is already redundant here, since
-          // warehouseActorCanUpdate() above already grants access via its
-          // OWN isOwnerIdentity()/actorIsSuperAdmin() branches before this
-          // clause is even reached; and two separate actorRoleMatches()
-          // calls cost enough extra to matter, so they're combined into one.
-          || actorRoleMatches('Admin|GroupAdmin')
+          // ONE actorRoleMatches() call (not three, not isAdmin(), not
+          // groupAdminCanUpdate()): the 2026-08-21 live-verified finding is
+          // that the real two-document stock transaction is already near the
+          // 1000-expression budget, and each extra authMapPath()-cached
+          // get() in this clause compounds it. Collapsing the previous
+          // three calls (`.*Warehouse.*`, `.*Operations.*`, `Admin|GroupAdmin`)
+          // into this single alternation both adds Procurement AND reduces
+          // cost. warehouseActorCanUpdate() above already handles the
+          // owner / Super Admin bypass before this clause is reached.
+          || actorRoleMatches('.*Warehouse.*|.*Operations.*|.*Procurement.*|Admin|GroupAdmin')
         );
       allow delete: if false;
     }
@@ -1891,10 +1873,16 @@ service cloud.firestore {
     }
 
     match /purchase_orders/{documentId} {
+      // INVENTORY-03 (P2-4): mirror of PURCHASE_ORDER_TRANSITIONS in
+      // src/features/procurement/services/purchaseOrderWorkflow.ts — the single
+      // authoritative PO state machine. Keep the two in sync by hand.
+      // `PartiallyReceived -> PartiallyReceived` is legal: a further partial
+      // goods receipt that still leaves quantity outstanding re-writes the PO
+      // (items[].receivedQty incremented) without a status change.
       function validPurchaseOrderTransition(from, to) {
         return (from == 'Draft' && to in ['Sent', 'Cancelled'])
           || (from == 'Sent' && to in ['PartiallyReceived', 'Received', 'Cancelled'])
-          || (from == 'PartiallyReceived' && to in ['Received', 'Cancelled']);
+          || (from == 'PartiallyReceived' && to in ['PartiallyReceived', 'Received', 'Cancelled']);
       }
 
       allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
@@ -1903,7 +1891,18 @@ service cloud.firestore {
         && request.resource.data.vendorId is string
         && request.resource.data.status == 'Draft'
         && request.resource.data.items is list;
-      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
+      // INVENTORY-03: LEAN tenant gate (isOwner/SuperAdmin bypass hoisted to
+      // the discriminator, then the direct authMap.companyId == existing.companyId
+      // check + §9.6 group-active gate, then GroupAdmin additive-OR) instead of
+      // canUpdateCompanyScoped()'s sameCompany()x2 identity-chain re-entry. The
+      // Goods Receipt path now updates `purchase_orders` in the SAME transaction
+      // as `stock` + `stock_ledger` (idempotent + atomic per line, INV-13); the
+      // old rule's cost pushed that 3-collection transaction over the
+      // 1000-expression budget. Same security property (actor is same-company
+      // AND that company's group is active AND companyId is immutable), lower
+      // cost — the established pattern from employees/payroll/payments/etc.
+      allow update: if actorIsActive()
+        && (isOwnerIdentity() || actorIsSuperAdmin() || tenantWriteCanUpdate(resource.data) || groupAdminCanUpdate(resource.data))
         && request.resource.data.purchaseOrderId == resource.data.purchaseOrderId
         && request.resource.data.vendorId is string
         && request.resource.data.items is list

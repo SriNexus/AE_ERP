@@ -19,14 +19,15 @@
  * is the Phase-00 characterization; if the emulator disagrees, the STATE file
  * is corrected to match the emulator, not the other way around.
  *
- * Predicted (from a read of firestore.rules match /stock and /stock_ledger):
+ * Current (INVENTORY-03 firestore.rules):
  *   - OP-1 (create summary):  warehouseActorCanCreate() is NOT role-gated
  *                             -> ALL 8 roles SUCCEED.
- *   - OP-2 (update availableQty): the field guard requires role
- *                             ~/Warehouse/ | ~/Operations/ | 'Admin|GroupAdmin'
- *                             -> Warehouse/Operations/Admin/GroupAdmin SUCCEED;
- *                                Procurement/Accounts/Sales/Manager are DENIED.
- *                             ^ THIS is P1-3.
+ *   - OP-2 (update availableQty): the field guard is
+ *                             actorRoleMatches('.*Warehouse.*|.*Operations.*|.*Procurement.*|Admin|GroupAdmin')
+ *                             -> Warehouse/Operations/Procurement/Admin/GroupAdmin SUCCEED;
+ *                                Accounts/Sales/Manager are DENIED (least privilege).
+ *                             ^ P1-3 was CONFIRMED in INVENTORY-00 (Procurement DENY)
+ *                                and RESOLVED in INVENTORY-03 (Procurement ALLOW).
  *   - OP-3 (create stock_ledger): warehouseActorCanCreate() + field presence
  *                             checks, NOT role-gated -> ALL 8 roles SUCCEED.
  */
@@ -60,7 +61,10 @@ interface RoleCase {
 const ROLE_CASES: RoleCase[] = [
   { role: 'Warehouse',  uid: 'uid-wh',   userId: 'user-wh',   expected: { createSummary: true, updateAvailableQty: true,  createLedger: true } },
   { role: 'Operations', uid: 'uid-ops',  userId: 'user-ops',  expected: { createSummary: true, updateAvailableQty: true,  createLedger: true } },
-  { role: 'Procurement', uid: 'uid-proc', userId: 'user-proc', expected: { createSummary: true, updateAvailableQty: false, createLedger: true } },
+  // INVENTORY-03 (P1-3 resolution): Procurement is now in the `stock`
+  // write-role list so a Procurement-role Goods Receipt can post stock IN into
+  // an EXISTING summary. Was `false` in the INVENTORY-00 baseline.
+  { role: 'Procurement', uid: 'uid-proc', userId: 'user-proc', expected: { createSummary: true, updateAvailableQty: true, createLedger: true } },
   { role: 'Accounts',   uid: 'uid-acc',  userId: 'user-acc',  expected: { createSummary: true, updateAvailableQty: false, createLedger: true } },
   { role: 'Sales',      uid: 'uid-sales', userId: 'user-sales', expected: { createSummary: true, updateAvailableQty: false, createLedger: true } },
   { role: 'Manager',    uid: 'uid-mgr',  userId: 'user-mgr',  expected: { createSummary: true, updateAvailableQty: false, createLedger: true } },
@@ -187,8 +191,11 @@ describe('INVENTORY-00 — stock write role matrix (firestore.rules, current beh
   it('prints the observed matrix (for INVENTORY_IMPLEMENTATION_STATE.md)', () => {
     // eslint-disable-next-line no-console
     console.log('\n[INVENTORY-00 stock role matrix — observed]\n' + JSON.stringify(observed, null, 2));
-    // P1-3 assertion: at least one role that operationally moves stock is DENIED OP-2.
-    expect(ROLE_CASES.find((r) => r.role === 'Procurement')?.expected.updateAvailableQty).toBe(false);
+    // INVENTORY-03: Procurement can now update an existing summary (P1-3 fixed);
+    // Sales / Accounts / Manager stay DENIED (least privilege preserved).
+    expect(ROLE_CASES.find((r) => r.role === 'Procurement')?.expected.updateAvailableQty).toBe(true);
     expect(ROLE_CASES.find((r) => r.role === 'Accounts')?.expected.updateAvailableQty).toBe(false);
+    expect(ROLE_CASES.find((r) => r.role === 'Sales')?.expected.updateAvailableQty).toBe(false);
+    expect(ROLE_CASES.find((r) => r.role === 'Manager')?.expected.updateAvailableQty).toBe(false);
   });
 });

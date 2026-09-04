@@ -13,6 +13,7 @@
 
 import { getAll, getOne, updateDocById } from '../lib/firestore';
 import { COLLECTIONS } from '../lib/firebase';
+import { PURCHASE_ORDER_TRANSITIONS } from '../features/procurement/services/purchaseOrderWorkflow';
 import type { VendorRecord, PurchaseOrderRecord, GoodsReceiptRecord, PurchaseOrderStatus } from '../features/procurement/types';
 
 // ═════════════════════════════════════════════════════════════
@@ -107,13 +108,11 @@ export interface RepairSummary {
 //  VALID STATUS TRANSITIONS
 // ═════════════════════════════════════════════════════════════
 
-const VALID_PO_TRANSITIONS: Record<PurchaseOrderStatus, PurchaseOrderStatus[]> = {
-  Draft: ['Sent'],
-  Sent: ['PartiallyReceived', 'Received', 'Cancelled'],
-  PartiallyReceived: ['Received', 'Cancelled'],
-  Received: ['Cancelled'],
-  Cancelled: [],
-};
+// INVENTORY-03 (P2-4): the single authoritative PO state machine lives in
+// purchaseOrderWorkflow.ts. This engine only needs "is this a known status?"
+// (see validatePurchaseOrder / repairProcurementChain), so it reads the keys of
+// the shared table instead of maintaining its own divergent copy.
+const VALID_PO_TRANSITIONS: Record<PurchaseOrderStatus, PurchaseOrderStatus[]> = PURCHASE_ORDER_TRANSITIONS;
 
 // ═════════════════════════════════════════════════════════════
 //  HELPERS

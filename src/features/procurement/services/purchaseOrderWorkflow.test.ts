@@ -29,8 +29,15 @@ describe('purchaseOrderWorkflow', () => {
   it('defines the Blueprint lifecycle without transitions from terminal states', () => {
     expect(PURCHASE_ORDER_TRANSITIONS.Draft).toEqual(['Sent', 'Cancelled']);
     expect(PURCHASE_ORDER_TRANSITIONS.Sent).toEqual(['PartiallyReceived', 'Received', 'Cancelled']);
-    expect(PURCHASE_ORDER_TRANSITIONS.PartiallyReceived).toEqual(['Received', 'Cancelled']);
+    // INVENTORY-03 (P2-4): PartiallyReceived -> PartiallyReceived is a legal
+    // self-transition (a further partial goods receipt that still leaves qty
+    // outstanding). Terminal states stay terminal.
+    expect(PURCHASE_ORDER_TRANSITIONS.PartiallyReceived).toEqual(['PartiallyReceived', 'Received', 'Cancelled']);
     expect(PURCHASE_ORDER_TRANSITIONS.Received).toEqual([]);
     expect(PURCHASE_ORDER_TRANSITIONS.Cancelled).toEqual([]);
+  });
+
+  it('INVENTORY-03 (P2-4): the transition table covers exactly the 5 PO statuses (one shared source)', () => {
+    expect(Object.keys(PURCHASE_ORDER_TRANSITIONS).sort()).toEqual(['Cancelled', 'Draft', 'PartiallyReceived', 'Received', 'Sent']);
   });
 });
