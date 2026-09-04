@@ -11,6 +11,8 @@ export type ProductPickerValue = {
   productId: string;
   product: string;
   category: string;
+  /** INVENTORY-09 (P2-3) — the picked product's stable category FK, if it has one. */
+  categoryId?: string;
   price: number;
   tax: number;
   unit: string;
@@ -87,6 +89,10 @@ export function ProductPicker({ value, onSelect, category }: Props) {
                 productId: product.id,
                 product: product.name,
                 category: product.category,
+                // INVENTORY-09 (§5): a NEW quotation/order line snapshot carries
+                // the categoryId too — historical lines never get rewritten
+                // (they are not live-joined to the product), so this is safe.
+                categoryId: (product as any).categoryId,
                 price: Number(product.price) || 0,
                 tax: Number(product.tax) || 0,
                 unit: product.unit || 'PCS',

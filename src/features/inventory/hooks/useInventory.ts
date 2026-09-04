@@ -1,12 +1,16 @@
 // features/inventory/hooks/useInventory.ts
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate,
+  getAll, getOne, createDocWithId, updateDocById, deleteDocById, genId, fmtDate,
+  resolveWriteGroupId, resolveWriteCompanyId,
 } from '../../../lib/firestore';
-import { COLLECTIONS } from '../../../lib/firebase';
+import { COLLECTIONS, db, firebaseEnv } from '../../../lib/firebase';
+import { sanitizeFirestoreData } from '../../../lib/sanitizer';
 // INVENTORY-05a: single canonical stock-summary identity — the local copy was
 // a byte-identical duplicate of this one; deleted so there is ONE source.
 import { stockSummaryId } from '../../../lib/workflow';
+import { normalizeSku, productSkuLockId, lockHeldByAnotherProduct, type ProductSkuLockDoc } from '../../../lib/inventory/skuLock';
+import { checkProductDeleteGuard } from '../../../lib/inventory/masterDataGuards';
 import { useCurrentUser, useAppStore } from '../../../store/useAppStore';
 import { queryKeys } from '../../../lib/queryKeys';
 import { UNITS } from '../../../config/company';
@@ -17,11 +21,161 @@ import { notifyRoleUsers } from '../../../lib/notifications';
 // ── Products ────────────────────────────────────────────────
 
 export const PRODUCT_FORM_DEFAULT = {
-  name: '', sku: '', category: '', price: '', mrp: '', cost: '',
+  name: '', sku: '', category: '', categoryId: '', price: '', mrp: '', cost: '',
   discount: '', tax: '', unit: 'PCS', hsn: '', description: '',
   trackingType: 'none', company: '', status: 'Active', lowStockThreshold: '5', specs: '',
 };
 export type ProductForm = typeof PRODUCT_FORM_DEFAULT;
+
+/**
+ * INVENTORY-09 (P1-7): before a `genId.generic()`-keyed master-data create,
+ * confirm the id is genuinely free. `createDocWithId` is `setDoc(...,
+ * {merge:true})` — a colliding id would SILENTLY MERGE into an existing
+ * record instead of failing. `genId.generic` (`{prefix}-{Date.now()}-{rnd}`)
+ * makes a real collision astronomically unlikely, but this guard is the
+ * difference between "impossible" and "silently corrupts a record" if it
+ * ever happens. Scoped to the master-data entities this phase touches
+ * (products / categories / warehouses / vendors) — not a global rewrite of
+ * `createDocWithId`.
+ */
+export async function assertMasterDataIdAvailable(collection: string, id: string, entityLabel: string): Promise<void> {
+  const existing = await getOne<{ id: string }>(collection, id).catch(() => null);
+  if (existing) {
+    throw new Error(`${entityLabel} id collision detected (${id}) — refusing to overwrite an existing record. Please retry.`);
+  }
+}
+
+/**
+ * INVENTORY-09 (§7) — acquire the SKU lock for a NEW product atomically with
+ * the product doc itself (one transaction; mirrors
+ * `createCustomerProjectionInTransaction`). A blank SKU is never locked.
+ * CONFIGURED branch: a real Firestore transaction — two concurrent creates of
+ * the same (company, SKU) can never both win (INV: at most one active lock
+ * per normalized SKU per company). DEMO branch: sequential best-effort
+ * (same risk class as every other demo-mode write in this codebase).
+ */
+export async function createProductWithSkuLock(
+  id: string,
+  payload: Record<string, unknown>,
+  opts: { companyId: string; groupId: string; actorId: string },
+): Promise<void> {
+  const normalizedSku = normalizeSku(payload.sku);
+
+  if (!firebaseEnv.isConfigured) {
+    await assertMasterDataIdAvailable(COLLECTIONS.PRODUCTS, id, 'Product');
+    if (normalizedSku) {
+      const lockId = productSkuLockId(opts.companyId, normalizedSku);
+      const existingLock = await getOne<ProductSkuLockDoc>(COLLECTIONS.PRODUCT_SKU_LOCKS, lockId).catch(() => null);
+      if (lockHeldByAnotherProduct(existingLock, id)) {
+        throw new Error(`SKU "${payload.sku}" is already used by another product in this company`);
+      }
+      await createDocWithId(COLLECTIONS.PRODUCT_SKU_LOCKS, lockId, {
+        id: lockId, companyId: opts.companyId, sku: normalizedSku, productId: id, isDeleted: false,
+      });
+    }
+    await createDocWithId(COLLECTIONS.PRODUCTS, id, { ...payload, id, isDeleted: false });
+    return;
+  }
+
+  const { doc, runTransaction, serverTimestamp } = await import('firebase/firestore');
+  const productRef = doc(db, COLLECTIONS.PRODUCTS, id);
+  const lockRef = normalizedSku ? doc(db, COLLECTIONS.PRODUCT_SKU_LOCKS, productSkuLockId(opts.companyId, normalizedSku)) : null;
+
+  await runTransaction(db, async (transaction) => {
+    const productSnap = await transaction.get(productRef);
+    if (productSnap.exists()) {
+      throw new Error(`Product id collision detected (${id}) — refusing to overwrite an existing record. Please retry.`);
+    }
+    if (lockRef) {
+      const lockSnap = await transaction.get(lockRef);
+      if (lockHeldByAnotherProduct(lockSnap.exists() ? lockSnap.data() as ProductSkuLockDoc : null, id)) {
+        throw new Error(`SKU "${payload.sku}" is already used by another product in this company`);
+      }
+    }
+    transaction.set(productRef, sanitizeFirestoreData({
+      ...payload, id, companyId: opts.companyId, ...(opts.groupId ? { groupId: opts.groupId } : {}),
+      createdBy: opts.actorId, updatedBy: opts.actorId,
+      createdAt: serverTimestamp(), updatedAt: serverTimestamp(), isDeleted: false,
+    }));
+    if (lockRef) {
+      transaction.set(lockRef, sanitizeFirestoreData({
+        id: lockRef.id, companyId: opts.companyId, ...(opts.groupId ? { groupId: opts.groupId } : {}),
+        sku: normalizedSku, productId: id, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+        updatedBy: opts.actorId, isDeleted: false,
+      }));
+    }
+  });
+}
+
+/**
+ * INVENTORY-09 (§7) — edit a product, swapping its SKU lock atomically when
+ * the SKU changes (mirrors `updateCustomerProjectionWithPhoneLock`): the new
+ * lock is validated + claimed and the old lock released in ONE transaction;
+ * the product doc write follows (same two-step shape the phone-lock pattern
+ * uses). Retaining the SAME sku is a no-op on the lock (no transaction).
+ */
+export async function updateProductWithSkuLock(
+  id: string,
+  payload: Record<string, unknown>,
+  opts: { companyId: string; actorId: string },
+): Promise<void> {
+  const existing = await getOne<Product & { sku?: string }>(COLLECTIONS.PRODUCTS, id);
+  if (!existing) throw new Error('Product not found');
+  const oldSku = normalizeSku(existing.sku);
+  const newSku = normalizeSku(payload.sku);
+
+  if (oldSku === newSku) {
+    await updateDocById(COLLECTIONS.PRODUCTS, id, payload);
+    return;
+  }
+
+  if (!firebaseEnv.isConfigured) {
+    if (newSku) {
+      const lockId = productSkuLockId(opts.companyId, newSku);
+      const existingLock = await getOne<ProductSkuLockDoc>(COLLECTIONS.PRODUCT_SKU_LOCKS, lockId).catch(() => null);
+      if (lockHeldByAnotherProduct(existingLock, id)) {
+        throw new Error(`SKU "${payload.sku}" is already used by another product in this company`);
+      }
+      await createDocWithId(COLLECTIONS.PRODUCT_SKU_LOCKS, lockId, { id: lockId, companyId: opts.companyId, sku: newSku, productId: id, isDeleted: false });
+    }
+    if (oldSku) {
+      const oldLockId = productSkuLockId(opts.companyId, oldSku);
+      const oldLock = await getOne<ProductSkuLockDoc>(COLLECTIONS.PRODUCT_SKU_LOCKS, oldLockId).catch(() => null);
+      if (oldLock && oldLock.productId === id) {
+        await updateDocById(COLLECTIONS.PRODUCT_SKU_LOCKS, oldLockId, { isDeleted: true });
+      }
+    }
+    await updateDocById(COLLECTIONS.PRODUCTS, id, payload);
+    return;
+  }
+
+  const { doc, runTransaction, serverTimestamp } = await import('firebase/firestore');
+  const nextLockRef = newSku ? doc(db, COLLECTIONS.PRODUCT_SKU_LOCKS, productSkuLockId(opts.companyId, newSku)) : null;
+  const oldLockRef = oldSku ? doc(db, COLLECTIONS.PRODUCT_SKU_LOCKS, productSkuLockId(opts.companyId, oldSku)) : null;
+
+  await runTransaction(db, async (transaction) => {
+    const nextLockSnap = nextLockRef ? await transaction.get(nextLockRef) : null;
+    if (nextLockSnap && lockHeldByAnotherProduct(nextLockSnap.exists() ? nextLockSnap.data() as ProductSkuLockDoc : null, id)) {
+      throw new Error(`SKU "${payload.sku}" is already used by another product in this company`);
+    }
+    const oldLockSnap = oldLockRef ? await transaction.get(oldLockRef) : null;
+
+    if (nextLockRef) {
+      transaction.set(nextLockRef, sanitizeFirestoreData({
+        id: nextLockRef.id, companyId: opts.companyId, sku: newSku, productId: id,
+        createdAt: nextLockSnap?.exists() ? nextLockSnap.data()!.createdAt : serverTimestamp(),
+        updatedAt: serverTimestamp(), updatedBy: opts.actorId, isDeleted: false,
+      }), { merge: true });
+    }
+    if (oldLockRef && oldLockSnap?.exists() && (oldLockSnap.data() as ProductSkuLockDoc).productId === id) {
+      transaction.set(oldLockRef, sanitizeFirestoreData({
+        isDeleted: true, releasedAt: serverTimestamp(), updatedAt: serverTimestamp(), updatedBy: opts.actorId,
+      }), { merge: true });
+    }
+  });
+
+  await updateDocById(COLLECTIONS.PRODUCTS, id, payload);
+}
 
 export const UNIT_OPTIONS = UNITS.map(u => ({ label: u, value: u }));
 
@@ -67,12 +221,14 @@ export function useSaveProduct(editId: string | null, onSuccess: () => void) {
         lowStockThreshold: Number(data.lowStockThreshold) || 5,
         specs: data.specs ? (() => { try { return JSON.parse(data.specs); } catch { return {}; } })() : {},
       };
+      const companyId = String(activeCompanyId || resolveWriteCompanyId() || '');
       if (editId) {
-        await updateDocById(COLLECTIONS.PRODUCTS, editId, payload);
+        await updateProductWithSkuLock(editId, payload, { companyId, actorId: user.id });
         await notifyRoleUsers(['Warehouse', 'Operations'], NotificationType.INVENTORY_UPDATED, 'Product updated', `Product ${data.name || editId} was updated.`, 'stock', editId, activeCompanyId);
       } else {
         const id = genId.generic('PRD');
-        await createDocWithId(COLLECTIONS.PRODUCTS, id, { ...payload, id, companyId: activeCompanyId, status: data.status || 'Active', photos: (data as any).photos || [], isDeleted: false, createdBy: user.id });
+        const groupId = resolveWriteGroupId(companyId);
+        await createProductWithSkuLock(id, { ...payload, status: data.status || 'Active', photos: (data as any).photos || [] }, { companyId, groupId, actorId: user.id });
         await notifyRoleUsers(['Warehouse', 'Operations'], NotificationType.INVENTORY_UPDATED, 'Product created', `Product ${data.name || id} was created.`, 'stock', id, activeCompanyId);
       }
     },
@@ -92,6 +248,8 @@ export function useDeleteProduct() {
   const keys            = queryKeys.forCompany(activeCompanyId);
   return useMutation({
     mutationFn: async (id: string) => {
+      const guard = await checkProductDeleteGuard(id);
+      if (guard.blocked) throw new Error(guard.reason || 'This product cannot be deleted right now.');
       await deleteDocById(COLLECTIONS.PRODUCTS, id);
       await notifyRoleUsers(['Warehouse', 'Operations'], NotificationType.INVENTORY_UPDATED, 'Product deleted', `Product ${id} was deleted.`, 'stock', id, activeCompanyId);
     },

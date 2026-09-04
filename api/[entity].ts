@@ -14,6 +14,7 @@ import { requirePermission } from './_lib/permissions';
 import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked } from './_lib/registry';
 import { checkRateLimit, getRateLimitKey } from './_lib/rateLimit';
 import { filterManageableUsers, isOwnerEmail } from '../src/lib/ownerAccess';
+import { createProductWithSkuLockAdmin, SkuConflictError } from './_lib/productSkuLock';
 import {
   sendPaginated,
   sendCreated,
@@ -244,6 +245,15 @@ async function handleCreate(req: VercelRequest, res: VercelResponse, config: typ
   const docData = sanitizeCreateBody(body, user.uid, companyId);
 
   try {
+    // INVENTORY-09 (§A): the `products` write path additionally claims the
+    // SAME company-scoped SKU lock the SDK create path uses — one
+    // authoritative uniqueness mechanism, not a second implementation.
+    if (config.collection === 'products') {
+      const id = body.id || db.collection(config.collection).doc().id;
+      await createProductWithSkuLockAdmin(db, id, docData, companyId);
+      return sendCreated(res, { id, ...docData });
+    }
+
     if (body.id) {
       await db.collection(config.collection).doc(body.id).create(docData);
       return sendCreated(res, { id: body.id, ...docData });
@@ -252,6 +262,9 @@ async function handleCreate(req: VercelRequest, res: VercelResponse, config: typ
     const ref = await db.collection(config.collection).add(docData);
     return sendCreated(res, { id: ref.id, ...docData });
   } catch (error: any) {
+    if (error instanceof SkuConflictError) {
+      return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: error.message } });
+    }
     if (error.code === 'ALREADY_EXISTS' || (error.message && error.message.includes('already exists'))) {
       return res.status(409).json({
         success: false,

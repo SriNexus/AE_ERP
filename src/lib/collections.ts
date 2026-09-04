@@ -47,6 +47,7 @@ export const COLLECTIONS = {
   STOCK_LEDGER:       'stock_ledger',
   STOCK_RESERVATIONS: 'stock_reservations',
   STOCK_TRANSFERS:    'stock_transfers',
+  PRODUCT_SKU_LOCKS:  'product_sku_locks',
   ORDERS:             'orders',
   ORDER_ITEMS:        'order_items',
   PROFORMA_INVOICES:  'proforma_invoices',

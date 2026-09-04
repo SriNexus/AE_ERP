@@ -470,6 +470,7 @@ export default function Products() {
       name: p.name || '',
       sku: p.sku || '',
       category: p.category || '',
+      categoryId: p.categoryId || '',
       price: String(p.price || ''),
       mrp: String(p.mrp || ''),
       cost: String(p.cost || ''),
@@ -1018,13 +1019,31 @@ export default function Products() {
             </div>
             <div>
               <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-1">Category *</label>
-              <input
+              {/* INVENTORY-09 (P2-3): categoryId is the authoritative FK; category
+                  stays the denormalized display name, resolved from the selected
+                  option here so it is always in sync at write time. */}
+              <select
                 required
-                value={form.category}
-                onChange={(e) => setForm({ ...form, category: e.target.value })}
-                placeholder="e.g. Electronics"
+                value={form.categoryId}
+                onChange={(e) => {
+                  const selected = (categories as any[]).find((c) => c.id === e.target.value);
+                  setForm({ ...form, categoryId: e.target.value, category: selected?.name || '' });
+                }}
                 className="w-full h-8 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
-              />
+              >
+                <option value="">Select category…</option>
+                {(categories as any[])
+                  .filter((c) => c.isDeleted !== true)
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>{c.name || c.category || c.id}</option>
+                  ))}
+                {/* A legacy free-text category with no matching product_categories
+                    doc (pre-backfill data) — keep it selectable so editing an old
+                    product doesn't force an unrelated category choice on save. */}
+                {form.category && !form.categoryId && !(categories as any[]).some((c) => c.name === form.category) && (
+                  <option value="">{form.category} (legacy — pick a category to link it)</option>
+                )}
+              </select>
             </div>
           </div>
           <div className="grid grid-cols-3 gap-3">
@@ -1123,6 +1142,7 @@ export default function Products() {
             name: `${product.name || 'Product'} Copy`,
             sku: '',
             category: product.category || '',
+            categoryId: product.categoryId || '',
             price: String(product.price || ''),
             mrp: String(product.mrp || ''),
             cost: String(product.cost || ''),

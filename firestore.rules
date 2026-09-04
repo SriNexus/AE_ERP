@@ -801,10 +801,11 @@ service cloud.firestore {
       // (Firestore evaluates every matching `match` block for a path and
       // allows the request if ANY grants it — a dedicated block alone does
       // NOT suppress the generic fallback from ALSO applying).
-      // INVENTORY-07/08: 'stock_reservations' + 'stock_transfers' have their own
-      // dedicated blocks below and MUST be excluded here, or the generic fallback
-      // would additively grant any same-company active user create/update access.
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
+      // INVENTORY-07/08/09: 'stock_reservations', 'stock_transfers' and
+      // 'product_sku_locks' have their own dedicated blocks below and MUST be
+      // excluded here, or the generic fallback would additively grant any
+      // same-company active user create/update access.
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'product_sku_locks', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
     }
 
     match /companies/{companyId} {
@@ -1689,6 +1690,33 @@ service cloud.firestore {
         && request.resource.data.id == lockId
         && request.resource.data.phone == resource.data.phone
         && request.resource.data.customerId == resource.data.customerId;
+      allow delete: if false;
+    }
+
+    match /product_sku_locks/{lockId} {
+      // INVENTORY-09 (§7/§8) — product SKU uniqueness lock, mirrors
+      // `customer_phone_locks` exactly: `{companyId}_{normalizedSku}` doc id,
+      // written INSIDE `useInventory.ts`'s create/edit transaction. `resource
+      // == null` guard: the transaction's FIRST read is this
+      // not-yet-created deterministic doc — without the guard,
+      // canReadCompanyScoped()/groupAdminCanRead() dereferences resource.data
+      // (undefined) and hard-denies the whole transaction for every role,
+      // same class as every other deterministic-lock collection in this file.
+      allow read: if actorIsActive() && (resource == null || canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data))
+        && request.resource.data.id == lockId
+        && request.resource.data.sku is string
+        && request.resource.data.productId is string;
+      // A lock's `sku` is immutable once created (only the owning productId +
+      // isDeleted/release bookkeeping move). Reclaiming a RELEASED lock
+      // (isDeleted == true) for a DIFFERENT product is the documented SKU-reuse
+      // path (product A releases SKU "X", product B later takes it) — an
+      // active lock's productId may never change underneath its owner.
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
+        && resource.data.id == lockId
+        && request.resource.data.id == lockId
+        && request.resource.data.sku == resource.data.sku
+        && (resource.data.productId == request.resource.data.productId || resource.data.isDeleted == true);
       allow delete: if false;
     }
 
@@ -2734,8 +2762,17 @@ service cloud.firestore {
       // Group Admin scope without a per-collection edit. F-02's
       // isSpecialCollection() guard sits BEFORE the OR (sequencing per §9.3),
       // so the 14 protected collections can never inherit fallback coverage.
+      // INVENTORY-09: `resource == null` guard — same established pattern as
+      // stock/settings/roles/companies/customer_phone_locks/product_sku_locks
+      // above (the F4/G2/J2/K3 class). `createProductWithSkuLock`'s configured
+      // branch does a `transaction.get(productRef)` BEFORE the product exists
+      // (the P1-7 id-collision guard) — for a brand-new id that dereferences
+      // `resource.data` in groupAdminCanRead() (undefined) and hard-denied the
+      // WHOLE transaction for every role, on every non-special collection that
+      // falls through to this generic rule (not just `products`). A missing
+      // doc holds zero data, so the guard grants nothing once a doc exists.
       allow read: if actorIsActive() && !isSpecialCollection(collectionId)
-        && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+        && (resource == null || canReadCompanyScoped() || groupAdminCanRead(resource.data));
       allow create: if actorIsActive() && !isSpecialCollection(collectionId)
         && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
       allow update: if actorIsActive() && !isSpecialCollection(collectionId)

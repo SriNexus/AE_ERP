@@ -15,6 +15,7 @@ import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked } from '../_lib
 import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
 import { isHiddenOwnerRecord } from '../../src/lib/ownerAccess';
 import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, sendMethodNotAllowed, buildWritableUpdatePayload } from '../_lib/response';
+import { updateProductWithSkuLockAdmin, SkuConflictError } from '../_lib/productSkuLock';
 
 const READ_ONLY_ENTITY_MESSAGE =
   'This resource is read-only through the REST API. Inventory quantities and ledger movements ' +
@@ -173,7 +174,21 @@ export async function handleUpdate(
   // buildWritableUpdatePayload()/SECURITY_RESERVED_FIELDS in _lib/response.ts.
   const updateData = buildWritableUpdatePayload(body, user.uid, existingSnap.data() || {});
 
-  await db.collection(config.collection).doc(resourceId).update(updateData);
+  // INVENTORY-09 (§A): same SKU-lock swap the SDK edit path uses — an update
+  // that changes `sku` must not silently steal another product's claim.
+  if (config.collection === 'products') {
+    const companyId = existingSnap.data()?.companyId || user.companyId;
+    try {
+      await updateProductWithSkuLockAdmin(db, resourceId, updateData, existingSnap.data() || {}, companyId);
+    } catch (error: any) {
+      if (error instanceof SkuConflictError) {
+        return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: error.message } });
+      }
+      throw error;
+    }
+  } else {
+    await db.collection(config.collection).doc(resourceId).update(updateData);
+  }
 
   // Fetch the updated document
   const updatedSnap = await db.collection(config.collection).doc(resourceId).get();

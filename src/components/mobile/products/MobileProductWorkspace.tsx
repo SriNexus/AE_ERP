@@ -126,6 +126,7 @@ function formFromProduct(product: MobileProduct): MobileProductForm {
     name: product.name || '',
     sku: product.sku || product.productCode || '',
     category: product.category || '',
+    categoryId: (product as any).categoryId || '',
     price: String(product.price ?? product.sellingPrice ?? ''),
     mrp: String(product.mrp ?? ''),
     cost: String(product.cost ?? product.purchasePrice ?? ''),
@@ -598,9 +599,11 @@ function ProductDialogs({ formOpen, form, categories, dirty, saving, confirmClos
   onRemovePhoto: (index: number) => void;
   fileInputRef: React.MutableRefObject<HTMLInputElement | null>;
 }) {
+  // INVENTORY-09 (P2-3): categoryId is the authoritative FK — mirrors the
+  // desktop ProductsWorkspace category select (one relationship, two forms).
   const categoryOptions = [
     { label: 'Select category...', value: '' },
-    ...categories.map((category) => ({ label: category.name || category.title || category.id, value: category.name || category.title || category.id })),
+    ...categories.map((category) => ({ label: category.name || category.title || category.id, value: category.id })),
   ];
   return (
     <>
@@ -613,7 +616,10 @@ function ProductDialogs({ formOpen, form, categories, dirty, saving, confirmClos
               <Input label="Barcode" value={form.barcode || ''} onChange={(event) => onFormChange({ barcode: event.target.value })} />
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <Select label="Category" value={form.category} onChange={(event) => onFormChange({ category: event.target.value })} options={categoryOptions} />
+              <Select label="Category" value={form.categoryId} onChange={(event) => {
+                const selected = categories.find((category) => category.id === event.target.value);
+                onFormChange({ categoryId: event.target.value, category: selected?.name || selected?.title || '' });
+              }} options={categoryOptions} />
               <Input label="Brand" value={form.brand || ''} onChange={(event) => onFormChange({ brand: event.target.value })} />
             </div>
             <div className="grid grid-cols-2 gap-3">
