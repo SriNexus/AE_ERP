@@ -64,6 +64,7 @@ const Categories   = lazy(() => import('../../pages/Categories'));
 const Warehouses   = lazy(() => import('../../pages/Warehouses'));
 const Stock        = lazy(() => import('../../pages/Stock'));
 const StockLedger  = lazy(() => import('../../pages/StockLedger'));
+const StockTransfers = lazy(() => import('../../pages/WarehouseTransfersWorkspace'));
 const Dispatch     = lazy(() => import('../../pages/Dispatch'));
 const DispatchDetail = lazy(() => import('../../pages/DispatchDetail'));
 
@@ -281,6 +282,7 @@ export function AppRoutes() {
         <Route path="/warehouses" element={<RoleRoute module="warehouses"><SafePage><Warehouses /></SafePage></RoleRoute>} />
         <Route path="/stock"        element={<RoleRoute module="stock"><SafePage><Stock /></SafePage></RoleRoute>} />
         <Route path="/stock-ledger" element={<RoleRoute module="stock"><SafePage><StockLedger /></SafePage></RoleRoute>} />
+        <Route path="/stock-transfers" element={<RoleRoute module="stock"><SafePage><StockTransfers /></SafePage></RoleRoute>} />
         <Route path="/dispatch"     element={<RoleRoute module="dispatch"><SafePage><Dispatch /></SafePage></RoleRoute>} />
         <Route path="/dispatch/:id" element={<RoleRoute module="dispatch"><SafePage><DispatchDetail /></SafePage></RoleRoute>} />
         <Route path="/qc" element={<RoleRoute module="qc"><SafePage><QC /></SafePage></RoleRoute>} />

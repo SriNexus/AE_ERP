@@ -32,6 +32,7 @@ import {
   UserCog,
   Users,
   Warehouse,
+  ArrowLeftRight,
   Wrench,
   Zap,
   UsersRound,
@@ -85,6 +86,7 @@ export const ERP_NAV_ITEMS: NavItem[] = [
     { label: 'Products', path: '/products', icon: <Boxes className="h-4 w-4" />, module: 'products' },
     { label: 'Warehouses', path: '/warehouses', icon: <Warehouse className="h-4 w-4" />, module: 'warehouses' },
     { label: 'Stock', path: '/stock', icon: <Package className="h-4 w-4" />, module: 'stock' },
+    { label: 'Stock Transfers', path: '/stock-transfers', icon: <ArrowLeftRight className="h-4 w-4" />, module: 'stock' },
     { label: 'Dispatch', path: '/dispatch', icon: <Truck className="h-4 w-4" />, module: 'dispatch' },
   ] },
   { label: 'Post-Sale', icon: <FileText className="h-4 w-4" />, children: [

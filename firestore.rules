@@ -450,6 +450,16 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/warehouses/$(data.warehouseId)).data.companyId == data.companyId;
     }
 
+    // INVENTORY-08: FK validation for a warehouse id given explicitly (a stock
+    // transfer references TWO warehouses, so warehouseBelongsToCompany()'s
+    // single-field `data.warehouseId` shape does not fit). Same exists()+get().
+    function warehouseIdInCompany(whId, companyId) {
+      return whId is string
+        && exists(/databases/$(database)/documents/warehouses/$(whId))
+        && get(/databases/$(database)/documents/warehouses/$(whId)).data.keys().hasAny(['companyId'])
+        && get(/databases/$(database)/documents/warehouses/$(whId)).data.companyId == companyId;
+    }
+
     // warehouseId is immutable once a warehouse-scoped document is created —
     // a direct update can never re-point a stock/dispatch/goods-receipts
     // record at another warehouse (mirrors companyIdUnchanged()/groupIdUnchanged()).
@@ -791,10 +801,10 @@ service cloud.firestore {
       // (Firestore evaluates every matching `match` block for a path and
       // allows the request if ANY grants it — a dedicated block alone does
       // NOT suppress the generic fallback from ALSO applying).
-      // INVENTORY-07: 'stock_reservations' has its own dedicated block below and
-      // MUST be excluded here, or the generic fallback would additively grant any
-      // same-company active user create/update access to reservation docs.
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
+      // INVENTORY-07/08: 'stock_reservations' + 'stock_transfers' have their own
+      // dedicated blocks below and MUST be excluded here, or the generic fallback
+      // would additively grant any same-company active user create/update access.
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
     }
 
     match /companies/{companyId} {
@@ -1587,6 +1597,47 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
              ['qtyConsumed', 'qtyReleased', 'status', 'updatedAt', 'updatedBy', 'lastMovementAt', 'lastMovementLedgerId', 'isDeleted']
            );
+      allow delete: if false;
+    }
+
+    match /stock_transfers/{transferId} {
+      // INVENTORY-08 — warehouse-to-warehouse transfer within ONE company. The
+      // doc's status flip (draft → in_transit → received / cancelled) is written
+      // as a MovementParticipant INSIDE the stock movement engine's transaction
+      // (ship / receive / cancel) alongside the paired TRANSFER_OUT / TRANSFER_IN
+      // rows — the engine stays the sole `stock` / `stock_ledger` writer. Draft
+      // create + draft cancel are plain single-doc writes.
+      //
+      // Company + group isolation via the LEAN warehouse-scoped composites
+      // (warehouseActorCanCreate/Update — same-company + group-active + owner /
+      // super-admin / GroupAdmin). A cross-company transfer is impossible: BOTH
+      // referenced warehouses must exist AND belong to the doc's company
+      // (warehouseIdInCompany). Warehouse-restricted actors may only send FROM
+      // and act ON transfers that touch their own warehouse.
+      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive()
+        && warehouseActorCanCreate(request.resource.data)
+        // inventory-operational roles only — same list as the `stock` physical
+        // write guard (a transfer is a stock operation).
+        && actorRoleMatches('.*Warehouse.*|.*Operations.*|.*Procurement.*|Admin|GroupAdmin')
+        && request.resource.data.fromWarehouseId is string
+        && request.resource.data.toWarehouseId is string
+        && request.resource.data.fromWarehouseId != request.resource.data.toWarehouseId
+        && request.resource.data.status == 'draft'
+        && warehouseIdInCompany(request.resource.data.fromWarehouseId, request.resource.data.companyId)
+        && warehouseIdInCompany(request.resource.data.toWarehouseId, request.resource.data.companyId)
+        && (actorWarehouseScopeIsAny() || request.resource.data.fromWarehouseId == actorWarehouseScopeId());
+      allow update: if actorIsActive()
+        && warehouseActorCanUpdate(resource.data)
+        && actorRoleMatches('.*Warehouse.*|.*Operations.*|.*Procurement.*|Admin|GroupAdmin')
+        // transfer identity (the two warehouses) is immutable
+        && request.resource.data.fromWarehouseId == resource.data.fromWarehouseId
+        && request.resource.data.toWarehouseId == resource.data.toWarehouseId
+        && (
+          actorWarehouseScopeIsAny()
+          || resource.data.fromWarehouseId == actorWarehouseScopeId()
+          || resource.data.toWarehouseId == actorWarehouseScopeId()
+        );
       allow delete: if false;
     }
 

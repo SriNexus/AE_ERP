@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../lib/firebase', () => ({
   db: {},
   firebaseEnv: { isConfigured: false },
-  COLLECTIONS: { STOCK: 'stock', STOCK_LEDGER: 'stock_ledger', STOCK_RESERVATIONS: 'stock_reservations', AUDIT_LOGS: 'audit_logs' },
+  COLLECTIONS: { STOCK: 'stock', STOCK_LEDGER: 'stock_ledger', STOCK_RESERVATIONS: 'stock_reservations', STOCK_TRANSFERS: 'stock_transfers', AUDIT_LOGS: 'audit_logs' },
 }));
 vi.mock('../../lib/firestore', () => ({
   getAll: vi.fn(async (c: string, constraints: any[] = []) => {
@@ -61,8 +61,8 @@ vi.mock('firebase/firestore', () => ({
 }));
 
 import {
-  reconcileSummary, reconcileWarehouse, generateStockHealthReport,
-  applyReconciliationCorrection, computeReconciliation, ledgerRowOnHandDelta,
+  reconcileSummary, reconcileWarehouse, generateStockHealthReport, reconcileTransfers,
+  applyReconciliationCorrection, computeReconciliation, computeTransferReconciliation, ledgerRowOnHandDelta,
 } from '../StockReconciliationEngine';
 
 const SUM = (p: string, w = 'WH-1') => `SUM-CO-1-${p}-${w}`;
@@ -161,6 +161,44 @@ describe('INVENTORY-07 — reservation reconciliation (additive)', () => {
     const rep = await generateStockHealthReport();
     expect(rep.reservedMismatchCount).toBe(1);
     expect(rep.reservedMismatches[0].productId).toBe('P-R4');
+  });
+});
+
+describe('INVENTORY-08 — transfer reconciliation (INV-11)', () => {
+  const OUT = (transferId: string, qty: number) => ({ movementType: 'TRANSFER_OUT', direction: 'OUT', qty, transferId, sourceType: 'transfer', isDeleted: false });
+  const IN = (transferId: string, qty: number) => ({ movementType: 'TRANSFER_IN', direction: 'IN', qty, transferId, sourceType: 'transfer', isDeleted: false });
+  const CANCEL_IN = (transferId: string, qty: number) => ({ movementType: 'TRANSFER_IN', direction: 'IN', qty, transferId, sourceType: 'transfer_cancel', isDeleted: false });
+
+  it('a fully received transfer balances to 0 → balanced (INV-11)', () => {
+    const r = computeTransferReconciliation({ transferId: 'TRF-1', status: 'received', ledgerRows: [OUT('TRF-1', 5), IN('TRF-1', 5)] });
+    expect(r).toMatchObject({ shippedQty: 5, receivedQty: 5, pairDelta: 0, balanced: true, classification: 'balanced' });
+  });
+
+  it('an in-transit transfer is an expected outstanding movement, NOT drift', () => {
+    const r = computeTransferReconciliation({ transferId: 'TRF-2', status: 'in_transit', ledgerRows: [OUT('TRF-2', 5)] });
+    expect(r).toMatchObject({ inTransitQty: 5, balanced: false, classification: 'in_transit' });
+    expect(r.note).toMatch(/in transit/i);
+  });
+
+  it('a received transfer with a shortfall → loss_in_transit, surfaced not erased', () => {
+    const r = computeTransferReconciliation({ transferId: 'TRF-3', status: 'received', ledgerRows: [OUT('TRF-3', 10), IN('TRF-3', 8)] });
+    expect(r).toMatchObject({ shippedQty: 10, receivedQty: 8, shortfallQty: 2, pairDelta: -2, classification: 'loss_in_transit' });
+  });
+
+  it('a cancelled in-transit transfer whose stock was returned balances to 0', () => {
+    const r = computeTransferReconciliation({ transferId: 'TRF-4', status: 'cancelled', ledgerRows: [OUT('TRF-4', 6), CANCEL_IN('TRF-4', 6)] });
+    expect(r).toMatchObject({ shippedQty: 6, returnedQty: 6, pairDelta: 0, balanced: true, classification: 'balanced' });
+  });
+
+  it('reconcileTransfers aggregates in-transit + loss without flagging in-transit as an anomaly', async () => {
+    col('stock_transfers')['TRF-A'] = { id: 'TRF-A', companyId: 'CO-1', status: 'in_transit', isDeleted: false };
+    col('stock_transfers')['TRF-B'] = { id: 'TRF-B', companyId: 'CO-1', status: 'received', isDeleted: false };
+    col('stock_ledger')['L-A1'] = { id: 'L-A1', companyId: 'CO-1', ...OUT('TRF-A', 5) };
+    col('stock_ledger')['L-B1'] = { id: 'L-B1', companyId: 'CO-1', ...OUT('TRF-B', 10) };
+    col('stock_ledger')['L-B2'] = { id: 'L-B2', companyId: 'CO-1', ...IN('TRF-B', 9) };
+    const rep = await reconcileTransfers();
+    expect(rep).toMatchObject({ totalTransfers: 2, inTransitCount: 1, lossInTransitCount: 1, anomalyCount: 0, inTransitQty: 5, lossInTransitQty: 1 });
+    expect(rep.needsAttention.map((r) => r.transferId)).toEqual(['TRF-B']);
   });
 });
 

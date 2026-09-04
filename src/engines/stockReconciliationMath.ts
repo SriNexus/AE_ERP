@@ -32,6 +32,9 @@ export interface StockLedgerRowLike {
   type?: string;
   /** INVENTORY-06 flag on a reconciliation-correction row. */
   auditReconciliation?: boolean;
+  /** INVENTORY-08 — set on TRANSFER_OUT / TRANSFER_IN rows (both legs share it). */
+  transferId?: string;
+  sourceType?: string;
   movementAt?: unknown;
   createdAt?: unknown;
   date?: unknown;
@@ -145,6 +148,99 @@ export function ledgerRowOnHandDelta(row: StockLedgerRowLike): { delta: number; 
   if (t === 'RESERVE' || t === 'RELEASE') return { delta: 0, classified: true, isReconcile: false };
 
   return { delta: 0, classified: false, isReconcile: false };
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * INVENTORY-08 — warehouse transfer reconciliation (INV-11). PURE.
+ *
+ * For a COMPLETED transfer the signed sum of its ledger rows is 0:
+ *   -Σ(TRANSFER_OUT) + Σ(TRANSFER_IN) == 0
+ * For an IN-TRANSIT transfer the source has shipped (TRANSFER_OUT exists) but
+ * the destination has not received yet — this is an EXPECTED outstanding
+ * movement, NOT unexplained drift. A RECEIVED transfer whose pair does not
+ * balance is a loss in transit (`shortfallQty`) to be resolved via
+ * RECONCILE_ADJUST — surfaced, never silently erased.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface TransferLedgerRowLike extends StockLedgerRowLike {
+  transferId?: string;
+  sourceType?: string;
+}
+
+export interface TransferReconciliation {
+  transferId: string;
+  status: string;
+  /** Σ TRANSFER_OUT qty (sourceType 'transfer'). */
+  shippedQty: number;
+  /** Σ TRANSFER_IN qty (sourceType 'transfer' — the receive leg). */
+  receivedQty: number;
+  /** Σ TRANSFER_IN qty (sourceType 'transfer_cancel' — the reverse-to-source leg). */
+  returnedQty: number;
+  /** signed pair sum: receivedQty + returnedQty − shippedQty. */
+  pairDelta: number;
+  /** units still physically in transit (shipped, not yet received/returned). */
+  inTransitQty: number;
+  /** units lost in transit on a received transfer (shippedQty − receivedQty). */
+  shortfallQty: number;
+  /** INV-11 verdict: a completed (received/cancelled) transfer whose pair sums to 0. */
+  balanced: boolean;
+  classification: 'balanced' | 'in_transit' | 'loss_in_transit' | 'anomaly' | 'no_movement';
+  note?: string;
+}
+
+export function computeTransferReconciliation(input: {
+  transferId: string;
+  status: string;
+  ledgerRows: TransferLedgerRowLike[];
+}): TransferReconciliation {
+  const rows = (input.ledgerRows || []).filter((r) => r.isDeleted !== true && String(r.transferId || '') === input.transferId);
+  let shippedQty = 0;
+  let receivedQty = 0;
+  let returnedQty = 0;
+  for (const row of rows) {
+    const qty = Math.abs(num(row.qty));
+    const mt = String(row.movementType || '').toUpperCase();
+    const dir = String(row.direction || '').toUpperCase();
+    const st = String(row.sourceType || '');
+    const isOut = mt === 'TRANSFER_OUT' || (dir === 'OUT' && st.startsWith('transfer'));
+    const isIn = mt === 'TRANSFER_IN' || (dir === 'IN' && st.startsWith('transfer'));
+    if (isOut) shippedQty += qty;
+    else if (isIn && st === 'transfer_cancel') returnedQty += qty;
+    else if (isIn) receivedQty += qty;
+  }
+
+  const pairDelta = receivedQty + returnedQty - shippedQty;
+  const status = String(input.status || '');
+  const completed = status === 'received' || status === 'cancelled';
+  // Genuine in-transit only applies while the transfer is still `in_transit`;
+  // a completed transfer's unaccounted units are a loss, not in transit.
+  const inTransitQty = status === 'in_transit' ? Math.max(0, shippedQty - receivedQty - returnedQty) : 0;
+  const shortfallQty = status === 'received' ? Math.max(0, shippedQty - receivedQty) : 0;
+  const balanced = completed && Math.abs(pairDelta) <= RECON_EPSILON;
+
+  let classification: TransferReconciliation['classification'];
+  let note: string | undefined;
+  if (shippedQty <= RECON_EPSILON && receivedQty <= RECON_EPSILON && returnedQty <= RECON_EPSILON) {
+    classification = 'no_movement';
+    if (status === 'in_transit' || status === 'received') note = `Transfer is '${status}' but has no ledger movement.`;
+  } else if (balanced) {
+    classification = 'balanced';
+  } else if (status === 'in_transit') {
+    classification = 'in_transit';
+    note = `${inTransitQty} unit(s) in transit — expected outstanding movement, not drift.`;
+  } else if (status === 'received' && shortfallQty > RECON_EPSILON && Math.abs(pairDelta + shortfallQty) <= RECON_EPSILON) {
+    classification = 'loss_in_transit';
+    note = `${shortfallQty} unit(s) lost in transit — resolve with a RECONCILE_ADJUST at the source warehouse.`;
+  } else {
+    classification = 'anomaly';
+    note = `Transfer pair does not reconcile (shipped ${shippedQty}, received ${receivedQty}, returned ${returnedQty}).`;
+  }
+
+  return {
+    transferId: input.transferId, status,
+    shippedQty, receivedQty, returnedQty, pairDelta, inTransitQty, shortfallQty,
+    balanced, classification, note,
+  };
 }
 
 /**

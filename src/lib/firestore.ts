@@ -431,6 +431,10 @@ const COLLECTION_PERMISSION_MODULE: Record<string, string> = {
   // per-user record ownership; a reservation is not "owned" by whoever paid the
   // PI). Company + warehouse scoping still applies (below).
   [COLLECTIONS.STOCK_RESERVATIONS]: 'stock',
+  // INVENTORY-08: warehouse transfers are shared operational stock state (a
+  // transfer spans two warehouses of the same company). Company-scoped read;
+  // warehouse isolation is enforced on write by the rules.
+  [COLLECTIONS.STOCK_TRANSFERS]: 'stock',
   [COLLECTIONS.ORDERS]: 'orders',
   [COLLECTIONS.PROFORMA_INVOICES]: 'invoices',
   [COLLECTIONS.TAX_INVOICES]: 'tax_invoices',
