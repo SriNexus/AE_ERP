@@ -15,8 +15,24 @@ function addDaysIso(dateValue: string | undefined, days: number): string {
 }
 
 
-export async function generatePIsFromOrder(order: any) {
+export async function generatePIsFromOrder(order: any, options: { force?: boolean } = {}) {
   const state = useAppStore.getState();
+
+  // INVENTORY-04 (P2-7): repeat-generation guard. Re-read the authoritative
+  // order — a stale caller object must not let PIs be generated twice for the
+  // same order. `force` (not currently surfaced in the UI) is the deliberate
+  // regenerate escape hatch. Money math / numbering / tax logic below unchanged.
+  let authoritative: any = null;
+  if (order?.id) {
+    try { authoritative = await getOne<any>(COLLECTIONS.ORDERS, order.id); } catch { authoritative = null; }
+  }
+  const guardSource = authoritative || order;
+  if (!options.force
+    && guardSource?.piGenerated === true
+    && Array.isArray(guardSource.generatedPIs)
+    && guardSource.generatedPIs.length > 0) {
+    throw new Error(`Proforma invoice(s) have already been generated for order ${order?.id || ''} (${guardSource.generatedPIs.join(', ')}).`);
+  }
 
   // Canonical tenant resolution — never the neutral 'default' placeholder.
   const companyId = resolveWriteCompanyId() || order.companyId || '';

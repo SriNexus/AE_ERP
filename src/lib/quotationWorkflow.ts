@@ -1,6 +1,7 @@
-import { createDocWithId, getOne, updateDocById, genId, resolveWriteCompanyId } from './firestore';
+import { createDocWithId, getOne, updateDocById, genId, resolveWriteCompanyId, resolveWriteGroupId } from './firestore';
 import { getNextDocumentNumber, resolveDocumentDefaults } from './documentNumbering';
-import { COLLECTIONS } from './firebase';
+import { COLLECTIONS, firebaseEnv } from './firebase';
+import { sanitizeFirestoreData } from './sanitizer';
 import { useAppStore } from '../store/useAppStore';
 import { NotificationType } from '../types';
 import { logActivity, notifyUsers, usersByRole } from './workflow';
@@ -177,7 +178,14 @@ export async function convertQuotationToOrder(quote: any) {
   const state = useAppStore.getState();
   // Canonical tenant resolution — never the neutral 'default' placeholder.
   const companyId = resolveWriteCompanyId() || quote.companyId || '';
+  const groupId = resolveWriteGroupId(companyId);
   const changedBy = state.user?.id || 'system';
+
+  // INVENTORY-04 (P2-8): fast idempotent short-circuit — a quotation already
+  // converted returns its existing order id (the authoritative check re-runs
+  // inside the transaction below).
+  if (quote?.convertedOrderId) return String(quote.convertedOrderId);
+
   const oid = genId.order(state.company.orderPrefix);
   const { documentNumber } = await getNextDocumentNumber(companyId, 'order');
   const projectId = String(quote.projectId || '');
@@ -197,18 +205,21 @@ export async function convertQuotationToOrder(quote: any) {
   const orderType = resolveCustomerType(customer);
   if (!orderType) throw new Error(`Customer ${customerId} does not have a valid B2B/B2C classification — cannot convert quotation to order`);
 
-  // Map items to include dispatch tracking properties
+  // Map items to include dispatch tracking properties. Engineering-derived
+  // items (productId: '') are preserved verbatim — conversion never requires a
+  // product to exist.
   const orderItems = (quote.items || []).map((it: any) => ({
     ...it,
     dispatchedQty: 0,
     pendingQty: Number(it.qty) || 0
   }));
 
-  // 1. Create Order
-  await createDocWithId(COLLECTIONS.ORDERS, oid, {
+  const orderDoc: Record<string, unknown> = {
     id: oid,
     orderNumber: documentNumber,
     orderNo: documentNumber,
+    companyId,
+    ...(groupId ? { groupId } : {}),
     customerId: quote.customerId,
     customer: quote.customer,
     orderType,
@@ -226,43 +237,78 @@ export async function convertQuotationToOrder(quote: any) {
     quotationId: quote.id,
     projectId,
     engineeringDesignId: String(quote.engineeringDesignId || ''),
-    // Financial Tracking
     taxAmount: Number(quote.taxAmount ?? quote.taxTotal ?? 0),
     taxTotal: Number(quote.taxTotal ?? quote.taxAmount ?? 0),
     totalInvoiced: 0,
-    pendingBilling: quote.total
-  });
-
-  if (project) {
-    await updateDocById(COLLECTIONS.PROJECTS, project.id, projectOrderPatch(project, oid, changedBy));
-  }
-
-  // 2. Update Quotation
-  await updateDocById(COLLECTIONS.QUOTATIONS, quote.id, {
+    pendingBilling: quote.total,
+    isDeleted: false,
+  };
+  const quotePatch = {
     status: 'Converted to Order',
     convertedOrderId: oid,
-    convertedAt: new Date().toISOString()
-  });
+    convertedAt: new Date().toISOString(),
+    updatedBy: changedBy,
+  };
 
-  // 3. Log Audit
-  await logActivity('Quotations', 'Converted to Order', quote.id, {
-    orderId: oid,
-    orderNumber: documentNumber,
-    entityName: quote.customer || quote.customerName || quote.id,
-    actionLabel: 'Converted quotation to order',
-  });
-  notifyUsers(
-    await usersByRole('Accounts'),
-    NotificationType.ORDER_PLACED,
-    'Order placed',
-    `Quotation ${quote.id} was converted to order ${documentNumber}.`,
-    'order',
-    oid,
-    companyId
-  );
+  // INVENTORY-04 (P2-8): the lock check + order create + quotation mark happen
+  // in ONE Firestore transaction that RE-READS the quotation's convertedOrderId.
+  // Two concurrent conversions therefore create exactly one order — the loser's
+  // transaction retries, sees convertedOrderId set, and returns the winner's id.
+  let committedOrderId = oid;
+  if (firebaseEnv.isConfigured) {
+    const { db } = await import('./firebase');
+    const { doc, runTransaction, serverTimestamp } = await import('firebase/firestore');
+    const quoteRef = doc(db, COLLECTIONS.QUOTATIONS, quote.id);
+    const orderRef = doc(db, COLLECTIONS.ORDERS, oid);
+    const projectRef = project ? doc(db, COLLECTIONS.PROJECTS, project.id) : null;
 
-  // Phase 3B: Propagate caseId from quotation chain to order
-  void propagateCaseIdFromChain('orders', oid);
+    committedOrderId = await runTransaction(db, async (transaction) => {
+      const quoteSnap = await transaction.get(quoteRef);
+      if (!quoteSnap.exists()) throw new Error('Quotation not found');
+      const quoteData = quoteSnap.data() as Record<string, unknown>;
+      if (quoteData.convertedOrderId) return String(quoteData.convertedOrderId);
+      if (quoteData.status === 'Converted to Order') {
+        throw new Error('This quotation has already been converted to an Order');
+      }
+      const projSnap = projectRef ? await transaction.get(projectRef) : null;
+      transaction.set(orderRef, sanitizeFirestoreData({ ...orderDoc, createdBy: changedBy, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+      transaction.set(quoteRef, sanitizeFirestoreData({ ...quotePatch, updatedAt: serverTimestamp() }), { merge: true });
+      if (projectRef && projSnap?.exists()) {
+        transaction.set(projectRef, sanitizeFirestoreData(projectOrderPatch(projSnap.data() as ProjectRecord, oid, changedBy)), { merge: true });
+      }
+      return oid;
+    });
+  } else {
+    // Demo / non-configured branch: sequential, best-effort re-read.
+    let fresh: any = null;
+    try { fresh = await getOne<any>(COLLECTIONS.QUOTATIONS, quote.id); } catch { fresh = null; }
+    if (fresh?.convertedOrderId) return String(fresh.convertedOrderId);
+    await createDocWithId(COLLECTIONS.ORDERS, oid, orderDoc);
+    if (project) await updateDocById(COLLECTIONS.PROJECTS, project.id, projectOrderPatch(project, oid, changedBy));
+    await updateDocById(COLLECTIONS.QUOTATIONS, quote.id, quotePatch);
+  }
 
-  return oid;
+  // Post-commit side effects only when WE created the order (not when a
+  // concurrent conversion won and we returned its id).
+  if (committedOrderId === oid) {
+    await logActivity('Quotations', 'Converted to Order', quote.id, {
+      orderId: oid,
+      orderNumber: documentNumber,
+      entityName: quote.customer || quote.customerName || quote.id,
+      actionLabel: 'Converted quotation to order',
+    });
+    notifyUsers(
+      await usersByRole('Accounts'),
+      NotificationType.ORDER_PLACED,
+      'Order placed',
+      `Quotation ${quote.id} was converted to order ${documentNumber}.`,
+      'order',
+      oid,
+      companyId
+    );
+    // Phase 3B: Propagate caseId from quotation chain to order
+    void propagateCaseIdFromChain('orders', oid);
+  }
+
+  return committedOrderId;
 }

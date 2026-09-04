@@ -46,6 +46,8 @@ vi.mock('../firebase', () => ({
     STOCK_LEDGER: 'stock_ledger',
     DISPATCH: 'dispatch',
     ORDERS: 'orders',
+    PROFORMA_INVOICES: 'proforma_invoices',
+    TAX_INVOICES: 'tax_invoices',
   },
   firebaseEnv: { isConfigured: false },
 }));
@@ -221,5 +223,42 @@ describe('cancelOrder', () => {
       })
     );
 
+  });
+
+  it('INVENTORY-04 (8): order + every affected dispatch get their status change', async () => {
+    await cancelOrder('ORD-1', 'Customer request');
+    // dispatch status flip
+    expect(mocks.updateDocById).toHaveBeenCalledWith('dispatch', 'DSP-1', expect.objectContaining({ status: 'Returned', cancellationOrderId: 'ORD-1' }));
+    // order status flip
+    expect(mocks.updateDocById).toHaveBeenCalledWith('orders', 'ORD-1', expect.objectContaining({ status: 'Cancelled' }));
+  });
+
+  it('INVENTORY-04 (10): PI / tax-invoice reversal information is recorded on the cancelled order', async () => {
+    mocks.getOne.mockImplementation(async (collection: string, id: string) => {
+      if (collection === 'orders' && id === 'ORD-1') {
+        return { id: 'ORD-1', customer: 'Customer A', companyId: 'comp-1', status: 'Pending', paidAmount: 500, generatedPIs: ['PI-1'], items: [{ productId: 'P-1', unit: 'PCS', dispatchedQty: 3, pendingQty: 0 }], createdBy: 'creator-1' };
+      }
+      if (collection === 'stock' && id === 'SUM-P-1-W-1') return { id: 'SUM-P-1-W-1', availableQty: 2, reservedQty: 0 };
+      return null;
+    });
+    mocks.getAll.mockImplementation(async (collection: string) => {
+      if (collection === 'dispatch') return [{ id: 'DSP-1', orderId: 'ORD-1', status: 'Dispatched', warehouseId: 'W-1', warehouse: 'Main', items: [{ productId: 'P-1', unit: 'PCS', verifiedQty: 3 }] }];
+      if (collection === 'proforma_invoices') return [{ id: 'PI-1', orderId: 'ORD-1' }, { id: 'PI-2', sourceOrderId: 'ORD-1' }];
+      if (collection === 'tax_invoices') return [{ id: 'TAX-1', orderId: 'ORD-1' }];
+      return [];
+    });
+    await cancelOrder('ORD-1', 'Customer request');
+    expect(mocks.updateDocById).toHaveBeenCalledWith('orders', 'ORD-1', expect.objectContaining({
+      piReversalRequired: true,
+      reversalInvoiceIds: expect.arrayContaining(['PI-1', 'PI-2', 'TAX-1']),
+    }));
+  });
+
+  it('INVENTORY-04: no reversal flag when the order has no PIs / tax invoices', async () => {
+    await cancelOrder('ORD-1', 'Customer request');
+    expect(mocks.updateDocById).toHaveBeenCalledWith('orders', 'ORD-1', expect.objectContaining({
+      piReversalRequired: false,
+      reversalInvoiceIds: [],
+    }));
   });
 });

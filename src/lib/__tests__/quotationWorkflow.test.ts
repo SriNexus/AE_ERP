@@ -27,6 +27,7 @@ vi.mock('../firestore', () => ({
     const s = mocks.getState() as any;
     return s.activeCompanyId || s.company?.id || s.user?.companyId || '';
   },
+  resolveWriteGroupId: () => 'grp-1',
 }));
 
 vi.mock('../workflow', () => ({
@@ -192,6 +193,36 @@ describe('convertQuotationToOrder', () => {
     mocks.getOne.mockResolvedValueOnce(null);
     const quote = { id: 'Q-4', customerId: 'C-GHOST', customer: 'Ghost', items: [], subtotal: 0, total: 0, discount: 0 };
     await expect(convertQuotationToOrder(quote)).rejects.toThrow('does not have a valid B2B/B2C classification');
+    expect(mocks.createDocWithId).not.toHaveBeenCalled();
+  });
+
+  it('INVENTORY-04 (13/16): normal conversion succeeds; an engineering-derived item (productId: "") stays convertible', async () => {
+    mocks.getOne.mockResolvedValueOnce({ id: 'C-9', type: 'B2C' });
+    const quote = {
+      id: 'Q-ENG', customerId: 'C-9', customer: 'Eng Cust', companyId: 'comp-1',
+      items: [{ productId: '', product: 'Solar PV Modules', qty: 20, price: 0, tax: 0 }],
+      subtotal: 0, taxTotal: 0, total: 0, discount: 0,
+    };
+    await expect(convertQuotationToOrder(quote)).resolves.toBe('ORD-001');
+    expect(mocks.createDocWithId).toHaveBeenCalledWith('orders', 'ORD-001', expect.objectContaining({
+      items: [expect.objectContaining({ productId: '', qty: 20, dispatchedQty: 0, pendingQty: 20 })],
+    }));
+  });
+
+  it('INVENTORY-04 (14/15): a quotation already carrying convertedOrderId returns THAT id, creates no second order', async () => {
+    const quote = { id: 'Q-DUP', customerId: 'C-1', customer: 'Cust', companyId: 'comp-1', convertedOrderId: 'ORD-EXISTING', items: [{ qty: 1, price: 100, tax: 18 }], subtotal: 100, total: 118 };
+    await expect(convertQuotationToOrder(quote)).resolves.toBe('ORD-EXISTING');
+    expect(mocks.createDocWithId).not.toHaveBeenCalled();
+    expect(mocks.updateDocById).not.toHaveBeenCalled();
+  });
+
+  it('INVENTORY-04 (14/15): the demo branch re-reads convertedOrderId — a conversion that landed between calls returns the existing id', async () => {
+    // customer resolves, then the fresh quotation read shows it was converted meanwhile
+    mocks.getOne
+      .mockResolvedValueOnce({ id: 'C-1', type: 'B2C' })
+      .mockResolvedValueOnce({ id: 'Q-RACE', convertedOrderId: 'ORD-WON' });
+    const quote = { id: 'Q-RACE', customerId: 'C-1', customer: 'Cust', companyId: 'comp-1', items: [{ qty: 1, price: 100, tax: 18 }], subtotal: 100, total: 118, discount: 0 };
+    await expect(convertQuotationToOrder(quote)).resolves.toBe('ORD-WON');
     expect(mocks.createDocWithId).not.toHaveBeenCalled();
   });
 });

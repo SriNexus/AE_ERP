@@ -3,6 +3,8 @@ import { NotificationType } from '../../types';
 
 const mocks = vi.hoisted(() => ({
   createDocWithId: vi.fn(),
+  getOne: vi.fn(),
+  updateDocById: vi.fn(),
   getNextDocumentNumber: vi.fn(),
   resolveDocumentDefaults: vi.fn(),
   notifyRoleUsers: vi.fn(),
@@ -13,6 +15,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../firestore', () => ({
   createDocWithId: mocks.createDocWithId,
+  getOne: mocks.getOne,
+  updateDocById: mocks.updateDocById,
   genId: mocks.genId,
 }));
 
@@ -33,7 +37,63 @@ vi.mock('../firebase', () => ({
   firebaseEnv: { isConfigured: false },
 }));
 
-import { createOrder } from '../orderWorkflow';
+import { createOrder, isOrderLineLocked, updateOrder } from '../orderWorkflow';
+
+describe('INVENTORY-04 — order line lock', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.updateDocById.mockResolvedValue(undefined);
+  });
+
+  const unlocked = { id: 'ORD-9', status: 'Pending', items: [{ productId: 'P-1', product: 'Panel', qty: 5, price: 100, tax: 18, unit: 'PCS', dispatchedQty: 0 }], notes: 'old' };
+  const dispatchedLine = { id: 'ORD-9', status: 'Pending', items: [{ productId: 'P-1', product: 'Panel', qty: 5, price: 100, tax: 18, unit: 'PCS', dispatchedQty: 2 }], notes: 'old' };
+  const byStatus = (status: string) => ({ id: 'ORD-9', status, items: [{ productId: 'P-1', product: 'Panel', qty: 5, price: 100, tax: 18, unit: 'PCS', dispatchedQty: 0 }], notes: 'old' });
+
+  it('isOrderLineLocked — Σ dispatchedQty > 0', () => {
+    expect(isOrderLineLocked(unlocked)).toBe(false);
+    expect(isOrderLineLocked(dispatchedLine)).toBe(true);
+  });
+  it('isOrderLineLocked — locked statuses', () => {
+    for (const s of ['Partial Dispatch', 'Dispatched', 'Closed', 'Cancelled']) expect(isOrderLineLocked(byStatus(s))).toBe(true);
+    for (const s of ['Pending', 'Processing', 'Confirmed', 'Delivered']) expect(isOrderLineLocked(byStatus(s))).toBe(false);
+  });
+
+  it('1. unlocked order — line edit allowed', async () => {
+    mocks.getOne.mockResolvedValue(unlocked);
+    await expect(updateOrder('ORD-9', { items: [{ productId: 'P-1', product: 'Panel', qty: 9, price: 100, tax: 18, unit: 'PCS' }] })).resolves.toMatchObject({ id: 'ORD-9' });
+    expect(mocks.updateDocById).toHaveBeenCalledWith('orders', 'ORD-9', expect.objectContaining({ items: expect.any(Array) }));
+  });
+
+  it('2. locked (dispatchedQty>0) — line qty change rejected', async () => {
+    mocks.getOne.mockResolvedValue(dispatchedLine);
+    await expect(updateOrder('ORD-9', { items: [{ productId: 'P-1', product: 'Panel', qty: 9, price: 100, tax: 18, unit: 'PCS' }] })).rejects.toThrow(/dispatched/i);
+    expect(mocks.updateDocById).not.toHaveBeenCalled();
+  });
+
+  it.each(['Partial Dispatch', 'Dispatched', 'Closed', 'Cancelled'])('3-6. locked by status %s — line change rejected', async (status) => {
+    mocks.getOne.mockResolvedValue(byStatus(status));
+    await expect(updateOrder('ORD-9', { items: [{ productId: 'P-2', product: 'Inverter', qty: 5, price: 100, tax: 18, unit: 'PCS' }] })).rejects.toThrow(/dispatched/i);
+    expect(mocks.updateDocById).not.toHaveBeenCalled();
+  });
+
+  it('7. locked order — non-line edit (notes) still allowed', async () => {
+    mocks.getOne.mockResolvedValue(dispatchedLine);
+    // full payload from the form re-sends items, but their product/qty/price is unchanged
+    await expect(updateOrder('ORD-9', { notes: 'updated note', items: [{ productId: 'P-1', product: 'Panel', qty: 5, price: 100, tax: 18, unit: 'PCS' }] })).resolves.toMatchObject({ id: 'ORD-9' });
+    expect(mocks.updateDocById).toHaveBeenCalledWith('orders', 'ORD-9', expect.objectContaining({ notes: 'updated note' }));
+  });
+
+  it('7b. locked order — patch with NO items key always allowed', async () => {
+    mocks.getOne.mockResolvedValue(byStatus('Dispatched'));
+    await expect(updateOrder('ORD-9', { customerPhone: '99999' })).resolves.toMatchObject({ id: 'ORD-9' });
+    expect(mocks.updateDocById).toHaveBeenCalledWith('orders', 'ORD-9', { customerPhone: '99999' });
+  });
+
+  it('rejects when the order does not exist', async () => {
+    mocks.getOne.mockResolvedValue(null);
+    await expect(updateOrder('NOPE', { notes: 'x' })).rejects.toThrow('not found');
+  });
+});
 
 describe('createOrder', () => {
   beforeEach(() => {

@@ -29,6 +29,7 @@ import { Badge, Button, Card, ConfirmDialog, Input, Modal, Pagination, Select, T
 import { COLLECTIONS } from '../../../lib/firebase';
 import { createDocWithId, deleteDocById, fmtCurrency, fmtDate, genId, getAll, toInputDate, updateDocById, resolveWriteCompanyId } from '../../../lib/firestore';
 import { getNextDocumentNumber, resolveDocumentDefaults } from '../../../lib/documentNumbering';
+import { updateOrder } from '../../../lib/orderWorkflow';
 import { notifyRoleUsers } from '../../../lib/notifications';
 import { getProductHistory } from '../../../lib/pricingEngine';
 import { usePermissions } from '../../../lib/permissions';
@@ -559,7 +560,9 @@ export function MobileOrderWorkspace({ mode }: { mode: Mode }) {
       if (!cleanItems.length) throw new Error('Add at least one item');
       const payload = payloadForSave();
       if (editingOrder) {
-        await updateDocById(COLLECTIONS.ORDERS, editingOrder.id, payload);
+        // INVENTORY-04: shared workflow enforces the order line-lock (no mobile
+        // business logic — the mobile shell just calls the same workflow).
+        await updateOrder(editingOrder.id, payload);
         await notifyRoleUsers(['Accounts', 'Operations', 'Director'], NotificationType.ORDER_UPDATED, 'Order updated', `Order ${editingOrder.id} was updated for ${form.customer || 'customer'}.`, 'order', editingOrder.id, activeCompanyId);
         return { ...editingOrder, ...payload };
       }

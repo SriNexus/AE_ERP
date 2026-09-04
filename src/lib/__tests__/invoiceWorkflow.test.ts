@@ -224,6 +224,26 @@ describe('generatePIsFromOrder', () => {
       })
     );
   });
+
+  it('INVENTORY-04 (11-12): first generation succeeds; a repeat is rejected', async () => {
+    mocks.genId.invoice.mockReset().mockReturnValue('PI-001');
+    mocks.getNextDocumentNumber.mockReset().mockResolvedValue({ documentNumber: 'PI-BIZ-001' });
+    const order = { id: 'ORD-R', customerId: 'C-1', customer: 'Cust', companyId: 'comp-1', total: 236, items: [{ category: 'Module', qty: 2, price: 100, tax: 18 }] };
+    // 1st call — authoritative order not yet PI-generated
+    mocks.getOne.mockResolvedValueOnce({ id: 'ORD-R', piGenerated: false });
+    await expect(generatePIsFromOrder(order)).resolves.toEqual(['PI-001']);
+    // 2nd call — authoritative order now shows PIs generated
+    mocks.getOne.mockResolvedValueOnce({ id: 'ORD-R', piGenerated: true, generatedPIs: ['PI-001'] });
+    await expect(generatePIsFromOrder(order)).rejects.toThrow(/already been generated/i);
+  });
+
+  it('INVENTORY-04: force:true bypasses the repeat guard', async () => {
+    mocks.genId.invoice.mockReset().mockReturnValue('PI-001');
+    mocks.getNextDocumentNumber.mockReset().mockResolvedValue({ documentNumber: 'PI-BIZ-001' });
+    const order = { id: 'ORD-F', customerId: 'C-1', customer: 'Cust', companyId: 'comp-1', total: 236, items: [{ category: 'Module', qty: 2, price: 100, tax: 18 }] };
+    mocks.getOne.mockResolvedValueOnce({ id: 'ORD-F', piGenerated: true, generatedPIs: ['PI-OLD'] });
+    await expect(generatePIsFromOrder(order, { force: true })).resolves.toEqual(['PI-001']);
+  });
 });
 
 describe('refundPayment', () => {

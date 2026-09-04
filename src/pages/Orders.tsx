@@ -46,7 +46,7 @@ import { NotificationType } from '../types';
 import { canDo } from '../lib/permissions';
 import { notifyRoleUsers } from '../lib/notifications';
 import { propagateCaseIdFromChain } from '../lib/casePropagation';
-import { createOrder } from '../lib/orderWorkflow';
+import { createOrder, updateOrder } from '../lib/orderWorkflow';
 
 const PER_PAGE = 10;
 const FORM0 = { customer:'', customerId:'', orderType:'B2B', date:'', deliveryDate:'', status:'Pending', paymentStatus:'Pending', paymentMode:'', discount:'0', notes:'', shippingAddress:'', warehouseId:'' };
@@ -288,7 +288,9 @@ export default function Orders() {
     mutationFn: async (d:typeof FORM0) => {
       if (editId) {
         const payload = {...d, items, subtotal, taxTotal, discount, total:grandTotal, createdBy:user.id};
-        await updateDocById(COLLECTIONS.ORDERS, editId, payload);
+        // INVENTORY-04: updateOrder enforces the order line-lock at the workflow
+        // layer (a dispatched order's product/qty/price can no longer change).
+        await updateOrder(editId, payload);
         await notifyRoleUsers(['Accounts', 'Operations', 'Director'], NotificationType.ORDER_UPDATED, 'Order updated', `Order ${editId} was updated for ${d.customer || 'customer'}.`, 'order', editId, activeCompanyId);
         return { ...payload, id: editId };
       }

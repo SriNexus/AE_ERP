@@ -227,31 +227,79 @@ export async function cancelOrder(orderId: string, reason = '') {
     }
   }
 
-  await Promise.all(dispatches.map((dispatch) => updateDocById(COLLECTIONS.DISPATCH, dispatch.id, sanitizeFirestoreData({
-    status: 'Returned',
-    cancellationOrderId: orderId,
-    cancellationReason: reason || '',
-    returnedAt: new Date().toISOString(),
-    updatedBy: state.user?.id || 'system',
-  }))));
-
   const paidAmount = Number(order.paidAmount ?? order.amountPaid) || 0;
   const cancelledItems = (order.items || []).map((item) => ({
     ...item,
     dispatchedQty: 0,
     pendingQty: 0,
   }));
-  await updateDocById(COLLECTIONS.ORDERS, orderId, sanitizeFirestoreData({
+  const now = new Date().toISOString();
+  const actorId = state.user?.id || 'system';
+
+  // INVENTORY-04 (P2-2): the invoices this cancellation affects — information
+  // only. NO financial reversal, NO invoice-amount change, NO GST change here.
+  const generatedPIs = Array.isArray(order.generatedPIs) ? order.generatedPIs.map(String) : [];
+  const [allPIs, allTaxInvoices] = await Promise.all([
+    getAll<WorkflowRecord & { id: string }>(COLLECTIONS.PROFORMA_INVOICES).catch(() => []),
+    getAll<WorkflowRecord & { id: string }>(COLLECTIONS.TAX_INVOICES).catch(() => []),
+  ]);
+  const piIds = Array.from(new Set([
+    ...generatedPIs,
+    ...allPIs.filter((pi) => pi.orderId === orderId || pi.sourceOrderId === orderId || generatedPIs.includes(pi.id)).map((pi) => pi.id),
+  ]));
+  const taxInvoiceIds = allTaxInvoices.filter((ti) => ti.orderId === orderId || ti.sourceOrderId === orderId).map((ti) => ti.id);
+  const reversalInvoiceIds = Array.from(new Set([...piIds, ...taxInvoiceIds]));
+  const piReversalRequired = reversalInvoiceIds.length > 0;
+
+  const dispatchStatusPatch = {
+    status: 'Returned',
+    cancellationOrderId: orderId,
+    cancellationReason: reason || '',
+    returnedAt: now,
+    updatedBy: actorId,
+  };
+  const orderStatusPatch = {
     status: 'Cancelled',
     cancellationReason: reason || '',
-    cancelledAt: new Date().toISOString(),
-    cancelledBy: state.user?.id || 'system',
+    cancelledAt: now,
+    cancelledBy: actorId,
     cancellationStockRestored: restoredItems.length > 0,
     refundRequired: paidAmount > 0,
     paymentReconciliationPending: paidAmount > 0,
+    // INVENTORY-04 additive flags — later flow handles the actual reversal.
+    piReversalRequired,
+    reversalInvoiceIds,
     items: cancelledItems,
-    updatedBy: state.user?.id || 'system',
-  }));
+    updatedBy: actorId,
+  };
+
+  // INVENTORY-04 (P2-2): order status + every affected dispatch status flip in
+  // ONE transaction that re-reads each document — no half-applied state. (The
+  // stock restore above stays as sequential stockIn calls; it migrates to the
+  // movement engine in Plan Phase 05d, not here.)
+  if (firebaseEnv.isConfigured) {
+    const { db } = await import('./firebase');
+    const { doc, runTransaction, serverTimestamp } = await import('firebase/firestore');
+    const orderRef = doc(db, COLLECTIONS.ORDERS, orderId);
+    const dispatchRefs = dispatches.map((dispatch) => ({ id: dispatch.id, ref: doc(db, COLLECTIONS.DISPATCH, dispatch.id) }));
+    await runTransaction(db, async (transaction) => {
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists()) throw new Error(`Order ${orderId} not found`);
+      if (String((orderSnap.data() as WorkflowRecord).status || '').toLowerCase() === 'cancelled') {
+        throw new Error('Order is already cancelled');
+      }
+      const dispatchSnaps = await Promise.all(dispatchRefs.map(async (entry) => ({ ...entry, snap: await transaction.get(entry.ref) })));
+      transaction.set(orderRef, sanitizeFirestoreData({ ...orderStatusPatch, updatedAt: serverTimestamp() }), { merge: true });
+      for (const entry of dispatchSnaps) {
+        if (!entry.snap.exists()) continue;
+        transaction.set(entry.ref, sanitizeFirestoreData({ ...dispatchStatusPatch, updatedAt: serverTimestamp() }), { merge: true });
+      }
+    });
+  } else {
+    // Demo / non-configured branch: sequential, best-effort.
+    await Promise.all(dispatches.map((dispatch) => updateDocById(COLLECTIONS.DISPATCH, dispatch.id, sanitizeFirestoreData(dispatchStatusPatch))));
+    await updateDocById(COLLECTIONS.ORDERS, orderId, sanitizeFirestoreData(orderStatusPatch));
+  }
 
   await logActivity('Orders', 'Cancelled Order', orderId, {
     entityName: order.customer || order.customerName || orderId,
