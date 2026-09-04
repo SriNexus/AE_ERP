@@ -1512,8 +1512,23 @@ service cloud.firestore {
       // carries warehouseId and is directly warehouse-scoped, so the same
       // sameWarehouse() read restriction applies (a Warehouse-role actor must
       // not infer another warehouse's movements through the ledger path).
-      allow read: if actorIsActive() && (canReadCompanyScoped() || groupAdminCanRead(resource.data))
-        && sameWarehouse(resource.data);
+      //
+      // INVENTORY-01: `resource == null` guard (same established pattern as
+      // stock/companies/roles/users/settings/customer_phone_locks above).
+      // dispatchWorkflow.executeAndVerifyDispatch() (and, later, the movement
+      // engine) transaction.get() a DETERMINISTIC ledger doc id
+      // (STKOUT-{dispatchId}-{productId}) BEFORE writing, to make a retried /
+      // concurrent verification an idempotent no-op. On the FIRST verification
+      // that doc does not exist yet, so a bare
+      // canReadCompanyScoped()/groupAdminCanRead()/sameWarehouse() dereferences
+      // resource.data (undefined) and the whole transaction is hard-denied for
+      // every role. A missing doc holds zero data, so `resource == null` grants
+      // nothing once the row exists; `allow update, delete: if false` still
+      // makes every existing row immutable.
+      allow read: if actorIsActive() && (
+        resource == null
+        || ((canReadCompanyScoped() || groupAdminCanRead(resource.data)) && sameWarehouse(resource.data))
+      );
       allow create: if actorIsActive() && warehouseActorCanCreate(request.resource.data)
         && request.resource.data.transactionId is string
         && request.resource.data.movementAt != null
