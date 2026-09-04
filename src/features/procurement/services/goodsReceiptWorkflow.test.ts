@@ -53,7 +53,7 @@ vi.mock('../../../lib/workflow', async () => {
   };
 });
 
-import { calculateReceiptState, createGoodsReceipt, goodsReceiptDeterministicId, grnReceiptLedgerId } from './goodsReceiptWorkflow';
+import { calculateReceiptState, createGoodsReceipt, goodsReceiptDeterministicId } from './goodsReceiptWorkflow';
 
 const PO_ID = 'PO-1';
 function seedPO(overrides: any = {}) {
@@ -101,6 +101,21 @@ describe('INVENTORY-03 — goodsReceiptWorkflow (demo branch)', () => {
     expect(ledgers).toHaveLength(2);
     expect(ledgers.every((l: any) => l.type === 'IN')).toBe(true);
     expect(col('stock')[grnStockId('P-1')].availableQty).toBe(10);
+    expect(col('stock')[grnStockId('P-1')].onHandQty).toBe(10);
+  });
+
+  it('INVENTORY-05b: new GRN ledger rows carry the Phase-05a unified schema + legacy compat fields', async () => {
+    await createGoodsReceipt(form({ 0: '4' }) as any);
+    const row = Object.values(col('stock_ledger'))[0] as any;
+    expect(row).toMatchObject({
+      movementType: 'PURCHASE_RECEIPT', direction: 'IN', qty: 4,
+      onHandBefore: 0, onHandAfter: 4, reservedBefore: 0, reservedAfter: 0,
+      // legacy compat (consumers + reconcileMissingGrnDocs)
+      type: 'IN', referenceType: 'GoodsReceipt', purchaseOrderId: PO_ID,
+      beforeQty: 0, afterQty: 4, grnLineIndex: 0, grnPreviouslyReceivedQty: 0,
+    });
+    expect(row.idempotencyKey).toMatch(/^PURCHASE_RECEIPT:goods_receipt:GRN-PO-1-[a-z0-9]+:0$/);
+    expect(row.id).toBe(`STKMV-${encodeURIComponent(row.idempotencyKey)}`);
   });
 
   it('J7: partial then second partial -> receivedQty increments, PO stays PartiallyReceived then Received', async () => {
@@ -136,11 +151,6 @@ describe('INVENTORY-03 — goodsReceiptWorkflow (demo branch)', () => {
     expect(Object.keys(col('goods_receipts'))).toEqual([grnId]);
     expect(Object.values(col('stock_ledger'))).toHaveLength(1);
     expect(col('stock')[grnStockId('P-1')].availableQty).toBe(4);
-  });
-
-  it('deterministic ledger id encodes (po, line, receivedBefore, qty)', () => {
-    expect(grnReceiptLedgerId('PO-1', 0, 0, 4)).toBe('STKIN-GRN-PO-1-L0-B0-Q4');
-    expect(grnReceiptLedgerId('PO-1', 0, 4, 6)).toBe('STKIN-GRN-PO-1-L0-B4-Q6');
   });
 
   it('rejects receipts against non-receivable purchase orders', async () => {

@@ -1,12 +1,13 @@
 import { COLLECTIONS, firebaseEnv } from '../../../lib/firebase';
-import { createDocWithId, genId, getAll, getOne, resolveWriteCompanyId, resolveWriteGroupId, updateDocById } from '../../../lib/firestore';
+import { createDocWithId, getAll, getOne, resolveWriteCompanyId, resolveWriteGroupId } from '../../../lib/firestore';
 import { canDo } from '../../../lib/permissions';
 import { sanitizeFirestoreData } from '../../../lib/sanitizer';
-import { resolveStockSummaryDocumentId } from '../../../lib/stockWorkflow';
 import { useAppStore } from '../../../store/useAppStore';
 import { propagateCaseIdFromChain } from '../../../lib/casePropagation';
 import { NotificationType } from '../../../types';
-import { logActivity, notifyUsers, resolveWorkflowCompanyId, stockSummaryId, usersByRole, type WorkflowRecord } from '../../../lib/workflow';
+import { applyStockMovements } from '../../../lib/inventory/stockMovementEngine';
+import type { MovementParticipant, MovementPlanEntry, StockMovementInput } from '../../../lib/inventory/types';
+import { logActivity, notifyUsers, resolveWorkflowCompanyId, usersByRole, type WorkflowRecord } from '../../../lib/workflow';
 import type { Warehouse } from '../../warehouses/types';
 import type { GoodsReceiptFormValues, GoodsReceiptItem, GoodsReceiptRecord, PurchaseOrderItem, PurchaseOrderRecord, PurchaseOrderStatus } from '../types';
 
@@ -14,23 +15,6 @@ const RECEIPT_EPSILON = 1e-6;
 const RECEIVABLE_PO_STATUSES: PurchaseOrderStatus[] = ['Sent', 'PartiallyReceived'];
 
 const encPart = (value: string) => encodeURIComponent(String(value || '').trim());
-
-/**
- * INVENTORY-03 (P1-1): deterministic `stock_ledger` document id for ONE goods
- * receipt line. Keyed on (PO, line index, the `receivedQty` the client saw
- * before this receipt, the quantity now being received). Reconstructable from a
- * persisted GRN doc or the ledger row itself, so a receipt whose atomic
- * stock+PO transaction committed but whose GRN-doc write did not can be
- * reconciled. `stock_ledger` `allow update: if false` is the backstop.
- */
-export function grnReceiptLedgerId(poId: string, lineIndex: number, receivedBefore: number, qty: number): string {
-  return `STKIN-GRN-${encPart(poId)}-L${lineIndex}-B${receivedBefore}-Q${qty}`;
-}
-
-/** INVENTORY-03: the ledger idempotency key mirrored onto the row itself (INV-8). */
-export function grnReceiptIdempotencyKey(poId: string, lineIndex: number, receivedBefore: number, qty: number): string {
-  return `PURCHASE_RECEIPT:goods_receipt:${poId}:${lineIndex}:${receivedBefore}:${qty}`;
-}
 
 function djb2(input: string): string {
   let hash = 5381;
@@ -95,20 +79,6 @@ function applyReceiptToPoItems(
   return { items, status, over };
 }
 
-interface LineMeta {
-  line: GoodsReceiptItem;
-  ledgerId: string;
-  idempotencyKey: string;
-}
-
-function lineMetaFor(poId: string, items: GoodsReceiptItem[]): LineMeta[] {
-  return items.map((line) => ({
-    line,
-    ledgerId: grnReceiptLedgerId(poId, line.lineIndex, line.previouslyReceivedQty, line.qty),
-    idempotencyKey: grnReceiptIdempotencyKey(poId, line.lineIndex, line.previouslyReceivedQty, line.qty),
-  }));
-}
-
 /**
  * INVENTORY-03 (J9 / J12): does `requestLines` exactly describe a receipt that
  * `grn` already recorded AND that is fully reflected in the CURRENT PO state?
@@ -167,125 +137,122 @@ interface GrnApplyContext {
   warehouse: { id: string; name: string }; poId: string; notes: string; nowIso: string;
 }
 
+/** Σ of the APPLIED (non-idempotent-no-op) movement quantity per PO line index. */
+function appliedQtyByLine(plan: readonly MovementPlanEntry[]): Map<number, number> {
+  const byLine = new Map<number, number>();
+  for (const entry of plan) {
+    if (!entry.applied) continue;
+    const idx = Number(entry.input.lineKey);
+    byLine.set(idx, (byLine.get(idx) || 0) + entry.qty);
+  }
+  return byLine;
+}
+
 /**
- * INVENTORY-03 (P1-1 / P1-2 / P1-5 / INV-13): apply ONE goods receipt in a
- * single runTransaction over `stock` + `stock_ledger` + `purchase_orders`.
+ * INVENTORY-05b: the `purchase_orders` side of a goods receipt, run as a
+ * `MovementParticipant` INSIDE the movement engine's single `runTransaction`
+ * (alongside every line's `stock` + `stock_ledger` write).
  *
- *  - Re-reads the PO inside the transaction and INCREMENTS `items[].receivedQty`
- *    (never a stale client array). Concurrent receipts contend on the PO doc
- *    and serialize, so `Σ received` can never pass `ordered` (INV-13); an
- *    over-receipt aborts the whole transaction with zero partial mutation.
- *  - Deterministic per-line `stock_ledger` id: a retried / concurrent-duplicate
- *    line finds its row already present and is a no-op (P1-1).
- *  - `purchase_orders` rules were made lean (INVENTORY-03) so this
- *    3-collection transaction stays under the 1000-expression budget, mirroring
- *    the INVENTORY-01 dispatch transaction.
+ *  - `read` re-fetches the authoritative PO inside the transaction.
+ *  - `validate` (before any write) re-checks `Σ received + applied ≤ ordered`
+ *    per line against that fresh PO → INV-13. Concurrent receipts contend on
+ *    the PO doc and serialize, so an over-receipt aborts the WHOLE transaction
+ *    with zero partial mutation (P1-2). It also re-checks the PO is still
+ *    receivable (P1-5).
+ *  - `commit` INCREMENTS `items[].receivedQty` off the fresh PO (never a stale
+ *    client array) and recomputes the PO status — all in the same transaction
+ *    as the stock movement (P1-5). The engine's `MovementWriter` forwards this
+ *    to `transaction.set`, and rejects any `stock` / `stock_ledger` write.
+ */
+function grnPurchaseOrderParticipant(
+  ctx: GrnApplyContext,
+  capture: { status: PurchaseOrderStatus },
+): MovementParticipant<PurchaseOrderRecord | null> {
+  return {
+    async read(rc) {
+      return rc.get<PurchaseOrderRecord>(COLLECTIONS.PURCHASE_ORDERS, ctx.poId);
+    },
+    validate(po, plan) {
+      if (!po) throw new Error('Purchase order not found');
+      if (!RECEIVABLE_PO_STATUSES.includes(po.status)) {
+        throw new Error('Goods can only be received against Sent or Partially Received purchase orders');
+      }
+      const byLine = appliedQtyByLine(plan);
+      for (const [idx, add] of byLine) {
+        const item = (po.items || [])[idx] as PurchaseOrderItem | undefined;
+        const orderedQty = Number(item?.qty) || 0;
+        const dbReceived = Number(item?.receivedQty) || 0;
+        if (dbReceived + add > orderedQty + RECEIPT_EPSILON) {
+          throw new Error(`Over-receipt rejected for ${item?.product || `line ${idx + 1}`}: ${dbReceived} already received + ${add} exceeds ordered ${orderedQty}`);
+        }
+      }
+      // Report the resulting PO status even for a full idempotent no-op receipt.
+      capture.status = applyReceiptToPoItems(po.items || [], byLine).status;
+    },
+    commit(po, plan, writer) {
+      if (!po) return;
+      const byLine = appliedQtyByLine(plan);
+      const { items, status, over } = applyReceiptToPoItems(po.items || [], byLine);
+      if (over) throw new Error(`Over-receipt rejected for ${over}`);
+      capture.status = status;
+      writer.set(COLLECTIONS.PURCHASE_ORDERS, ctx.poId, {
+        items, status,
+        statusHistory: [...((po.statusHistory as unknown[]) || []), { status, changedAt: ctx.nowIso, changedBy: ctx.receivedBy }],
+        updatedBy: ctx.receivedBy,
+      }, { merge: true });
+    },
+  };
+}
+
+/** Build the `PURCHASE_RECEIPT` movement input for each received line. */
+function receiptMovementInputs(grnId: string, receivedItems: GoodsReceiptItem[], ctx: GrnApplyContext): StockMovementInput[] {
+  return receivedItems.map((line) => ({
+    movementType: 'PURCHASE_RECEIPT' as const,
+    productId: line.productId,
+    warehouseId: ctx.warehouse.id,
+    qty: line.qty,
+    unit: line.unit,
+    sourceType: 'goods_receipt',
+    sourceId: grnId,                    // deterministic — encodes each line's (before, qty)
+    lineKey: line.lineIndex,
+    companyId: ctx.companyId,
+    actorId: ctx.receivedBy,
+    notes: ctx.notes || `Goods receipt ${grnId} against ${ctx.poId}`,
+    // legacy-consumer + reconciliation compatibility (INVENTORY-03 shape)
+    ledgerExtra: {
+      referenceType: 'GoodsReceipt',
+      referenceId: grnId,
+      purchaseOrderId: ctx.poId,
+      product: line.product,
+      warehouse: ctx.warehouse.name,
+      grnLineIndex: line.lineIndex,
+      grnPreviouslyReceivedQty: line.previouslyReceivedQty,
+    },
+  }));
+}
+
+/**
+ * INVENTORY-05b (P1-1 / P1-2 / P1-5 / INV-13): apply ONE goods receipt through
+ * the shared movement engine. `applyStockMovements` runs a SINGLE
+ * `runTransaction` over every line's `stock` + `stock_ledger` write PLUS the
+ * `purchase_orders` participant (receivedQty increment + status + INV-13
+ * re-check). Behaviour-equivalent to the INVENTORY-03 local transaction; the
+ * engine is now the single stock writer (P1-4).
  */
 async function applyGrnReceipt(
   grnId: string,
-  lines: LineMeta[],
+  receivedItems: GoodsReceiptItem[],
   ctx: GrnApplyContext,
 ): Promise<{ status: PurchaseOrderStatus; stockEntries: Array<{ productId: string; stockId: string; ledgerId: string; transactionId: string }>; applied: boolean }> {
-  const { db } = await import('../../../lib/firebase');
-  const { collection, doc, getDocs, query, runTransaction, serverTimestamp, where } = await import('firebase/firestore');
-
-  const summaryIdByLine = new Map<number, string>();
-  for (const meta of lines) {
-    const canonical = stockSummaryId(ctx.companyId, meta.line.productId, ctx.warehouse.id);
-    const matches = await getDocs(query(
-      collection(db, COLLECTIONS.STOCK),
-      where('companyId', '==', ctx.companyId),
-      where('productId', '==', meta.line.productId),
-      where('warehouseId', '==', ctx.warehouse.id),
-    ));
-    const active = matches.docs.filter((entry) => (entry.data() as WorkflowRecord).isDeleted !== true);
-    if (active.length > 1) throw new Error(`Duplicate stock summaries exist for ${meta.line.product}`);
-    summaryIdByLine.set(meta.line.lineIndex, active[0]?.id || canonical);
-  }
-
-  const poRef = doc(db, COLLECTIONS.PURCHASE_ORDERS, ctx.poId);
-  const stockEntries: Array<{ productId: string; stockId: string; ledgerId: string; transactionId: string }> = [];
-
-  const result = await runTransaction(db, async (transaction) => {
-    const poSnap = await transaction.get(poRef);
-    if (!poSnap.exists()) throw new Error('Purchase order not found');
-    const poData = poSnap.data() as PurchaseOrderRecord;
-    if (!RECEIVABLE_PO_STATUSES.includes(poData.status)) {
-      throw new Error('Goods can only be received against Sent or Partially Received purchase orders');
-    }
-    const perLine: Array<{ meta: LineMeta; summaryRef: ReturnType<typeof doc>; ledgerRef: ReturnType<typeof doc>; ledgerExists: boolean; summary: WorkflowRecord | null; stockId: string }> = [];
-    for (const meta of lines) {
-      const stockId = summaryIdByLine.get(meta.line.lineIndex) as string;
-      const summaryRef = doc(db, COLLECTIONS.STOCK, stockId);
-      const ledgerRef = doc(db, COLLECTIONS.STOCK_LEDGER, meta.ledgerId);
-      const ledgerSnap = await transaction.get(ledgerRef);
-      const summarySnap = await transaction.get(summaryRef);
-      perLine.push({ meta, summaryRef, ledgerRef, ledgerExists: ledgerSnap.exists(), summary: summarySnap.exists() ? summarySnap.data() as WorkflowRecord : null, stockId });
-    }
-
-    const appliedByLine = new Map<number, number>();
-    let anythingToApply = false;
-    for (const entry of perLine) {
-      const idx = entry.meta.line.lineIndex;
-      stockEntries.push({ productId: entry.meta.line.productId, stockId: entry.stockId, ledgerId: entry.meta.ledgerId, transactionId: '' });
-      if (entry.ledgerExists) { appliedByLine.set(idx, 0); continue; }
-      const poItem = (poData.items || [])[idx] as PurchaseOrderItem | undefined;
-      const orderedQty = Number(poItem?.qty) || 0;
-      const dbReceived = Number(poItem?.receivedQty) || 0;
-      if (dbReceived + entry.meta.line.qty > orderedQty + RECEIPT_EPSILON) {
-        throw new Error(`Over-receipt rejected for ${entry.meta.line.product}: ${dbReceived} already received + ${entry.meta.line.qty} exceeds ordered ${orderedQty}`);
-      }
-      appliedByLine.set(idx, entry.meta.line.qty);
-      anythingToApply = true;
-    }
-    if (!anythingToApply) return { status: poData.status, applied: false };
-
-    const { items: newPoItems, status: newStatus, over } = applyReceiptToPoItems(poData.items || [], appliedByLine);
-    if (over) throw new Error(`Over-receipt rejected for ${over}`);
-
-    for (const entry of perLine) {
-      const applied = appliedByLine.get(entry.meta.line.lineIndex) || 0;
-      if (entry.ledgerExists || applied <= 0) continue;
-      const existing = entry.summary || {};
-      const summaryBase = { ...existing };
-      delete (summaryBase as WorkflowRecord).available;
-      delete (summaryBase as WorkflowRecord).reserved;
-      const beforeQty = Number((existing as WorkflowRecord).availableQty ?? (existing as WorkflowRecord).available) || 0;
-      const reservedQty = Number((existing as WorkflowRecord).reservedQty ?? (existing as WorkflowRecord).reserved) || 0;
-      const afterQty = beforeQty + applied;
-      const transactionId = genId.generic('TXN');
-      transaction.set(entry.summaryRef, sanitizeFirestoreData({
-        ...summaryBase,
-        id: entry.stockId, companyId: ctx.companyId, ...(ctx.groupId ? { groupId: ctx.groupId } : {}),
-        productId: entry.meta.line.productId, warehouseId: ctx.warehouse.id,
-        availableQty: afterQty, reservedQty, unit: entry.meta.line.unit,
-        updatedBy: ctx.receivedBy, updatedAt: serverTimestamp(),
-        createdAt: (existing as WorkflowRecord).createdAt ?? serverTimestamp(),
-        isDeleted: false,
-      }));
-      transaction.set(entry.ledgerRef, sanitizeFirestoreData({
-        id: entry.meta.ledgerId, companyId: ctx.companyId, ...(ctx.groupId ? { groupId: ctx.groupId } : {}),
-        productId: entry.meta.line.productId, product: entry.meta.line.product,
-        warehouseId: ctx.warehouse.id, warehouse: ctx.warehouse.name,
-        type: 'IN', qty: applied, unit: entry.meta.line.unit, beforeQty, afterQty,
-        transactionId, movementAt: serverTimestamp(),
-        sourceType: 'purchase', sourceId: `purchase_order:${ctx.poId}:goods_receipt:${grnId}:line:${entry.meta.line.lineIndex}`,
-        referenceType: 'GoodsReceipt', referenceId: grnId, purchaseOrderId: ctx.poId, stockId: entry.stockId,
-        idempotencyKey: entry.meta.idempotencyKey,
-        date: ctx.nowIso, notes: ctx.notes || `Goods receipt ${grnId} against ${ctx.poId}`,
-        createdBy: ctx.receivedBy, createdAt: serverTimestamp(), isDeleted: false,
-      }));
-    }
-
-    transaction.set(poRef, sanitizeFirestoreData({
-      items: newPoItems, status: newStatus,
-      statusHistory: [...((poData.statusHistory as unknown[]) || []), { status: newStatus, changedAt: ctx.nowIso, changedBy: ctx.receivedBy }],
-      updatedBy: ctx.receivedBy,
-    }), { merge: true });
-    return { status: newStatus, applied: true };
-  });
-
-  return { status: result.status, stockEntries, applied: result.applied };
+  const capture: { status: PurchaseOrderStatus } = { status: 'PartiallyReceived' };
+  const batch = await applyStockMovements(
+    receiptMovementInputs(grnId, receivedItems, ctx),
+    grnPurchaseOrderParticipant(ctx, capture),
+  );
+  const stockEntries = batch.results.map((r) => ({
+    productId: r.productId, stockId: r.stockId, ledgerId: r.ledgerId, transactionId: '',
+  }));
+  return { status: capture.status, stockEntries, applied: batch.applied };
 }
 
 /**
@@ -315,8 +282,10 @@ async function reconcileMissingGrnDocs(order: PurchaseOrderRecord, warehouse: Wa
   const rebuilt: GoodsReceiptRecord[] = [];
   for (const [grnId, rows] of byGrn) {
     const receivedItems: GoodsReceiptItem[] = rows.map((row) => {
-      const idx = Number(String(row.sourceId || '').split(':line:')[1]);
-      const before = Number(String(row.idempotencyKey || '').split(':')[4]);
+      // INVENTORY-05b: engine rows carry grnLineIndex / grnPreviouslyReceivedQty
+      // directly (ledgerExtra); INVENTORY-03 rows encoded them in sourceId / the key.
+      const idx = Number(row.grnLineIndex ?? String(row.sourceId || '').split(':line:')[1]);
+      const before = Number(row.grnPreviouslyReceivedQty ?? String(row.idempotencyKey || '').split(':')[4]);
       return {
         lineIndex: Number.isFinite(idx) ? idx : 0,
         productId: String(row.productId || ''), product: String(row.product || ''),
@@ -367,132 +336,51 @@ export async function createGoodsReceipt(input: GoodsReceiptFormValues) {
 
   const applyCtx: GrnApplyContext = { companyId, groupId, receivedBy, warehouse: { id: warehouse.id, name: warehouse.name }, poId: order.id, notes, nowIso };
 
+  // ---- RESUME / DEDUPE (configured branch only — needs collection queries):
+  //      rebuild any GRN doc whose atomic stock+PO transaction committed but
+  //      whose doc write failed (J12), then decide whether this request is a
+  //      genuine retry of an already-recorded receipt.
+  let priorGrns: GoodsReceiptRecord[] = [];
   if (firebaseEnv.isConfigured) {
-    // ---- RESUME / DEDUPE: rebuild any GRN doc whose stock+PO transaction
-    //      committed but whose doc write failed (J12), then decide whether this
-    //      request is a genuine retry of an already-recorded receipt.
-    const priorGrns = await reconcileMissingGrnDocs(order, warehouse, receivedBy, groupId);
-
-    let receipt: ReturnType<typeof calculateReceiptState>;
-    try {
-      receipt = calculateReceiptState(order, input.quantities);
-    } catch (err) {
-      // The client's PO snapshot is stale — often because a prior attempt of
-      // THIS exact receipt already committed. If a recorded GRN exactly
-      // accounts for this request against the CURRENT PO state, it IS that
-      // completed attempt: return it (idempotent). Otherwise the error stands.
-      const completed = priorGrns.find((grn) => requestMatchesCompletedGrn(grn, order, requestLines));
-      if (completed) return completed;
-      throw err;
-    }
-
-    const grnId = goodsReceiptDeterministicId(order.id, receipt.receivedItems);
-    const alreadyRecorded = priorGrns.find((grn) => grn.id === grnId);
-    if (alreadyRecorded) return alreadyRecorded;
-
-    for (const line of receipt.receivedItems) {
-      const product = await getOne<WorkflowRecord & { id: string }>(COLLECTIONS.PRODUCTS, line.productId).catch(() => null);
-      if (!product || product.isDeleted === true) throw new Error(`Product ${line.product} does not exist or has been removed`);
-      if (companyId && product.companyId && product.companyId !== companyId) throw new Error(`Product ${line.product} belongs to a different company`);
-    }
-
-    const lineMeta = lineMetaFor(order.id, receipt.receivedItems);
-
-    // ---- ATOMIC: stock summaries + ledgers + PO increment (INV-13, P1-1/2/5).
-    const applied = await applyGrnReceipt(grnId, lineMeta, applyCtx);
-
-    // ---- GRN doc (deterministic id; overwrite-safe). Written after the atomic
-    //      transaction; a failure here is recovered by reconcileMissingGrnDocs
-    //      on the next call.
-    const record = buildGrnRecord({ grnId, order, warehouse, input, receivedBy, receivedItems: receipt.receivedItems, stockEntries: applied.stockEntries, stockApplied: lineMeta.map((m) => m.ledgerId), companyId, groupId }) as GoodsReceiptRecord;
-    await createDocWithId(COLLECTIONS.GOODS_RECEIPTS, grnId, sanitizeFirestoreData(record));
-
-    void propagateCaseIdFromChain('goods_receipts', grnId);
-    await logActivity('Goods Receipts', 'Received', grnId, { purchaseOrderId: order.id, warehouseId: warehouse.id, entityName: grnId, actionLabel: `Received goods against ${order.id}` });
-    notifyUsers(
-      [...(await usersByRole('Procurement')), ...(await usersByRole('Warehouse'))],
-      NotificationType.INVENTORY_UPDATED, 'Goods received',
-      `${grnId} received against ${order.id}; purchase order is ${applied.status}.`,
-      'goods_receipt', grnId, resolveWriteCompanyId() || order.companyId || '',
-    );
-    return record;
+    priorGrns = await reconcileMissingGrnDocs(order, warehouse, receivedBy, groupId);
   }
 
-  // ---- Demo / non-configured branch: same guards, sequential + idempotent
-  //      (best-effort). Order: stock (summary + ledger) per line -> PO update ->
-  //      GRN doc LAST as the "fully applied" marker (resumable on retry).
-  const receipt = calculateReceiptState(order, input.quantities);
+  let receipt: ReturnType<typeof calculateReceiptState>;
+  try {
+    receipt = calculateReceiptState(order, input.quantities);
+  } catch (err) {
+    // The client's PO snapshot is stale — often because a prior attempt of THIS
+    // exact receipt already committed. If a recorded GRN exactly accounts for
+    // this request against the CURRENT PO state, it IS that completed attempt:
+    // return it (idempotent). Otherwise the error stands.
+    const completed = priorGrns.find((grn) => requestMatchesCompletedGrn(grn, order, requestLines));
+    if (completed) return completed;
+    throw err;
+  }
+
+  const grnId = goodsReceiptDeterministicId(order.id, receipt.receivedItems);
+  const alreadyRecorded = priorGrns.find((grn) => grn.id === grnId)
+    || (firebaseEnv.isConfigured ? undefined : await getOne<GoodsReceiptRecord>(COLLECTIONS.GOODS_RECEIPTS, grnId).catch(() => null));
+  if (alreadyRecorded) return alreadyRecorded;
+
   for (const line of receipt.receivedItems) {
     const product = await getOne<WorkflowRecord & { id: string }>(COLLECTIONS.PRODUCTS, line.productId).catch(() => null);
     if (!product || product.isDeleted === true) throw new Error(`Product ${line.product} does not exist or has been removed`);
     if (companyId && product.companyId && product.companyId !== companyId) throw new Error(`Product ${line.product} belongs to a different company`);
   }
-  const grnId = goodsReceiptDeterministicId(order.id, receipt.receivedItems);
-  const lineMeta = lineMetaFor(order.id, receipt.receivedItems);
 
-  const existingGrn = await getOne<GoodsReceiptRecord>(COLLECTIONS.GOODS_RECEIPTS, grnId).catch(() => null);
-  if (existingGrn) return existingGrn;
+  // ---- ATOMIC (INV-13, P1-1/2/5): every line's stock + stock_ledger write PLUS
+  //      the PO receivedQty/status increment, in ONE runTransaction, through the
+  //      shared movement engine (INVENTORY-05b — engine is the single writer).
+  const applied = await applyGrnReceipt(grnId, receipt.receivedItems, applyCtx);
+  const stockApplied = applied.stockEntries.map((entry) => entry.ledgerId);
 
-  const freshPo = (await getOne<PurchaseOrderRecord>(COLLECTIONS.PURCHASE_ORDERS, order.id).catch(() => null)) || order;
-  const poItems = (freshPo.items || order.items) as PurchaseOrderItem[];
-  const appliedByLine = new Map<number, number>();
-  const stockEntries: Array<{ productId: string; stockId: string; ledgerId: string; transactionId: string }> = [];
-  const stockApplied: string[] = [];
-
-  for (const meta of lineMeta) {
-    const idx = meta.line.lineIndex;
-    stockApplied.push(meta.ledgerId);
-    const existingLedger = await getOne<WorkflowRecord & { id: string }>(COLLECTIONS.STOCK_LEDGER, meta.ledgerId).catch(() => null);
-    if (existingLedger) {
-      appliedByLine.set(idx, 0);
-      stockEntries.push({ productId: meta.line.productId, stockId: '', ledgerId: meta.ledgerId, transactionId: '' });
-      continue;
-    }
-    const poItem = poItems[idx] || ({} as PurchaseOrderItem);
-    const orderedQty = Number(poItem.qty) || 0;
-    const dbReceived = Number(poItem.receivedQty) || 0;
-    if (dbReceived + meta.line.qty > orderedQty + RECEIPT_EPSILON) {
-      throw new Error(`Over-receipt rejected for ${meta.line.product}: ${dbReceived} already received + ${meta.line.qty} exceeds ordered ${orderedQty}`);
-    }
-    const matchingStock = (await getAll<WorkflowRecord & { id: string }>(COLLECTIONS.STOCK)).filter((row) =>
-      row.companyId === companyId && row.productId === meta.line.productId && row.warehouseId === warehouse.id);
-    const summaryId = resolveStockSummaryDocumentId(stockSummaryId(companyId, meta.line.productId, warehouse.id), matchingStock);
-    const existing = await getOne<WorkflowRecord & { id: string }>(COLLECTIONS.STOCK, summaryId).catch(() => null);
-    const beforeQty = Number((existing as WorkflowRecord | null)?.availableQty ?? (existing as WorkflowRecord | null)?.available) || 0;
-    const reservedQty = Number((existing as WorkflowRecord | null)?.reservedQty ?? (existing as WorkflowRecord | null)?.reserved) || 0;
-    const afterQty = beforeQty + meta.line.qty;
-    const transactionId = genId.generic('TXN');
-    await createDocWithId(COLLECTIONS.STOCK, summaryId, sanitizeFirestoreData({
-      ...(existing || {}),
-      id: summaryId, companyId, ...(groupId ? { groupId } : {}),
-      productId: meta.line.productId, warehouseId: warehouse.id,
-      availableQty: afterQty, reservedQty, unit: meta.line.unit,
-      updatedBy: receivedBy, isDeleted: false,
-    }));
-    await createDocWithId(COLLECTIONS.STOCK_LEDGER, meta.ledgerId, sanitizeFirestoreData({
-      id: meta.ledgerId, companyId, ...(groupId ? { groupId } : {}),
-      productId: meta.line.productId, product: meta.line.product,
-      warehouseId: warehouse.id, warehouse: warehouse.name,
-      type: 'IN', qty: meta.line.qty, unit: meta.line.unit, beforeQty, afterQty,
-      transactionId, movementAt: nowIso,
-      sourceType: 'purchase', sourceId: `purchase_order:${order.id}:goods_receipt:${grnId}:line:${idx}`,
-      referenceType: 'GoodsReceipt', referenceId: grnId, purchaseOrderId: order.id, stockId: summaryId,
-      idempotencyKey: meta.idempotencyKey,
-      date: nowIso, notes: notes || `Goods receipt ${grnId} against ${order.id}`,
-      createdBy: receivedBy, isDeleted: false,
-    }));
-    appliedByLine.set(idx, meta.line.qty);
-    stockEntries.push({ productId: meta.line.productId, stockId: summaryId, ledgerId: meta.ledgerId, transactionId });
-  }
-
-  const { items: newPoItems, status: newStatus, over } = applyReceiptToPoItems(poItems, appliedByLine);
-  if (over) throw new Error(`Over-receipt rejected for ${over}`);
-  await updateDocById(COLLECTIONS.PURCHASE_ORDERS, order.id, sanitizeFirestoreData({
-    items: newPoItems, status: newStatus,
-    statusHistory: [...((freshPo.statusHistory as unknown[]) || []), { status: newStatus, changedAt: nowIso, changedBy: receivedBy }],
-  }));
-
-  const record = buildGrnRecord({ grnId, order, warehouse, input, receivedBy, receivedItems: receipt.receivedItems, stockEntries, stockApplied, companyId, groupId }) as GoodsReceiptRecord;
+  // ---- GRN doc (deterministic id; overwrite-safe). Written after the atomic
+  //      transaction; a failure here is recovered by reconcileMissingGrnDocs.
+  const record = buildGrnRecord({
+    grnId, order, warehouse, input, receivedBy,
+    receivedItems: receipt.receivedItems, stockEntries: applied.stockEntries, stockApplied, companyId, groupId,
+  }) as GoodsReceiptRecord;
   await createDocWithId(COLLECTIONS.GOODS_RECEIPTS, grnId, sanitizeFirestoreData(record));
 
   void propagateCaseIdFromChain('goods_receipts', grnId);
@@ -500,7 +388,7 @@ export async function createGoodsReceipt(input: GoodsReceiptFormValues) {
   notifyUsers(
     [...(await usersByRole('Procurement')), ...(await usersByRole('Warehouse'))],
     NotificationType.INVENTORY_UPDATED, 'Goods received',
-    `${grnId} received against ${order.id}; purchase order is ${newStatus}.`,
+    `${grnId} received against ${order.id}; purchase order is ${applied.status}.`,
     'goods_receipt', grnId, resolveWriteCompanyId() || order.companyId || '',
   );
   return record;

@@ -57,8 +57,11 @@ function djb2(input: string): string {
 type Line = { lineIndex: number; productId: string; product: string; qty: number; previouslyReceivedQty: number; unit: string };
 const grnDocId = (poId: string, lines: Line[]) =>
   `GRN-${encodeURIComponent(poId)}-${djb2(`${poId}#${lines.map((l) => `L${l.lineIndex}:B${l.previouslyReceivedQty}:Q${l.qty}`).sort().join('|')}`)}`;
-const grnLedgerId = (poId: string, lineIndex: number, before: number, qty: number) =>
-  `STKIN-GRN-${encodeURIComponent(poId)}-L${lineIndex}-B${before}-Q${qty}`;
+// INVENTORY-05b: the movement-engine idempotency key + deterministic (injective)
+// ledger doc id. `grnId` already encodes each line's (before, qty), so two
+// submissions from the same PO snapshot produce the same key.
+const grnMovementKey = (grnId: string, lineIndex: number) => `PURCHASE_RECEIPT:goods_receipt:${grnId}:${lineIndex}`;
+const grnLedgerId = (grnId: string, lineIndex: number) => `STKMV-${encodeURIComponent(grnMovementKey(grnId, lineIndex))}`;
 
 async function seed(opts: { poItems: Array<{ productId: string; qty: number; receivedQty: number }>; poStatus?: string; existingSummaries?: Array<{ productId: string; warehouseId: string; companyId: string; groupId: string; availableQty: number }> }) {
   await env.withSecurityRulesDisabled(async (ctx) => {
@@ -102,12 +105,14 @@ afterAll(async () => { await env.cleanup(); });
 const dbFor = (u: { uid: string; email: string }) => env.authenticatedContext(u.uid, { email: u.email }).firestore();
 
 /**
- * Mirrors goodsReceiptWorkflow.createGoodsReceipt (configured branch):
+ * INVENTORY-05b: mirrors goodsReceiptWorkflow.createGoodsReceipt after the
+ * movement-engine migration —
  *   reconcile-scan (goods_receipts + stock_ledger by purchaseOrderId) -> ONE
- *   atomic runTransaction over stock + stock_ledger + purchase_orders (INV-13,
- *   P1-1/2/5) -> GRN doc via setDoc. The `purchase_orders` update rule was made
- *   lean in INVENTORY-03 so the 3-collection transaction stays under the
- *   1000-expression budget (like the INVENTORY-01 dispatch transaction).
+ *   atomic runTransaction: engine reads every line's stock_ledger + stock,
+ *   the `purchase_orders` PARTICIPANT reads the PO, validates INV-13, then the
+ *   engine writes stock + stock_ledger and the participant writes the PO
+ *   receivedQty/status — all committed together (Plan §4.1 / §8) -> GRN doc via
+ *   setDoc. NO firestore.rules change from INVENTORY-03.
  */
 async function grnReceiptTxn(
   db: ReturnType<typeof dbFor>,
@@ -119,7 +124,8 @@ async function grnReceiptTxn(
   const grnId = grnDocId(PO_ID, opts.lines);
 
   // RECONCILE — rebuild any GRN doc whose atomic stock+PO transaction committed
-  // but whose doc write failed (J12), from the orphan ledger rows.
+  // but whose doc write failed (J12), from the orphan ledger rows (which now
+  // carry grnLineIndex / grnPreviouslyReceivedQty directly — INVENTORY-05b).
   const priorDocs = await getDocs(query(collection(db, 'goods_receipts'), where('companyId', '==', companyId), where('purchaseOrderId', '==', PO_ID)));
   const docIds = new Set(priorDocs.docs.map((d) => d.id));
   const priorLedgers = await getDocs(query(collection(db, 'stock_ledger'), where('companyId', '==', companyId), where('purchaseOrderId', '==', PO_ID)));
@@ -129,7 +135,7 @@ async function grnReceiptTxn(
     await setDoc(doc(db, 'goods_receipts', orphanId), {
       id: orphanId, goodsReceiptId: orphanId, companyId, groupId, purchaseOrderId: PO_ID, vendorId: 'VEN-1', vendorName: 'Vendor',
       warehouseId, warehouseName: 'WH', receivedDate: '2026-07-10', receivedBy: opts.actorId, notes: '',
-      receivedItems: rows.map((r) => ({ lineIndex: Number(String(r.sourceId || '').split(':line:')[1]) || 0, productId: r.productId, product: r.product, qty: r.qty, unit: r.unit, orderedQty: 0, previouslyReceivedQty: Number(String(r.idempotencyKey || '').split(':')[4]) || 0 })),
+      receivedItems: rows.map((r) => ({ lineIndex: Number(r.grnLineIndex) || 0, productId: r.productId, product: r.product, qty: r.qty, unit: r.unit, orderedQty: 0, previouslyReceivedQty: Number(r.grnPreviouslyReceivedQty) || 0 })),
       stockEntries: [], stockApplied: rows.map((r) => r.id),
     });
     docIds.add(orphanId);
@@ -144,55 +150,67 @@ async function grnReceiptTxn(
   const poRef = doc(db, 'purchase_orders', PO_ID);
   const grnRef = doc(db, 'goods_receipts', grnId);
 
-  // ATOMIC — stock summaries + ledgers + PO increment.
+  // ATOMIC — engine (stock + stock_ledger) + PO participant, ONE runTransaction.
   const t = await runTransaction(db, async (tx) => {
-    const poSnap = await tx.get(poRef);
-    if (!poSnap.exists()) throw new Error('po not found');
-    const po = poSnap.data() as Record<string, any>;
-    if (!['Sent', 'PartiallyReceived'].includes(String(po.status))) throw new Error('not receivable');
-
+    // READ PHASE — engine ledger+stock reads, then participant PO read.
     const reads: Array<{ l: Line; stockRef: ReturnType<typeof doc>; ledgerRef: ReturnType<typeof doc>; ledgerExists: boolean; stock: Record<string, any> | null; stockId: string }> = [];
     for (const l of opts.lines) {
       const stockId = `SUM-${companyId}-${l.productId}-${warehouseId}`;
-      const stockRef = doc(db, 'stock', stockId);
-      const ledgerRef = doc(db, 'stock_ledger', grnLedgerId(PO_ID, l.lineIndex, l.previouslyReceivedQty, l.qty));
+      const ledgerRef = doc(db, 'stock_ledger', grnLedgerId(grnId, l.lineIndex));
       const ledgerSnap = await tx.get(ledgerRef);
+      const stockRef = doc(db, 'stock', stockId);
       const stockSnap = await tx.get(stockRef);
       reads.push({ l, stockRef, ledgerRef, ledgerExists: ledgerSnap.exists(), stock: stockSnap.exists() ? stockSnap.data() as Record<string, any> : null, stockId });
     }
+    const poSnap = await tx.get(poRef);                         // participant.read
+    if (!poSnap.exists()) throw new Error('po not found');
+    const po = poSnap.data() as Record<string, any>;
 
+    // PLAN
     const applyByLine = new Map<number, number>();
     let anything = false;
     for (const r of reads) {
       if (r.ledgerExists) { applyByLine.set(r.l.lineIndex, 0); continue; }
-      const item = (po.items || [])[r.l.lineIndex] || {};
-      const ordered = Number(item.qty) || 0;
-      const dbReceived = Number(item.receivedQty) || 0;
-      if (dbReceived + r.l.qty > ordered + 1e-6) throw new Error(`over-receipt line ${r.l.lineIndex}`);
       applyByLine.set(r.l.lineIndex, r.l.qty);
       anything = true;
     }
+
+    // participant.validate — receivable + INV-13 over-receipt against the fresh PO
+    if (!['Sent', 'PartiallyReceived'].includes(String(po.status))) throw new Error('not receivable');
+    for (const [idx, add] of applyByLine) {
+      if (add <= 0) continue;
+      const item = (po.items || [])[idx] || {};
+      if ((Number(item.receivedQty) || 0) + add > (Number(item.qty) || 0) + 1e-6) throw new Error(`over-receipt line ${idx}`);
+    }
     if (!anything) return { alreadyReceived: true, status: String(po.status), applied: 0 };
 
-    const newItems = (po.items || []).map((it: Record<string, any>, idx: number) => {
-      const rec = (Number(it.receivedQty) || 0) + (applyByLine.get(idx) || 0);
-      return { ...it, receivedQty: rec, remainingQty: Math.max(0, (Number(it.qty) || 0) - rec) };
-    });
-    const newStatus = newItems.every((it: Record<string, any>) => (it.remainingQty || 0) <= 1e-6) ? 'Received' : 'PartiallyReceived';
-
+    // WRITE PHASE — engine owns stock + stock_ledger
     let applied = 0;
     for (const r of reads) {
       const add = applyByLine.get(r.l.lineIndex) || 0;
       if (r.ledgerExists || add <= 0) continue;
       const existing = r.stock || {};
       const base = { ...existing }; delete (base as Record<string, unknown>).available; delete (base as Record<string, unknown>).reserved;
-      const before = Number(existing.availableQty ?? existing.available) || 0;
+      const before = Number(existing.onHandQty ?? existing.availableQty ?? existing.available) || 0;
       const after = before + add;
-      tx.set(r.stockRef, { ...base, id: r.stockId, companyId, groupId, productId: r.l.productId, warehouseId, availableQty: after, reservedQty: Number(existing.reservedQty ?? 0) || 0, unit: r.l.unit, updatedBy: opts.actorId, updatedAt: serverTimestamp(), createdAt: existing.createdAt ?? serverTimestamp(), isDeleted: false });
-      tx.set(r.ledgerRef, { id: r.ledgerRef.id, companyId, groupId, productId: r.l.productId, product: r.l.product, warehouseId, warehouse: 'WH', type: 'IN', qty: add, unit: r.l.unit, beforeQty: before, afterQty: after, transactionId: `TXN-${r.ledgerRef.id}`, movementAt: serverTimestamp(), sourceType: 'purchase', sourceId: `purchase_order:${PO_ID}:goods_receipt:${grnId}:line:${r.l.lineIndex}`, referenceType: 'GoodsReceipt', referenceId: grnId, purchaseOrderId: PO_ID, stockId: r.stockId, idempotencyKey: `PURCHASE_RECEIPT:goods_receipt:${PO_ID}:${r.l.lineIndex}:${r.l.previouslyReceivedQty}:${r.l.qty}`, date: new Date().toISOString(), notes: 'x', createdBy: opts.actorId, createdAt: serverTimestamp(), isDeleted: false });
+      tx.set(r.stockRef, { ...base, id: r.stockId, companyId, groupId, productId: r.l.productId, warehouseId, unit: r.l.unit, onHandQty: after, reservedQty: 0, availableQty: after, updatedBy: opts.actorId, updatedAt: serverTimestamp(), createdAt: existing.createdAt ?? serverTimestamp(), isDeleted: false });
+      tx.set(r.ledgerRef, {
+        id: r.ledgerRef.id, companyId, groupId, productId: r.l.productId, product: r.l.product, warehouseId, warehouse: 'WH', stockId: r.stockId, unit: r.l.unit,
+        movementType: 'PURCHASE_RECEIPT', direction: 'IN', qty: add, onHandBefore: before, onHandAfter: after, reservedBefore: 0, reservedAfter: 0,
+        sourceType: 'goods_receipt', sourceId: grnId, idempotencyKey: grnMovementKey(grnId, r.l.lineIndex),
+        actorId: opts.actorId, transactionId: `TXN-${r.ledgerRef.id}`, movementAt: serverTimestamp(), createdAt: serverTimestamp(), createdBy: opts.actorId, isDeleted: false,
+        type: 'IN', referenceType: 'GoodsReceipt', referenceId: grnId, purchaseOrderId: PO_ID, beforeQty: before, afterQty: after,
+        grnLineIndex: r.l.lineIndex, grnPreviouslyReceivedQty: r.l.previouslyReceivedQty, date: new Date().toISOString(), notes: 'x',
+      });
       applied += add;
     }
 
+    // participant.commit — the engine's guarded writer forwards this to the SAME txn
+    const newItems = (po.items || []).map((it: Record<string, any>, idx: number) => {
+      const rec = (Number(it.receivedQty) || 0) + (applyByLine.get(idx) || 0);
+      return { ...it, receivedQty: rec, remainingQty: Math.max(0, (Number(it.qty) || 0) - rec) };
+    });
+    const newStatus = newItems.every((it: Record<string, any>) => (it.remainingQty || 0) <= 1e-6) ? 'Received' : 'PartiallyReceived';
     tx.set(poRef, { items: newItems, status: newStatus, statusHistory: [...(po.statusHistory || []), { status: newStatus, changedAt: new Date().toISOString(), changedBy: opts.actorId }], updatedBy: opts.actorId }, { merge: true });
     return { alreadyReceived: false, status: newStatus, applied };
   });
@@ -203,8 +221,8 @@ async function grnReceiptTxn(
       id: grnId, goodsReceiptId: grnId, companyId, groupId, purchaseOrderId: PO_ID, vendorId: 'VEN-1', vendorName: 'Vendor',
       warehouseId, warehouseName: 'WH', receivedDate: '2026-07-10', receivedBy: opts.actorId, notes: '',
       receivedItems: opts.lines.map((l) => ({ lineIndex: l.lineIndex, productId: l.productId, product: l.product, qty: l.qty, unit: l.unit, orderedQty: 0, previouslyReceivedQty: l.previouslyReceivedQty })),
-      stockEntries: opts.lines.map((l) => ({ productId: l.productId, stockId: `SUM-${companyId}-${l.productId}-${warehouseId}`, ledgerId: grnLedgerId(PO_ID, l.lineIndex, l.previouslyReceivedQty, l.qty), transactionId: '' })),
-      stockApplied: opts.lines.map((l) => grnLedgerId(PO_ID, l.lineIndex, l.previouslyReceivedQty, l.qty)),
+      stockEntries: opts.lines.map((l) => ({ productId: l.productId, stockId: `SUM-${companyId}-${l.productId}-${warehouseId}`, ledgerId: grnLedgerId(grnId, l.lineIndex), transactionId: '' })),
+      stockApplied: opts.lines.map((l) => grnLedgerId(grnId, l.lineIndex)),
     });
   }
   return { alreadyReceived: t.alreadyReceived, grnId, applied: t.applied, status: t.status };
@@ -378,7 +396,7 @@ describe('INVENTORY-03 — Goods Receipt transaction (emulator)', () => {
     const db = dbFor(PROC);
     await assertFails(updateDoc(doc(db, 'goods_receipts', r.grnId), { notes: 'tampered' }));
     await assertFails(deleteDoc(doc(db, 'goods_receipts', r.grnId)));
-    const ledgerId = grnLedgerId(PO_ID, 0, 0, 10);
+    const ledgerId = grnLedgerId(r.grnId, 0);
     await assertFails(updateDoc(doc(db, 'stock_ledger', ledgerId), { qty: 999 }));
     await assertFails(deleteDoc(doc(db, 'stock_ledger', ledgerId)));
   });
