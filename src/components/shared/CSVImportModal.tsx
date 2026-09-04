@@ -38,7 +38,10 @@ const CONFIG = {
   },
 } as const;
 
-function parseCSV(input: string): CsvRow[] {
+// INVENTORY-10 (§10c): exported so BulkStockAdjustModal (a distinct
+// quantities-import use case, not a `collection`-based master-data import)
+// reuses this exact CSV parser instead of a second implementation.
+export function parseCSV(input: string): CsvRow[] {
   const rows: string[][] = [];
   let quoted = false;
   for (let row = 0, col = 0, i = 0; i < input.length; i += 1) {
