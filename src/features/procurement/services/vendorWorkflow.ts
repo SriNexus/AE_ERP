@@ -3,6 +3,8 @@ import { createDocWithId, deleteDocById, genId, getAll, getOne, updateDocById } 
 import { canDo } from '../../../lib/permissions';
 import { useAppStore } from '../../../store/useAppStore';
 import { logActivity } from '../../../lib/workflow';
+import { assertMasterDataIdAvailable } from '../../inventory/hooks/useInventory';
+import { checkVendorDeleteGuard } from '../../../lib/inventory/masterDataGuards';
 import type { VendorFormValues, VendorRecord } from '../types';
 
 const GSTIN_PATTERN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
@@ -37,6 +39,7 @@ export async function createVendor(input: VendorFormValues) {
   await ensureUniqueGstin(data.gstin);
   const state = useAppStore.getState();
   const id = genId.generic('VEN');
+  await assertMasterDataIdAvailable(COLLECTIONS.VENDORS, id, 'Vendor');
   const vendor = { ...data, id, vendorId: id, createdBy: state.user?.id || '' };
   await createDocWithId(COLLECTIONS.VENDORS, id, vendor);
   await logActivity('Vendors', 'Created', id, { entityName: data.name, actionLabel: 'Created vendor master record' });
@@ -58,6 +61,8 @@ export async function deleteVendor(id: string) {
   if (!canDo('delete', 'vendors')) throw new Error('You do not have permission to delete vendors');
   const existing = await getOne<VendorRecord>(COLLECTIONS.VENDORS, id);
   if (!existing) throw new Error('Vendor not found');
+  const guard = await checkVendorDeleteGuard(id);
+  if (guard.blocked) throw new Error(guard.reason || 'This vendor cannot be deleted right now.');
   await deleteDocById(COLLECTIONS.VENDORS, id);
   await logActivity('Vendors', 'Deleted', id, { entityName: existing.name, actionLabel: 'Deleted vendor master record' });
 }

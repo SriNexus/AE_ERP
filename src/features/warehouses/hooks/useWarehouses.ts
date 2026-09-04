@@ -4,6 +4,8 @@ import { logCreate, logUpdate, logDelete } from '../../../lib/auditLogger';
 import { COLLECTIONS } from '../../../lib/firebase';
 import { useAppStore, useCurrentUser } from '../../../store/useAppStore';
 import { queryKeys } from '../../../lib/queryKeys';
+import { assertMasterDataIdAvailable } from '../../inventory/hooks/useInventory';
+import { checkWarehouseDeleteGuard } from '../../../lib/inventory/masterDataGuards';
 import type { WarehouseForm } from '../types';
 import toast from 'react-hot-toast';
 
@@ -36,6 +38,7 @@ export function useSaveWarehouse(editId: string | null, onSuccess: () => void) {
         await logUpdate('warehouse', editId, existing ? { ...existing } : {}, { ...data }, 'warehouses');
       } else {
         const id = genId.generic('WH');
+        await assertMasterDataIdAvailable(COLLECTIONS.WAREHOUSES, id, 'Warehouse');
         await createDocWithId(COLLECTIONS.WAREHOUSES, id, { ...data, id, createdBy: user.id });
         // F-16 (Phase 0): audit warehouse creation.
         await logCreate('warehouse', id, { ...data, id }, 'warehouses');
@@ -56,6 +59,8 @@ export function useDeleteWarehouse() {
   const keys = queryKeys.forCompany(activeCompanyId);
   return useMutation({
     mutationFn: async (id: string) => {
+      const guard = await checkWarehouseDeleteGuard(id);
+      if (guard.blocked) throw new Error(guard.reason || 'This warehouse cannot be deleted right now.');
       await deleteDocById(COLLECTIONS.WAREHOUSES, id);
       // F-16 (Phase 0): audit warehouse deletion (soft delete).
       await logDelete('warehouse', id, undefined, 'warehouses');
