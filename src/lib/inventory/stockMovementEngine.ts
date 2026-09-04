@@ -420,9 +420,21 @@ export async function applyStockMovements(
   }
   const nowIso = new Date().toISOString();
 
-  return firebaseEnv.isConfigured
-    ? applyBatchConfigured(preps, companyId, participant, nowIso)
-    : applyBatchDemo(preps, companyId, participant, nowIso);
+  const batch = firebaseEnv.isConfigured
+    ? await applyBatchConfigured(preps, companyId, participant, nowIso)
+    : await applyBatchDemo(preps, companyId, participant, nowIso);
+
+  // INVENTORY-10 (§10d) — best-effort, AFTER the transaction has already
+  // committed; the core txn logic above is completely untouched. Awaited
+  // (not fire-and-forget) so it is deterministic for callers/tests, but its
+  // own internal try/catch means a notification failure can never surface as
+  // an error from a movement that already committed successfully.
+  if (batch.applied) {
+    const { checkLowStockAndNotify } = await import('./lowStockAlerts');
+    await checkLowStockAndNotify(batch.results);
+  }
+
+  return batch;
 }
 
 /* ── configured branch — one real runTransaction ── */
