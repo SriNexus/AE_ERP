@@ -791,7 +791,10 @@ service cloud.firestore {
       // (Firestore evaluates every matching `match` block for a path and
       // allows the request if ANY grants it — a dedicated block alone does
       // NOT suppress the generic fallback from ALSO applying).
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
+      // INVENTORY-07: 'stock_reservations' has its own dedicated block below and
+      // MUST be excluded here, or the generic fallback would additively grant any
+      // same-company active user create/update access to reservation docs.
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
     }
 
     match /companies/{companyId} {
@@ -1461,7 +1464,7 @@ service cloud.firestore {
         && warehouseIdUnchanged()
         && sameWarehouse(resource.data)
         && (
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['availableQty', 'reservedQty'])
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['availableQty', 'reservedQty', 'onHandQty'])
           // INVENTORY-03 (P1-3 / P2-6 resolution): the canonical `stock`
           // write-role list. A quantity change on an EXISTING summary is
           // limited to inventory-operational roles —
@@ -1484,7 +1487,27 @@ service cloud.firestore {
           // into this single alternation both adds Procurement AND reduces
           // cost. warehouseActorCanUpdate() above already handles the
           // owner / Super Admin bypass before this clause is reached.
+          //
+          // Ordered CHEAPEST-FIRST for the E7 budget: this single operational
+          // role-match short-circuits for every GRN / dispatch / manual /
+          // reconcile write (unchanged cost), so those hot paths never reach
+          // the INVENTORY-07 branch below.
           || actorRoleMatches('.*Warehouse.*|.*Operations.*|.*Procurement.*|Admin|GroupAdmin')
+          // INVENTORY-07: a RESERVATION-ONLY change — onHandQty untouched,
+          // reservedQty is a number within [0, onHandQty] (INV-2 + INV-3 at the
+          // rules layer) — is additionally allowed for Sales / Accounts, because
+          // reserve-on-PI-paid (`markPIAsPaid`) and cancel-release run as those
+          // roles. A physical quantity change (onHandQty in the diff) still
+          // requires the operational role list above; a hand-poke of a summary
+          // that has no `onHandQty` field fails the `is number` guard.
+          || (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['onHandQty'])
+            && request.resource.data.reservedQty is number
+            && request.resource.data.reservedQty >= 0
+            && request.resource.data.onHandQty is number
+            && request.resource.data.reservedQty <= request.resource.data.onHandQty
+            && actorRoleMatches('.*Sales.*|.*Account.*')
+          )
         );
       allow delete: if false;
     }
@@ -1517,6 +1540,54 @@ service cloud.firestore {
         && warehouseBelongsToCompany(request.resource.data)
         && sameWarehouse(request.resource.data);
       allow update, delete: if false;
+    }
+
+    match /stock_reservations/{reservationId} {
+      // INVENTORY-07 — sales reservation ledger. Every doc is written ONLY as a
+      // MovementParticipant inside the stock movement engine's single
+      // transaction (reserve on PI paid, consume on dispatch, release on
+      // cancel) — the engine stays the sole writer of `stock` / `stock_ledger`;
+      // the participant may touch only this collection + the order/dispatch doc.
+      //
+      // Company + group + warehouse isolation via the same warehouse-scoped
+      // composites as `stock` / `stock_ledger` / `dispatch`. `resource == null`
+      // guard: the participant reads the deterministic reservation doc id
+      // (RSV-{enc(idempotencyKey)}) BEFORE writing, for the in-transaction
+      // idempotency check. Immutable delete; updates are limited to the
+      // consume/release accounting fields and never re-point identity.
+      allow read: if actorIsActive() && (
+        resource == null
+        || ((canReadCompanyScoped() || groupAdminCanRead(resource.data)) && sameWarehouse(resource.data))
+      );
+      allow create: if actorIsActive()
+        && warehouseActorCanCreate(request.resource.data)
+        && warehouseBelongsToCompany(request.resource.data)
+        && sameWarehouse(request.resource.data)
+        && request.resource.data.orderId is string
+        && request.resource.data.productId is string
+        && request.resource.data.piId is string
+        && request.resource.data.qtyReserved is number
+        && request.resource.data.qtyReserved >= 0
+        && request.resource.data.qtyConsumed == 0
+        && request.resource.data.qtyReleased == 0
+        // reserve-on-PI-paid runs as Sales / Accounts; dispatch/warehouse roles
+        // and the tenant admins may also create (data repair / manual reserve).
+        && actorRoleMatches('.*Sales.*|.*Account.*|.*Warehouse.*|.*Operations.*|.*Procurement.*|Admin|GroupAdmin');
+      allow update: if actorIsActive()
+        && warehouseActorCanUpdate(resource.data)
+        && warehouseIdUnchanged()
+        && sameWarehouse(resource.data)
+        // identity is immutable — an update can only move the accounting fields.
+        && request.resource.data.orderId == resource.data.orderId
+        && request.resource.data.productId == resource.data.productId
+        && request.resource.data.piId == resource.data.piId
+        && request.resource.data.qtyReserved == resource.data.qtyReserved
+        && request.resource.data.qtyConsumed >= resource.data.qtyConsumed
+        && request.resource.data.qtyReleased >= resource.data.qtyReleased
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+             ['qtyConsumed', 'qtyReleased', 'status', 'updatedAt', 'updatedBy', 'lastMovementAt', 'lastMovementLedgerId', 'isDeleted']
+           );
+      allow delete: if false;
     }
 
     match /notifications/{notificationId} {

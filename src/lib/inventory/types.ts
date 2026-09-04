@@ -72,10 +72,25 @@ export interface StockMovementInput {
   reasonCode?: string;
   notes?: string;
   /**
-   * INV-3 / INV-4 gate. FALSE for Phases 05–06 (`availableQty == onHandQty`,
-   * reservedQty stays 0). Phase 07 flips this on.
+   * INV-3 / INV-4 gate. Phases 05–06: FALSE (`availableQty == onHandQty`,
+   * reservedQty stays 0). Phase 07: defaults to the global `reservationsEnabled`
+   * flag (`reservationConfig.isReservationsEnabled()`) when omitted; an explicit
+   * value still overrides (tests exercise both states).
    */
   reservationsEnabled?: boolean;
+  /**
+   * INVENTORY-07 — clamp this movement's applied quantity to what the stock
+   * summary can actually support, INSIDE the engine transaction (never
+   * pre-computed by the caller — the concurrency boundary is the summary txn):
+   *   SALES_RESERVE  → grant `min(qty, onHandQty − reservedQty)` (partial
+   *                    reservation; the caller reads the granted amount back
+   *                    from `reservedAfter − reservedBefore` and records any
+   *                    shortfall).
+   *   SALES_RELEASE  → release `min(qty, reservedQty)` (never drives reservedQty
+   *                    negative even if the caller's remainder estimate is stale).
+   * When the clamped amount is 0 the movement is a benign no-op (no ledger row).
+   */
+  clampToStock?: boolean;
   /**
    * Extra fields merged onto the `stock_ledger` row AFTER the engine's standard
    * + legacy fields (so a caller can keep a legacy consumer working — e.g. GRN's

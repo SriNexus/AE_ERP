@@ -74,9 +74,12 @@ import {
   X,
   DollarSign,
   BookOpen,
+  Scale,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import type { Product } from '../types';
+import { canDo } from '../lib/permissions';
+import { StockReconciliationReport } from '../features/stock/components/StockReconciliationReport';
 
 const PER_PAGE = 10;
 
@@ -134,6 +137,8 @@ export default function StockSummary() {
   const [delId, setDelId] = useState<string | null>(null);
   const [adjustOpen, setAdjustOpen] = useState(false);
   const [adjustForm, setAdjustForm] = useState<StockForm>({ ...STOCK_FORM_DEFAULT });
+  const [reconcileOpen, setReconcileOpen] = useState(false);
+  const canViewReconcile = canDo('view', 'stock');
 
   // ── Queries ──────────────────────────────────────────────────
   const { data: stockSummary = [], isLoading, refetch } = useStockSummary();
@@ -592,6 +597,11 @@ export default function StockSummary() {
               <Button variant="outline" size="sm" icon={<BookOpen className="h-4 w-4" />} onClick={() => navigate('/stock-ledger')}>
                 View Ledger
               </Button>
+              {canViewReconcile && (
+                <Button variant="outline" size="sm" icon={<Scale className="h-4 w-4" />} onClick={() => setReconcileOpen(true)}>
+                  Reconcile
+                </Button>
+              )}
               <Button variant="outline" size="sm" icon={<RefreshCw className="h-4 w-4" />} onClick={() => refetch()}>
                 Refresh
               </Button>
@@ -819,15 +829,7 @@ export default function StockSummary() {
                     WAREHOUSE
                   </Th>
                   <Th style={{ width: 100, minWidth: 100 }}>CATEGORY</Th>
-                  <Th
-                    sortable
-                    sorted={sortKey === 'available'}
-                    desc={sortDesc}
-                    onSort={() => sort('available')}
-                    style={{ width: 100, minWidth: 100 }}
-                  >
-                    AVAILABLE
-                  </Th>
+                  <Th style={{ width: 100, minWidth: 100 }}>ON HAND</Th>
                   <Th
                     sortable
                     sorted={sortKey === 'reserved'}
@@ -836,6 +838,15 @@ export default function StockSummary() {
                     style={{ width: 100, minWidth: 100 }}
                   >
                     RESERVED
+                  </Th>
+                  <Th
+                    sortable
+                    sorted={sortKey === 'available'}
+                    desc={sortDesc}
+                    onSort={() => sort('available')}
+                    style={{ width: 100, minWidth: 100 }}
+                  >
+                    AVAILABLE
                   </Th>
                   <Th style={{ width: 100, minWidth: 100 }}>INCOMING</Th>
                   <Th style={{ width: 100, minWidth: 100 }}>REORDER</Th>
@@ -866,8 +877,16 @@ export default function StockSummary() {
                   ) : (
                     paginated.map((row: any) => {
                       const product = row.productId ? productMap.get(String(row.productId)) as Product | undefined : undefined;
-                      const available = Number(row.availableQty ?? row.available) || 0;
                       const reserved = Number(row.reservedQty ?? row.reserved) || 0;
+                      // INVENTORY-07: onHandQty is the physical quantity;
+                      // availableQty = onHandQty − reservedQty. Pre-07 summaries
+                      // (no onHandQty) fall back to available + reserved.
+                      const onHand = row.onHandQty !== undefined && row.onHandQty !== null
+                        ? Number(row.onHandQty) || 0
+                        : (Number(row.availableQty ?? row.available) || 0) + reserved;
+                      const available = row.onHandQty !== undefined && row.onHandQty !== null
+                        ? onHand - reserved
+                        : Number(row.availableQty ?? row.available) || 0;
                       const incoming = Number(row.incomingQty ?? row.incoming ?? row.pendingQty) || 0;
                       const minStock = Number(row.min_stock ?? row.lowStockThreshold ?? product?.lowStockThreshold ?? 5) || 5;
                       const status = stockSummaryStatus(row);
@@ -920,14 +939,19 @@ export default function StockSummary() {
                             </span>
                           </Td>
 
-                          {/* Available */}
+                          {/* On Hand (physical) — INVENTORY-07 */}
                           <Td className="py-3 text-sm font-semibold text-[var(--color-text)]">
-                            {formatNumber(available)}
+                            {formatNumber(onHand)}
                           </Td>
 
                           {/* Reserved */}
                           <Td className="py-3 text-sm font-semibold text-[var(--color-text-secondary)]">
                             {formatNumber(reserved)}
+                          </Td>
+
+                          {/* Available = On Hand − Reserved */}
+                          <Td className="py-3 text-sm font-semibold text-[var(--color-text)]">
+                            {formatNumber(available)}
                           </Td>
 
                           {/* Incoming */}
@@ -1137,6 +1161,11 @@ export default function StockSummary() {
               : 'Delete this stock record?'
           }
         />
+
+        {/* ── Stock ↔ Ledger Reconciliation Report (read-only + human-approved correction) ── */}
+        <Modal open={reconcileOpen} onClose={() => setReconcileOpen(false)} title="Stock Reconciliation" size="xl">
+          {reconcileOpen && <StockReconciliationReport onClose={() => setReconcileOpen(false)} />}
+        </Modal>
       </div>
     </StockPageBoundary>
   );

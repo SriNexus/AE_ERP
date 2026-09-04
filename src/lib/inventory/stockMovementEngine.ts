@@ -38,6 +38,7 @@ import { sanitizeFirestoreData } from '../sanitizer';
 import { useAppStore } from '../../store/useAppStore';
 import { resolveWorkflowCompanyId, stockSummaryId, type WorkflowRecord } from '../workflow';
 import { buildIdempotencyKey, movementLedgerId } from './idempotency';
+import { isReservationsEnabled } from './reservationConfig';
 import {
   MOVEMENT_DIRECTION, REASON_CODE_REQUIRED,
   type BatchMovementResult, type MovementDirection, type MovementParticipant,
@@ -84,6 +85,7 @@ interface PreparedMovement {
   idempotencyKey: string;
   ledgerId: string;
   reservationsEnabled: boolean;
+  clampToStock: boolean;
 }
 
 function prepare(input: StockMovementInput): PreparedMovement {
@@ -119,7 +121,10 @@ function prepare(input: StockMovementInput): PreparedMovement {
   return {
     input, companyId, groupId, actorId, direction, absQty,
     idempotencyKey, ledgerId: movementLedgerId(idempotencyKey),
-    reservationsEnabled: input.reservationsEnabled === true,
+    // INVENTORY-07: an explicit per-call value still wins; otherwise the global
+    // `reservationsEnabled` feature flag decides (Phase 07 defaults it ON).
+    reservationsEnabled: input.reservationsEnabled ?? isReservationsEnabled(),
+    clampToStock: input.clampToStock === true,
   };
 }
 
@@ -133,7 +138,8 @@ function applyDelta(direction: MovementDirection, onHandBefore: number, reserved
   return { onHandAfter, reservedAfter };
 }
 
-function assertInvariants(prep: PreparedMovement, onHandAfter: number, reservedAfter: number) {
+/** INV-1 / INV-2 — asserted per applied entry (a transient negative is a bug). */
+function assertEntryInvariants(prep: PreparedMovement, onHandAfter: number, reservedAfter: number) {
   // INV-1 — negative on-hand is prohibited for Neozy.
   if (onHandAfter < -EPSILON) {
     throw new Error(`Insufficient stock: this ${prep.direction} movement would drive onHandQty to ${onHandAfter}`);
@@ -141,10 +147,6 @@ function assertInvariants(prep: PreparedMovement, onHandAfter: number, reservedA
   // INV-2 — cannot release more than is reserved.
   if (reservedAfter < -EPSILON) {
     throw new Error(`Invalid release: this movement would drive reservedQty to ${reservedAfter}`);
-  }
-  // INV-3 — gated behind reservationsEnabled (Phase 07). Inert in Phases 05–06.
-  if (prep.reservationsEnabled && reservedAfter > onHandAfter + EPSILON) {
-    throw new Error(`Over-reservation: reservedQty ${reservedAfter} would exceed onHandQty ${onHandAfter}`);
   }
 }
 
@@ -161,10 +163,13 @@ function buildLedgerRow(args: {
   movementAt: unknown;
   createdAt: unknown;
   stockId: string;
+  /** Actually-applied absolute quantity (clamped for a partial reserve/release). */
+  qty: number;
   before: { onHand: number; reserved: number };
   after: { onHand: number; reserved: number };
 }) {
   const { prep, input, before, after } = args;
+  const qty = Number.isFinite(args.qty) ? args.qty : prep.absQty;
   return {
     id: prep.ledgerId,
     companyId: prep.companyId,
@@ -175,7 +180,7 @@ function buildLedgerRow(args: {
     unit: input.unit,
     movementType: input.movementType,
     direction: prep.direction,
-    qty: prep.absQty,
+    qty,
     onHandBefore: before.onHand,
     onHandAfter: after.onHand,
     reservedBefore: before.reserved,
@@ -190,6 +195,8 @@ function buildLedgerRow(args: {
     createdAt: args.createdAt,
     createdBy: prep.actorId,
     isDeleted: false,
+    // INVENTORY-06: audit flag on a reconciliation correction row.
+    ...(input.movementType === 'RECONCILE_ADJUST' ? { auditReconciliation: true } : {}),
     // ── legacy compatibility (dual-write during migration) ──
     type: legacyType(prep.direction),
     referenceType: input.sourceType,
@@ -212,6 +219,9 @@ interface PlannedEntry {
   input: StockMovementInput;
   stockId: string;
   applied: boolean;
+  /** Absolute quantity actually applied — `prep.absQty`, or the clamped grant
+   *  for a partial SALES_RESERVE / SALES_RELEASE (INVENTORY-07). */
+  effectiveQty: number;
   onHandBefore: number;
   onHandAfter: number;
   reservedBefore: number;
@@ -224,7 +234,7 @@ function toPublicPlan(entries: PlannedEntry[]): MovementPlanEntry[] {
     input: e.input,
     applied: e.applied,
     direction: e.prep.direction,
-    qty: e.prep.absQty,
+    qty: e.effectiveQty,
     stockId: e.stockId,
     ledgerId: e.prep.ledgerId,
     idempotencyKey: e.prep.idempotencyKey,
@@ -249,7 +259,7 @@ function resultFor(e: PlannedEntry, skipped: boolean): MovementResult {
     productId: e.input.productId,
     warehouseId: e.input.warehouseId,
     companyId: e.prep.companyId,
-    qty: e.prep.absQty,
+    qty: e.effectiveQty,
     onHandBefore: e.onHandBefore,
     onHandAfter,
     reservedBefore: e.reservedBefore,
@@ -304,15 +314,44 @@ function planEntries(
       const onHandAfter = priorRow ? num(priorRow.onHandAfter, cur.onHand) : cur.onHand;
       const reservedBefore = priorRow ? num(priorRow.reservedBefore, cur.reserved) : cur.reserved;
       const reservedAfter = priorRow ? num(priorRow.reservedAfter, cur.reserved) : cur.reserved;
-      return { prep, input: prep.input, stockId, applied: false, onHandBefore, onHandAfter, reservedBefore, reservedAfter, priorRow };
+      const effectiveQty = priorRow ? num(priorRow.qty, prep.absQty) : prep.absQty;
+      return { prep, input: prep.input, stockId, applied: false, effectiveQty, onHandBefore, onHandAfter, reservedBefore, reservedAfter, priorRow };
     }
 
     const onHandBefore = cur.onHand;
     const reservedBefore = cur.reserved;
-    const { onHandAfter, reservedAfter } = applyDelta(prep.direction, onHandBefore, reservedBefore, prep.absQty);
+
+    // INVENTORY-07 — feature-flag gate (Plan §07 J): with reservations OFF the
+    // engine skips RESERVE / RELEASE entirely — reservedQty stays inert,
+    // availableQty == onHandQty, and a stray reserve/release input is a benign
+    // no-op (no ledger row).
+    if (!prep.reservationsEnabled && (prep.direction === 'RESERVE' || prep.direction === 'RELEASE')) {
+      return {
+        prep, input: prep.input, stockId, applied: false, effectiveQty: 0,
+        onHandBefore, onHandAfter: onHandBefore, reservedBefore, reservedAfter: reservedBefore, priorRow: null,
+      };
+    }
+
+    // INVENTORY-07 — partial reserve / release: clamp the grant to what the
+    // summary can support, INSIDE the plan (the summary txn is the concurrency
+    // boundary, so two racing reserves each see the other's committed effect).
+    let effectiveQty = prep.absQty;
+    if (prep.clampToStock && prep.direction === 'RESERVE') {
+      effectiveQty = Math.max(0, Math.min(prep.absQty, onHandBefore - reservedBefore));
+    } else if (prep.clampToStock && prep.direction === 'RELEASE') {
+      effectiveQty = Math.max(0, Math.min(prep.absQty, reservedBefore));
+    }
+    if (effectiveQty <= EPSILON) {
+      // Clamped to nothing — benign no-op: no ledger row, summary untouched.
+      return {
+        prep, input: prep.input, stockId, applied: false, effectiveQty: 0,
+        onHandBefore, onHandAfter: onHandBefore, reservedBefore, reservedAfter: reservedBefore, priorRow: null,
+      };
+    }
+    const { onHandAfter, reservedAfter } = applyDelta(prep.direction, onHandBefore, reservedBefore, effectiveQty);
     cur.onHand = onHandAfter;
     cur.reserved = reservedAfter;
-    return { prep, input: prep.input, stockId, applied: true, onHandBefore, onHandAfter, reservedBefore, reservedAfter, priorRow: null };
+    return { prep, input: prep.input, stockId, applied: true, effectiveQty, onHandBefore, onHandAfter, reservedBefore, reservedAfter, priorRow: null };
   });
 }
 
@@ -320,11 +359,28 @@ function planEntries(
  * INV-1 / INV-2 / INV-3 — asserted AFTER `participant.validate` has had its
  * chance to benignly abort, but BEFORE any write. A violation aborts the whole
  * transaction with zero partial mutation.
+ *
+ * INV-1 (`onHandQty >= 0`) and INV-2 (`reservedQty >= 0`) are checked per
+ * applied entry. INV-3 (`reservedQty <= onHandQty`, Phase 07) is checked on the
+ * FINAL per-summary state only: a dispatch batch legitimately passes through an
+ * intermediate state where DISPATCH_OUT has dropped onHand but the matching
+ * SALES_RELEASE consume has not landed yet — only the end state must hold INV-3.
  */
 function assertPlanInvariants(plan: PlannedEntry[]) {
+  const finalByStock = new Map<string, { onHand: number; reserved: number; enforce: boolean }>();
   for (const e of plan) {
     if (!e.applied) continue;
-    assertInvariants(e.prep, e.onHandAfter, e.reservedAfter);
+    assertEntryInvariants(e.prep, e.onHandAfter, e.reservedAfter);
+    finalByStock.set(e.stockId, {
+      onHand: e.onHandAfter,
+      reserved: e.reservedAfter,
+      enforce: e.prep.reservationsEnabled,
+    });
+  }
+  for (const [, s] of finalByStock) {
+    if (s.enforce && s.reserved > s.onHand + EPSILON) {
+      throw new Error(`Over-reservation: reservedQty ${s.reserved} would exceed onHandQty ${s.onHand}`);
+    }
   }
 }
 
@@ -476,6 +532,7 @@ async function applyBatchConfigured(
       transaction.set(doc(db, COLLECTIONS.STOCK_LEDGER, e.prep.ledgerId), sanitizeFirestoreData(buildLedgerRow({
         prep: e.prep, input: e.input, transactionId: txnId, dateIso: nowIso,
         movementAt: serverTimestamp(), createdAt: serverTimestamp(), stockId: e.stockId,
+        qty: e.effectiveQty,
         before: { onHand: e.onHandBefore, reserved: e.reservedBefore },
         after: { onHand: e.onHandAfter, reserved: e.reservedAfter },
       })));
@@ -588,7 +645,7 @@ async function applyBatchDemo(
     }));
     await createDocWithId(COLLECTIONS.STOCK_LEDGER, e.prep.ledgerId, sanitizeFirestoreData(buildLedgerRow({
       prep: e.prep, input: e.input, transactionId: txnId, dateIso: nowIso, movementAt: nowIso, createdAt: nowIso,
-      stockId: e.stockId,
+      stockId: e.stockId, qty: e.effectiveQty,
       before: { onHand: e.onHandBefore, reserved: e.reservedBefore },
       after: { onHand: e.onHandAfter, reserved: e.reservedAfter },
     })));

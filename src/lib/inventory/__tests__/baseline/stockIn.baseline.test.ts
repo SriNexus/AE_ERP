@@ -70,7 +70,8 @@ describe('INVENTORY-05d — stockWorkflow.stockIn (via the movement engine)', ()
     seedSummary('SUM-comp-1-P-1-W-1', 5, 1);
     const r = await stockIn({ productId: 'P-1', warehouseId: 'W-1', qty: 7, unit: 'PCS', sourceType: 'purchase', sourceId: 'PO-1' });
     expect(r).toMatchObject({ stockId: 'SUM-comp-1-P-1-W-1', beforeQty: 5, afterQty: 12 });
-    expect(col('stock')['SUM-comp-1-P-1-W-1']).toMatchObject({ onHandQty: 12, availableQty: 12, reservedQty: 1 });
+    // INVENTORY-07: availableQty = onHandQty − reservedQty (12 − 1).
+    expect(col('stock')['SUM-comp-1-P-1-W-1']).toMatchObject({ onHandQty: 12, availableQty: 11, reservedQty: 1 });
     const row = Object.values(col('stock_ledger'))[0] as any;
     expect(row).toMatchObject({ movementType: 'PURCHASE_RECEIPT', direction: 'IN', type: 'IN', qty: 7, sourceType: 'purchase', sourceId: 'PO-1' });
   });

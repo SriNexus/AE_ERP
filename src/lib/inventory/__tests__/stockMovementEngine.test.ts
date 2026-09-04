@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({ counter: 0, getState: vi.fn(() => ({ user: { i
 vi.mock('../../firebase', () => ({
   db: {},
   firebaseEnv: { isConfigured: false },
-  COLLECTIONS: { STOCK: 'stock', STOCK_LEDGER: 'stock_ledger' },
+  COLLECTIONS: { STOCK: 'stock', STOCK_LEDGER: 'stock_ledger', STOCK_RESERVATIONS: 'stock_reservations' },
 }));
 vi.mock('../../firestore', () => ({
   createDocWithId: vi.fn(async (c: string, id: string, data: any) => { col(c)[id] = { ...data, id }; }),
@@ -125,6 +125,78 @@ describe('INVENTORY-05a — applyStockMovement (movement + quantities)', () => {
       const expectedDir = mt === 'RECONCILE_ADJUST' ? 'IN' : (IN_TYPES.includes(mt) ? 'IN' : mt === 'SALES_RESERVE' ? 'RESERVE' : mt === 'SALES_RELEASE' ? 'RELEASE' : 'OUT');
       expect(r.direction).toBe(expectedDir);
     }
+  });
+});
+
+describe('INVENTORY-07 — SALES_RESERVE / SALES_RELEASE + availableQty semantics', () => {
+  const seed = (qty: number) => applyStockMovement({ ...base, movementType: 'OPENING_STOCK', qty, sourceType: 'opening', sourceId: 'SEED' });
+
+  it('M2: SALES_RESERVE bumps reservedQty, leaves onHandQty, drops availableQty', async () => {
+    await seed(10);
+    const r = await applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 4, sourceType: 'proforma_invoice', sourceId: 'PI-1', lineKey: 'L1' });
+    expect(r).toMatchObject({ applied: true, direction: 'RESERVE', onHandBefore: 10, onHandAfter: 10, reservedBefore: 0, reservedAfter: 4, availableAfter: 6 });
+    expect(col('stock')[SUM]).toMatchObject({ onHandQty: 10, reservedQty: 4, availableQty: 6 });
+  });
+
+  it('M8 / INV-3: a reserve that would exceed onHandQty is REJECTED (no backorder)', async () => {
+    await seed(5);
+    await expect(applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 8, sourceType: 'proforma_invoice', sourceId: 'PI-2', lineKey: 'L' }))
+      .rejects.toThrow(/Over-reservation/);
+    expect(col('stock')[SUM]).toMatchObject({ reservedQty: 0 });
+  });
+
+  it('M3: clampToStock reserves only what is available, reports the shortfall via reservedAfter', async () => {
+    await seed(3);
+    const r = await applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 7, sourceType: 'proforma_invoice', sourceId: 'PI-3', lineKey: 'L', clampToStock: true });
+    expect(r.reservedAfter - r.reservedBefore).toBe(3);   // granted
+    expect(7 - (r.reservedAfter - r.reservedBefore)).toBe(4); // shortfall
+    expect(col('stock')[SUM]).toMatchObject({ onHandQty: 3, reservedQty: 3, availableQty: 0 });
+  });
+
+  it('clampToStock with zero available is a benign no-op — no ledger row', async () => {
+    await seed(2);
+    await applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 2, sourceType: 'proforma_invoice', sourceId: 'PI-a', lineKey: 'L' });
+    const before = Object.keys(col('stock_ledger')).length;
+    const r = await applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 5, sourceType: 'proforma_invoice', sourceId: 'PI-b', lineKey: 'L2', clampToStock: true });
+    expect(r.applied).toBe(false);
+    expect(Object.keys(col('stock_ledger')).length).toBe(before);
+  });
+
+  it('M6: SALES_RELEASE decreases reservedQty, restores availableQty; INV-2 floors at 0 via clamp', async () => {
+    await seed(10);
+    await applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 6, sourceType: 'proforma_invoice', sourceId: 'PI-4', lineKey: 'L' });
+    const rel = await applyStockMovement({ ...base, movementType: 'SALES_RELEASE', qty: 10, sourceType: 'order_cancel', sourceId: 'ORD-4', lineKey: 'P-1', clampToStock: true });
+    expect(rel.reservedBefore - rel.reservedAfter).toBe(6);   // released only what was held
+    expect(col('stock')[SUM]).toMatchObject({ onHandQty: 10, reservedQty: 0, availableQty: 10 });
+  });
+
+  it('M7: repeat reserve / release is idempotent (deterministic ledger id)', async () => {
+    await seed(10);
+    const a = await applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 4, sourceType: 'proforma_invoice', sourceId: 'PI-5', lineKey: 'L' });
+    const b = await applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 4, sourceType: 'proforma_invoice', sourceId: 'PI-5', lineKey: 'L' });
+    expect(a.applied).toBe(true);
+    expect(b.applied).toBe(false);
+    expect(col('stock')[SUM].reservedQty).toBe(4);
+  });
+
+  it('M1/M5: dispatch OUT + reservation consume in ONE batch → onHand−, reserved−, INV-3 holds on the end state', async () => {
+    await seed(10);
+    await applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 6, sourceType: 'proforma_invoice', sourceId: 'PI-6', lineKey: 'L' });
+    const batch = await applyStockMovements([
+      { ...base, movementType: 'DISPATCH_OUT', qty: 6, sourceType: 'dispatch', sourceId: 'DSP-6', lineKey: 'P-1' },
+      { ...base, movementType: 'SALES_RELEASE', qty: 6, sourceType: 'dispatch_consume', sourceId: 'DSP-6', lineKey: 'P-1', clampToStock: true },
+    ]);
+    expect(batch.applied).toBe(true);
+    expect(col('stock')[SUM]).toMatchObject({ onHandQty: 4, reservedQty: 0, availableQty: 4 });
+  });
+
+  it('M9: reservationsEnabled:false → the engine skips RESERVE entirely (reservedQty inert, available == onHand, no ledger row)', async () => {
+    await seed(10);
+    const before = Object.keys(col('stock_ledger')).length;
+    const r = await applyStockMovement({ ...base, movementType: 'SALES_RESERVE', qty: 4, sourceType: 'proforma_invoice', sourceId: 'PI-7', lineKey: 'L', reservationsEnabled: false });
+    expect(r.applied).toBe(false);
+    expect(Object.keys(col('stock_ledger')).length).toBe(before);
+    expect(col('stock')[SUM]).toMatchObject({ reservedQty: 0, availableQty: 10, onHandQty: 10 });
   });
 });
 

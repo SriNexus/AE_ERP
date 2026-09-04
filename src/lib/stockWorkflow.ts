@@ -3,7 +3,9 @@ import { COLLECTIONS, firebaseEnv } from './firebase';
 import { sanitizeFirestoreData } from './sanitizer';
 import { useAppStore } from '../store/useAppStore';
 import { NotificationType } from '../types';
-import { applyStockMovement, resolveStockSummaryDocumentId } from './inventory/stockMovementEngine';
+import { applyStockMovement, applyStockMovements, resolveStockSummaryDocumentId } from './inventory/stockMovementEngine';
+import { isReservationsEnabled } from './inventory/reservationConfig';
+import { buildCancelReleaseInputs, fetchOrderReservations, reservationUpdateParticipant } from './inventory/reservations';
 import type { MovementType } from './inventory/types';
 import {
   logActivity,
@@ -134,14 +136,39 @@ export async function cancelOrder(orderId: string, reason = '') {
     }
   }
 
+  const now = new Date().toISOString();
+  const actorId = state.user?.id || 'system';
+
+  // INVENTORY-07 (Plan §07 H): release the UNCONSUMED remainder of every active
+  // reservation on this order via SALES_RELEASE. Physical stock already
+  // dispatched is restored by the SALES_RETURN_IN loop above — this only
+  // un-earmarks what was never shipped (no double count). Idempotent + stale-safe
+  // (`clampToStock`); a no-reservation (pre-07) order releases nothing.
+  const releasedReservations: Array<{ productId: string; qty: number }> = [];
+  if (isReservationsEnabled()) {
+    try {
+      const reservations = await fetchOrderReservations(orderId);
+      const releaseInputs = buildCancelReleaseInputs({ companyId, actorId, orderId, reservations, reason });
+      if (releaseInputs.length) {
+        const relBatch = await applyStockMovements(
+          releaseInputs,
+          reservationUpdateParticipant({ reservations, mode: 'release', matchSourceType: 'order_cancel', actorId, nowIso: now }),
+        );
+        for (const r of relBatch.results) {
+          if (r.applied) releasedReservations.push({ productId: r.productId, qty: r.qty });
+        }
+      }
+    } catch (err) {
+      console.error(`[cancelOrder] reservation release failed for order ${orderId}:`, err);
+    }
+  }
+
   const paidAmount = Number(order.paidAmount ?? order.amountPaid) || 0;
   const cancelledItems = (order.items || []).map((item) => ({
     ...item,
     dispatchedQty: 0,
     pendingQty: 0,
   }));
-  const now = new Date().toISOString();
-  const actorId = state.user?.id || 'system';
 
   // INVENTORY-04 (P2-2): the invoices this cancellation affects — information
   // only. NO financial reversal, NO invoice-amount change, NO GST change here.
@@ -213,6 +240,7 @@ export async function cancelOrder(orderId: string, reason = '') {
     actionLabel: 'Cancelled order',
     reason,
     restoredItems,
+    ...(releasedReservations.length ? { releasedReservations } : {}),
   });
   notifyUsers(
     [
@@ -229,5 +257,5 @@ export async function cancelOrder(orderId: string, reason = '') {
     companyId
   );
 
-  return { orderId, restoredItems, refundRequired: paidAmount > 0 };
+  return { orderId, restoredItems, releasedReservations, refundRequired: paidAmount > 0 };
 }

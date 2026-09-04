@@ -105,7 +105,9 @@ describe('INVENTORY-01 BASELINE — dispatchWorkflow.executeAndVerifyDispatch (s
     const result = await executeAndVerifyDispatch(dispatchDoc(), [{ productId: 'P-1', product: 'Panel', unit: 'PCS', verifiedQty: 3, serials: [] }]);
 
     expect(result).toMatchObject({ dispatchId: 'DSP-1', alreadyVerified: false, applied: [{ productId: 'P-1', appliedQty: 3 }] });
-    expect(mocks.createDocWithId).toHaveBeenCalledWith('stock', 'SUM-1', expect.objectContaining({ onHandQty: 7, availableQty: 7 }));
+    // INVENTORY-07: availableQty = onHandQty − reservedQty (7 − 4). No matching
+    // stock_reservations doc exists, so reservedQty is not consumed here.
+    expect(mocks.createDocWithId).toHaveBeenCalledWith('stock', 'SUM-1', expect.objectContaining({ onHandQty: 7, availableQty: 3 }));
 
     const [ledgerCol, ledgerId, ledger] = mocks.createDocWithId.mock.calls.find((c) => c[0] === 'stock_ledger')!;
     expect(ledgerCol).toBe('stock_ledger');
@@ -123,11 +125,11 @@ describe('INVENTORY-01 BASELINE — dispatchWorkflow.executeAndVerifyDispatch (s
     expect(mocks.updateDocById).toHaveBeenCalledWith('dispatch', 'DSP-1', expect.objectContaining({ status: 'Dispatched' }));
   });
 
-  it('P0-3 (still deferred): reservedQty is carried forward, never consumed by the OUT', async () => {
+  it('INVENTORY-07 (M10): with NO matching reservation, reservedQty is carried forward, availableQty = onHand − reserved', async () => {
     await executeAndVerifyDispatch(dispatchDoc(), [{ productId: 'P-1', product: 'Panel', unit: 'PCS', verifiedQty: 3, serials: [] }]);
     const stockWrite = mocks.createDocWithId.mock.calls.find((c) => c[0] === 'stock')![2] as Record<string, unknown>;
     expect(stockWrite.reservedQty).toBe(4);
-    expect(stockWrite.availableQty).toBe(7);
+    expect(stockWrite.availableQty).toBe(3);
   });
 
   it('D3 / K3: insufficient stock throws and mutates NOTHING (no stock write, no ledger)', async () => {

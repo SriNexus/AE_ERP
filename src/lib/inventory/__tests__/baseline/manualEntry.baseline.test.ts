@@ -91,7 +91,8 @@ describe('INVENTORY-05d — useInventory.useSaveStockEntry (manual stock adjust 
   it('IN: ADJUSTMENT_IN movement, onHand += qty; ledger + summary written', async () => {
     seed(10, 4);
     await saveEntry().mutationFn({ ...FORM, type: 'IN', qty: '5' });
-    expect(col('stock')['SUM-comp-1-P-1-W-1']).toMatchObject({ onHandQty: 15, availableQty: 15, reservedQty: 4 });
+    // INVENTORY-07: availableQty = onHandQty − reservedQty (15 − 4).
+    expect(col('stock')['SUM-comp-1-P-1-W-1']).toMatchObject({ onHandQty: 15, availableQty: 11, reservedQty: 4 });
     const row = Object.values(col('stock_ledger'))[0] as any;
     expect(row).toMatchObject({
       movementType: 'ADJUSTMENT_IN', direction: 'IN', type: 'IN', qty: 5,
@@ -103,7 +104,8 @@ describe('INVENTORY-05d — useInventory.useSaveStockEntry (manual stock adjust 
   it('OUT: ADJUSTMENT_OUT movement, onHand -= qty', async () => {
     seed(10, 4);
     await saveEntry().mutationFn({ ...FORM, type: 'OUT', qty: '3' });
-    expect(col('stock')['SUM-comp-1-P-1-W-1']).toMatchObject({ onHandQty: 7, availableQty: 7, reservedQty: 4 });
+    // INVENTORY-07: availableQty = onHandQty − reservedQty (7 − 4).
+    expect(col('stock')['SUM-comp-1-P-1-W-1']).toMatchObject({ onHandQty: 7, availableQty: 3, reservedQty: 4 });
     expect((Object.values(col('stock_ledger'))[0] as any).movementType).toBe('ADJUSTMENT_OUT');
   });
 

@@ -9,6 +9,11 @@ import { propagateCaseIdFromChain } from './casePropagation';
 import { buildProjectStageAdvancePatch } from './projectLifecycle';
 import { applyStockMovements } from './inventory/stockMovementEngine';
 import { buildIdempotencyKey, movementLedgerId } from './inventory/idempotency';
+import { isReservationsEnabled } from './inventory/reservationConfig';
+import {
+  applyReservationDelta, buildDispatchConsumeInputs, docIdsByProduct, fetchOrderReservations,
+  type StockReservationRecord,
+} from './inventory/reservations';
 import type { MovementParticipant, StockMovementInput } from './inventory/types';
 
 type DispatchRequestPayload = { orderId: string; customerId: string; customer: string; warehouseId: string; warehouse: string; vehicleNo: string; driverName: string; driverPhone: string; transporterId: string; lrNumber: string; items: Array<{ productId: string; product: string; requestedQty: number; trackingType: string; unit: string }>; notes: string; projectId?: string; projectName?: string };
@@ -314,27 +319,48 @@ async function assertDispatchReferencesValid(companyId: string, warehouseId: str
  * The order-items update + project patch + notifications stay AFTER the engine
  * call (Phase-01 shape — Plan §811 "keep the order-items/dispatch-doc sequence").
  */
+interface DispatchParticipantCtx {
+  dispatch: WorkflowRecord | null;
+  rsv: Map<string, Record<string, unknown> | null>;
+}
+
 function dispatchDocParticipant(
   dispatchId: string,
   verifiedItems: any[],
   actorId: string,
   nowIso: string,
-): MovementParticipant<WorkflowRecord | null> {
+  reservations: StockReservationRecord[] = [],
+): MovementParticipant<DispatchParticipantCtx> {
+  const rsvIds = reservations.map((r) => r.id);
   return {
     async read(rc) {
-      return rc.get<WorkflowRecord>(COLLECTIONS.DISPATCH, dispatchId);
+      const rsv = new Map<string, Record<string, unknown> | null>();
+      for (const id of rsvIds) rsv.set(id, await rc.get(COLLECTIONS.STOCK_RESERVATIONS, id));
+      return { dispatch: await rc.get<WorkflowRecord>(COLLECTIONS.DISPATCH, dispatchId), rsv };
     },
-    validate(current) {
-      const status = String((current?.status ?? '') || '');
+    validate(ctx) {
+      const status = String((ctx.dispatch?.status ?? '') || '');
       // A concurrent verification already issued this dispatch — benign no-op
-      // (do NOT decrement stock again, do NOT re-bump the order).
+      // (do NOT decrement stock again, do NOT re-bump the order, do NOT
+      // re-consume the reservation).
       if ((TERMINAL_DISPATCH_STATUSES as readonly string[]).includes(status)) return false;
     },
-    commit(_current, _plan, writer) {
+    commit(ctx, plan, writer) {
       writer.set(COLLECTIONS.DISPATCH, dispatchId, {
         status: 'Dispatched', items: verifiedItems, verifiedBy: actorId, dispatchedAt: nowIso,
         updatedBy: actorId,
       }, { merge: true });
+      // INVENTORY-07 — consume the applicable reservation atomically with the
+      // DISPATCH_OUT + dispatch-doc write. `applyReservationDelta` distributes
+      // the actually-released amount (from each SALES_RELEASE plan entry) FIFO
+      // across this order's reservation docs. A dispatch of a pre-07 order (no
+      // reservations) contributes nothing here.
+      if (reservations.length) {
+        applyReservationDelta({
+          plan, snapshotById: ctx.rsv, docIdsByProduct: docIdsByProduct(reservations),
+          writer, mode: 'consume', actorId, nowIso, matchSourceType: 'dispatch_consume',
+        });
+      }
     },
   };
 }
@@ -359,7 +385,15 @@ export async function executeAndVerifyDispatch(dispatch: any, verifiedItems: any
 
   const now = new Date().toISOString();
   let applied: Array<{ productId: string; appliedQty: number }> = [];
-  const participant = dispatchDocParticipant(String(dispatch.id), verifiedItems, actorId, now);
+
+  // INVENTORY-07 — reservation consume. Read this order's active reservations
+  // ONCE (outside the txn); each verified line that has a reservation gets a
+  // `SALES_RELEASE` (`clampToStock` → stale-safe) in the SAME engine batch as
+  // its DISPATCH_OUT, and the participant updates the reservation docs.
+  const reservations = isReservationsEnabled() && dispatch.orderId
+    ? await fetchOrderReservations(String(dispatch.orderId))
+    : [];
+  const participant = dispatchDocParticipant(String(dispatch.id), verifiedItems, actorId, now, reservations);
 
   if (!stockLines.length) {
     // Nothing to decrement — still flip the dispatch status (Phase-01 parity).
@@ -372,7 +406,7 @@ export async function executeAndVerifyDispatch(dispatch: any, verifiedItems: any
     }));
   } else {
     // ---- ATOMIC: every line's DISPATCH_OUT + the dispatch-doc status flip, ONE engine txn.
-    const inputs: StockMovementInput[] = stockLines.map((item) => ({
+    const outInputs: StockMovementInput[] = stockLines.map((item) => ({
       movementType: 'DISPATCH_OUT' as const,
       productId: String(item.productId),
       warehouseId: String(dispatch.warehouseId || ''),
@@ -389,6 +423,16 @@ export async function executeAndVerifyDispatch(dispatch: any, verifiedItems: any
         product: item.product, warehouse: dispatch.warehouse,
       },
     }));
+    const consumeInputs = reservations.length
+      ? buildDispatchConsumeInputs({
+          companyId, actorId,
+          dispatchId: String(dispatch.id), orderId: String(dispatch.orderId || ''),
+          warehouseId: String(dispatch.warehouseId || ''), warehouseName: String(dispatch.warehouse || ''),
+          verifiedLines: stockLines.map((it) => ({ productId: String(it.productId), unit: String(it.unit || 'PCS'), verifiedQty: Number(it.verifiedQty), productName: String(it.product || '') })),
+          reservations,
+        })
+      : [];
+    const inputs: StockMovementInput[] = [...outInputs, ...consumeInputs];
 
     let batch;
     try {
@@ -407,7 +451,12 @@ export async function executeAndVerifyDispatch(dispatch: any, verifiedItems: any
       // A concurrent verification won the race — do NOT double-apply order qty.
       return { dispatchId: dispatch.id, alreadyVerified: true, applied: [] as Array<{ productId: string; appliedQty: number }> };
     }
-    applied = batch.results.map((r) => ({ productId: r.productId, appliedQty: r.applied ? r.qty : 0 }));
+    // Only DISPATCH_OUT results drive the order-items dispatchedQty/pendingQty
+    // bump — the SALES_RELEASE consume rows share the same productId and must
+    // NOT be counted as dispatched quantity.
+    applied = batch.results
+      .filter((r) => r.movementType === 'DISPATCH_OUT')
+      .map((r) => ({ productId: r.productId, appliedQty: r.applied ? r.qty : 0 }));
 
     if (!applied.some((a) => a.appliedQty > 0)) {
       // Every line was an idempotent no-op → the engine skipped the

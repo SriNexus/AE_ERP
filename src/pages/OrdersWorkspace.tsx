@@ -216,6 +216,18 @@ export default function OrdersWorkspace() {
   });
   const allPayments = (paymentsQuery.data as any[]) || [];
 
+  // ── Stock reservations (INVENTORY-07)
+  const reservationsQuery = useQuery({
+    queryKey: ['stock_reservations', 'order', id],
+    queryFn: () => getAll<any>(COLLECTIONS.STOCK_RESERVATIONS, []).catch(() => [] as any[]),
+    staleTime: 30_000,
+    enabled: !!id,
+  });
+  const orderReservations = useMemo(
+    () => ((reservationsQuery.data as any[]) || []).filter((r: any) => r.isDeleted !== true && r.orderId === id),
+    [reservationsQuery.data, id],
+  );
+
   const canEdit = perms.canEdit('orders');
   const canDelete = perms.canDelete('orders');
   const canCreate = perms.canCreate('orders');
@@ -740,6 +752,67 @@ export default function OrdersWorkspace() {
                     </div>
                   )}
                 </div>
+
+                {/* ── STOCK RESERVATION (INVENTORY-07) ── */}
+                {(orderReservations.length > 0
+                  || (Array.isArray(order?.stockShortfall) && order.stockShortfall.length > 0)
+                  || order?.reservationStatus) && (
+                  <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-sm">
+                    <SectionHeading>Stock Reservation</SectionHeading>
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-[12px]">
+                      <span className="text-[var(--color-text-muted)]">Status</span>
+                      <span className={cn(
+                        'inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-semibold',
+                        order?.reservationStatus === 'reserved' ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-900/40 dark:text-emerald-300'
+                          : order?.reservationStatus === 'partial' ? 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300'
+                          : 'bg-[var(--color-bg-sunken)] text-[var(--color-text-muted)] border-[var(--color-border)]',
+                      )}>
+                        {String(order?.reservationStatus || 'none').replace(/_/g, ' ')}
+                      </span>
+                      {order?.fulfilmentWarehouseId && (
+                        <span className="text-[var(--color-text-muted)]">· Fulfilment warehouse <span className="font-medium text-[var(--color-text)]">{order.fulfilmentWarehouseId}</span></span>
+                      )}
+                    </div>
+                    {orderReservations.length > 0 && (
+                      <div className="mt-3 overflow-x-auto">
+                        <table className="w-full text-[12px]">
+                          <thead>
+                            <tr className="bg-[var(--color-bg-sunken)] text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">
+                              <th className="px-3 py-2 text-left">Product</th>
+                              <th className="px-3 py-2 text-right">Requested</th>
+                              <th className="px-3 py-2 text-right">Reserved</th>
+                              <th className="px-3 py-2 text-right">Consumed</th>
+                              <th className="px-3 py-2 text-right">Released</th>
+                              <th className="px-3 py-2 text-left">State</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {orderReservations.map((r: any) => (
+                              <tr key={r.id} className="border-t border-[var(--color-border-subtle)]">
+                                <td className="px-3 py-2 font-medium">{r.productId}</td>
+                                <td className="px-3 py-2 text-right">{Number(r.qtyRequested) || 0}</td>
+                                <td className="px-3 py-2 text-right">{Number(r.qtyReserved) || 0}</td>
+                                <td className="px-3 py-2 text-right">{Number(r.qtyConsumed) || 0}</td>
+                                <td className="px-3 py-2 text-right">{Number(r.qtyReleased) || 0}</td>
+                                <td className="px-3 py-2">{r.status}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {Array.isArray(order?.stockShortfall) && order.stockShortfall.length > 0 && (
+                      <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[12px] text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                        <p className="font-semibold">Stock shortfall — not fully reserved</p>
+                        <ul className="mt-1 space-y-0.5">
+                          {order.stockShortfall.map((s: any, i: number) => (
+                            <li key={i}>{s.productId}: short {s.shortfallQty} (requested {s.requestedQty}, reserved {s.reservedQty})</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* ── PRICING SUMMARY ── */}
                 <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-sm">

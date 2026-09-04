@@ -90,7 +90,8 @@ describe('stockIn (via the movement engine)', () => {
       1,
       'stock',
       'DEMO-V1-STK-001',
-      expect.objectContaining({ id: 'DEMO-V1-STK-001', onHandQty: 98, availableQty: 98, reservedQty: 22 }),
+      // INVENTORY-07: availableQty = onHandQty − reservedQty (98 − 22).
+      expect.objectContaining({ id: 'DEMO-V1-STK-001', onHandQty: 98, availableQty: 76, reservedQty: 22 }),
     );
   });
 
@@ -105,7 +106,8 @@ describe('stockIn (via the movement engine)', () => {
 
     expect(mocks.createDocWithId).toHaveBeenNthCalledWith(1, 'stock', 'SUM-comp-1-P-1-W-1', expect.objectContaining({
       id: 'SUM-comp-1-P-1-W-1', companyId: 'comp-1', productId: 'P-1', warehouseId: 'W-1',
-      onHandQty: 12, availableQty: 12, reservedQty: 1, unit: 'PCS', updatedBy: 'user-1', isDeleted: false,
+      // INVENTORY-07: availableQty = onHandQty − reservedQty (12 − 1).
+      onHandQty: 12, availableQty: 11, reservedQty: 1, unit: 'PCS', updatedBy: 'user-1', isDeleted: false,
     }));
     expect(mocks.createDocWithId).toHaveBeenNthCalledWith(2, 'stock_ledger', result.ledgerId, expect.objectContaining({
       companyId: 'comp-1', productId: 'P-1', warehouseId: 'W-1',

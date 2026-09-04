@@ -1,10 +1,99 @@
-import { createDocWithId, updateDocById, genId, getAll, getOne, resolveWriteCompanyId, resolveWriteCompanyCode } from './firestore';
+import { createDocWithId, updateDocById, genId, getAll, getOne, resolveWriteCompanyId, resolveWriteCompanyCode, resolveWriteGroupId } from './firestore';
 import { getNextDocumentNumber, resolveDocumentDefaults } from './documentNumbering';
 import { COLLECTIONS, firebaseEnv } from './firebase';
 import { sanitizeFirestoreData } from './sanitizer';
 import { useAppStore } from '../store/useAppStore';
 import { NotificationType } from '../types';
 import { logActivity, notifyUsers, text, usersByRole, type WorkflowRecord } from './workflow';
+import { applyStockMovements } from './inventory/stockMovementEngine';
+import { isReservationsEnabled } from './inventory/reservationConfig';
+import { buildReserveInputs, reserveParticipant } from './inventory/reservations';
+
+const round2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
+
+/**
+ * INVENTORY-07 — reserve stock for a just-paid PI/order (Plan §07 E).
+ *
+ * Runs AFTER the PI/order payment transaction has committed. Per order/PI line
+ * with a real productId: a `SALES_RESERVE` movement (`clampToStock` → reserve
+ * only what is available; the rest is recorded in `order.stockShortfall[]`) plus
+ * a `stock_reservations` doc created ATOMICALLY inside the engine transaction
+ * (the `reserveParticipant`). Idempotent by
+ * `SALES_RESERVE:proforma_invoice:{piId}:{lineKey}` — a retried `markPIAsPaid`
+ * reserves nothing further. Never throws for a stock shortage; a missing/invalid
+ * fulfilment warehouse defers the reservation (payment is never failed).
+ */
+async function reserveStockForPaidOrder(piId: string, orderId: string, actorId: string) {
+  if (!orderId) return { skipped: true as const, reason: 'PI has no linked order' };
+  const order = await getOne<WorkflowRecord & { id: string; items?: WorkflowRecord[]; stockShortfall?: WorkflowRecord[] }>(COLLECTIONS.ORDERS, orderId);
+  if (!order) return { skipped: true as const, reason: 'order not found' };
+
+  const companyId = String(order.companyId || resolveWriteCompanyId() || '');
+  // Decision 2: use the order's fulfilment warehouse (locked at PI payment). The
+  // order form already carries `warehouseId`; `fulfilmentWarehouseId` overrides
+  // once set. NEVER fall back to an arbitrary warehouse.
+  const fulfilmentWarehouseId = String(order.fulfilmentWarehouseId || order.warehouseId || '').trim();
+  if (!fulfilmentWarehouseId) {
+    await updateDocById(COLLECTIONS.ORDERS, orderId, sanitizeFirestoreData({
+      reservationStatus: 'deferred_no_warehouse', updatedBy: actorId,
+    }));
+    return { deferred: true as const, reason: 'no fulfilment warehouse on the order — reservation skipped' };
+  }
+
+  const pi = await getOne<WorkflowRecord & { id: string; items?: WorkflowRecord[] }>(COLLECTIONS.PROFORMA_INVOICES, piId);
+  const rawLines = (Array.isArray(pi?.items) && pi!.items!.length ? pi!.items! : (order.items || [])) as WorkflowRecord[];
+  const lines = rawLines
+    .map((it, idx) => ({
+      orderLineKey: String(it.productId || it.id || idx),
+      productId: String(it.productId || ''),
+      unit: String(it.unit || 'PCS'),
+      qty: Number(it.qty ?? it.quantity) || 0,
+      productName: String(it.product || it.name || ''),
+    }))
+    .filter((l) => l.productId && l.qty > 0);
+  if (!lines.length) return { skipped: true as const, reason: 'no stock-bearing lines on the PI/order' };
+
+  const groupId = resolveWriteGroupId(companyId);
+  const nowIso = new Date().toISOString();
+  const { inputs, metaByKey } = buildReserveInputs({ companyId, actorId, orderId, piId, warehouseId: fulfilmentWarehouseId, lines });
+  const participant = reserveParticipant({ companyId, groupId, orderId, piId, actorId, nowIso, metaByKey });
+  const batch = await applyStockMovements(inputs, participant);
+
+  const thisPiKeys = new Set(lines.map((l) => l.orderLineKey));
+  const shortfall: Array<Record<string, unknown>> = [];
+  let reservedTotal = 0;
+  for (const r of batch.results) {
+    const meta = metaByKey.get(r.idempotencyKey);
+    if (!meta) continue;
+    const granted = Math.max(0, r.reservedAfter - r.reservedBefore);
+    reservedTotal += granted;
+    const short = round2(meta.qtyRequested - granted);
+    if (short > 0.000001) {
+      shortfall.push({
+        productId: meta.productId, orderLineKey: meta.orderLineKey, piId,
+        requestedQty: meta.qtyRequested, reservedQty: round2(granted), shortfallQty: short,
+      });
+    }
+  }
+
+  const priorShortfall = (Array.isArray(order.stockShortfall) ? order.stockShortfall : []) as Array<Record<string, unknown>>;
+  const mergedShortfall = priorShortfall.filter((e) => !thisPiKeys.has(String(e.orderLineKey))).concat(shortfall);
+
+  await updateDocById(COLLECTIONS.ORDERS, orderId, sanitizeFirestoreData({
+    fulfilmentWarehouseId,
+    stockShortfall: mergedShortfall,
+    reservationStatus: mergedShortfall.length ? 'partial' : 'reserved',
+    reservedAt: nowIso,
+    updatedBy: actorId,
+  }));
+
+  return {
+    warehouseId: fulfilmentWarehouseId,
+    reservedTotal: round2(reservedTotal),
+    shortfall,
+    applied: batch.applied,
+  };
+}
 
 function addDaysIso(dateValue: string | undefined, days: number): string {
   const base = dateValue ? new Date(dateValue) : new Date();
@@ -216,10 +305,30 @@ export async function markPIAsPaid(piId: string) {
   });
   }
 
+  // INVENTORY-07 — reservation trigger (Plan §6, §07 E). Runs only when the
+  // `reservationsEnabled` flag is on; OFF keeps the pre-07 `stockBlocked`-only
+  // behaviour above untouched. The payment transaction is already committed;
+  // reservation is a best-effort follow-up that never fails the payment.
+  let reservation: Awaited<ReturnType<typeof reserveStockForPaidOrder>> | undefined;
+  if (isReservationsEnabled()) {
+    try {
+      reservation = await reserveStockForPaidOrder(piId, linkedOrderId, state.user?.id || 'system');
+    } catch (err) {
+      console.error(`[markPIAsPaid] stock reservation failed for PI ${piId}:`, err);
+      try {
+        await updateDocById(COLLECTIONS.ORDERS, linkedOrderId, sanitizeFirestoreData({
+          reservationStatus: 'failed', reservationError: String((err as Error)?.message || err), updatedBy: state.user?.id || 'system',
+        }));
+      } catch { /* non-critical */ }
+      reservation = { skipped: true as const, reason: `reservation error: ${String((err as Error)?.message || err)}` };
+    }
+  }
+
   await logActivity('Invoices', 'Marked PI Paid', piId, {
     orderId: linkedOrderId,
     entityName: customerName || piId,
     actionLabel: 'Marked proforma invoice paid',
+    ...(reservation ? { reservation } : {}),
   });
   notifyUsers(
     await usersByRole('Warehouse'),
@@ -231,7 +340,7 @@ export async function markPIAsPaid(piId: string) {
     resolveWriteCompanyId()
   );
 
-  return { piId, orderId: linkedOrderId };
+  return { piId, orderId: linkedOrderId, ...(reservation ? { reservation } : {}) };
 }
 
 function nextPaymentStatus(total: number, paidAmount: number, orderStatus?: string) {

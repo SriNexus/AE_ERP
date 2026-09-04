@@ -435,6 +435,14 @@ export interface Order extends BaseRecord {
   totalInvoiced?: number;
   pendingBilling?: number;
   stockBlocked?: boolean;
+  /** INVENTORY-07 — the warehouse stock is reserved from, locked at PI payment. */
+  fulfilmentWarehouseId?: string;
+  warehouseId?: string;
+  /** INVENTORY-07 — 'reserved' | 'partial' | 'deferred_no_warehouse' | 'failed'. */
+  reservationStatus?: string;
+  reservedAt?: string;
+  /** INVENTORY-07 — per-line quantity that could not be reserved (stock short). */
+  stockShortfall?: Array<{ productId?: string; orderLineKey?: string; piId?: string; requestedQty?: number; reservedQty?: number; shortfallQty?: number }>;
   total?: number;
   piGenerated?: boolean;
   generatedPIs?: string[];

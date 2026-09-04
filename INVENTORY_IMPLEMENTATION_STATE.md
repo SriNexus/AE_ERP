@@ -24,23 +24,53 @@ APPROVAL NOTES:         Project owner approved INVENTORY_IMPLEMENTATION_PLAN.md 
 ## CURRENT POSITION
 
 ```
-CURRENT PHASE:          INVENTORY-05d — manual + cancel-restore via the engine; retire the
-                        duplicate stock writer — COMPLETE. **PHASE 05 (movement engine) COMPLETE.**
-STATUS:                 IMPLEMENTED + VERIFIED + COMMITTED. `stockWorkflow.stockIn` is now a
-                        THIN WRAPPER over `applyStockMovement` (no transaction of its own);
-                        `useInventory.useSaveStockEntry` calls the engine (ADJUSTMENT_IN /
-                        ADJUSTMENT_OUT); `stockWorkflow.cancelOrder`'s restore loop calls the
-                        engine (SALES_RETURN_IN, keyed `order_cancel:{orderId}:{dispatchId}:
-                        {productId}` — engine idempotency replaces the old manual scan).
-                        **EXACTLY ONE stock/stock_ledger writer remains** —
-                        `src/lib/inventory/stockMovementEngine.ts` — enforced by a new repo-wide
-                        assertion test (`singleStockWriter.test.ts`). `resolveStockSummaryDocumentId`
-                        moved into the engine (breaks the import cycle) + re-exported from
-                        `stockWorkflow.ts`. NO firestore.rules change. **P1-4 CLOSED.**
-LAST VERIFIED COMMIT:   HEAD  refactor(inventory): single writer — retire duplicate stock transaction (INVENTORY-05d, P1-4)
-                        HEAD chain: … → ff45262 (05a) → d5010e2 (05a.1) → e01819a (05b) → 8432c22 (05c) → HEAD (05d).
+CURRENT PHASE:          INVENTORY-07 — Sales Reservation / Allocation — IMPLEMENTED + VERIFIED
+                        (working tree; NOT committed — the Phase-07 spec withheld all Git work).
+                        Phase 06 remains implemented + verified + uncommitted in the same tree.
+STATUS (07):            `reservationsEnabled` feature flag ACTIVATED (default ON; instant rollback =
+                        flip `RESERVATIONS_ENABLED_DEFAULT` in `src/lib/inventory/reservationConfig.ts`).
+                        New `stock_reservations` collection (rules block + 5 indexes + isSpecialCollection
+                        + WAREHOUSE_SCOPED + permission module). Engine: `SALES_RESERVE`/`SALES_RELEASE`
+                        + `clampToStock` partial-grant + `reservationsEnabled` gate + INV-3 on the final
+                        per-summary state; `availableQty = onHandQty − reservedQty` after EVERY movement
+                        (INV-4 — the one roadmap semantic change). `markPIAsPaid` → reserve per PI line
+                        (participant creates the reservation doc IN the engine txn; idempotent
+                        `SALES_RESERVE:proforma_invoice:{pi}:{line}`; partial → `order.stockShortfall[]`;
+                        no fulfilment warehouse → deferred, payment never failed). Dispatch verify →
+                        `SALES_RELEASE`(dispatch_consume) in the same batch as DISPATCH_OUT + reservation
+                        doc `qtyConsumed`/`status`. `cancelOrder` → `SALES_RELEASE`(order_cancel) for the
+                        unconsumed remainder + reservation `released` (alongside the existing
+                        SALES_RETURN_IN; no double count). Reconciliation extended ADDITIVELY
+                        (`reservedReconciled`, `reservedMismatchCount`) — Phase-06 physical math
+                        untouched. Migration: `scripts/inventory/backfill-onhand.ts` (dry-run default,
+                        `--apply`; start-clean, no retro-reserve; never deletes / never touches ledger).
+                        UI: StockWorkspace ON HAND column; OrdersWorkspace reservation panel + shortfall.
+                        Emulator `stockReservationTransaction.emulator.test.ts` 15/15 (incl. real
+                        concurrent-runTransaction M4 + rules + B2B/B2C smoke). Full regression matrix:
+                        29-fail brittle baseline UNCHANGED (+97 passing tests). tsc 0 / lint 3
+                        pre-existing / build 0. NOT committed.
+STATUS (06):            New READ-ONLY `src/engines/StockReconciliationEngine.ts` (mirrors
+                        ProcurementValidationEngine): `reconcileSummary` / `reconcileWarehouse`
+                        / `generateStockHealthReport` compute `Σ(operational IN) − Σ(operational
+                        OUT)` from `stock_ledger` and compare to `stock.onHandQty`. Pure math in
+                        `src/engines/stockReconciliationMath.ts` (zero imports) — reused by the
+                        engine AND `scripts/inventory/reconcile.ts`. RECONCILE_ADJUST rows are
+                        EXCLUDED from `computed` (they patch `stored`, not the operational
+                        history) so a correction genuinely reconciles (post-correction delta 0).
+                        Correction: `applyReconciliationCorrection` (canDo('edit','stock') +
+                        reason + reconciliationRunId) → `applyStockMovement('RECONCILE_ADJUST',
+                        qty: signed delta, idempotencyKey: RECONCILE_ADJUST:reconciliation:
+                        {runId}:{summaryId})` — audit-logged, idempotent, engine-only. Engine:
+                        +`auditReconciliation: true` flag on RECONCILE_ADJUST ledger rows. UI:
+                        read-only "Reconcile" report in `StockWorkspace` behind `canDo('view',
+                        'stock')`; per-mismatch "Apply Correction" (confirm + reason) behind
+                        `canDo('edit','stock')`. NO firestore.rules / firestore.indexes change.
+                        **P2-1 detection DONE; P1-4 single-writer invariant intact.**
+LAST VERIFIED COMMIT:   6939c12 (INVENTORY-05d) — Phases 06 AND 07 are BOTH UNCOMMITTED in the
+                        working tree. Commit chain: … → ff45262 (05a) → d5010e2 (05a.1) →
+                        e01819a (05b) → 8432c22 (05c) → 6939c12 (05d).
 DATE OF THIS UPDATE:    2026-09-04
-UPDATED BY:             INVENTORY-05 (05a.1 → 05b → 05c → 05d) implementation session
+UPDATED BY:             INVENTORY-07 implementation session
 ```
 
 ---
@@ -60,7 +90,9 @@ UPDATED BY:             INVENTORY-05 (05a.1 → 05b → 05c → 05d) implementat
 | **INVENTORY-05a.1** | 2026-09-04 | `d5010e2` | **PASS** — `stockMovementEngine.emulator.test.ts` 11/11 (8 prior + 3 participant: PO write commits atomically with stock+ledger under CURRENT rules; participant `validate` throw aborts the whole txn — stock+ledger+PO all unchanged; **concurrent 7+6 over-receipt → exactly one aborts entirely, Σledger == PO.receivedQty, no stranded stock**). NO firestore.rules change. | **Prerequisite for 05b** — resolves the 05b atomicity blocker. New `applyStockMovements(inputs, participant?)`: one `runTransaction` over every (stock summary + ledger row) in the batch PLUS an optional `MovementParticipant` that runs its OWN authoritative read (`ctx.get`) → validate (throw = abort with error; `false` = benign skip) → write (`MovementWriter`) all inside the SAME txn. The `MovementWriter` REJECTS `stock`/`stock_ledger` (`assertParticipantCollection`) so the engine stays the sole owner of every stock/ledger mutation (Plan §4.1). `applyStockMovement(input, participant?)` is now a thin wrapper. Engine also dual-writes legacy `beforeQty`/`afterQty` + a generic `input.ledgerExtra` pass-through (GRN's `referenceType:'GoodsReceipt'` / `purchaseOrderId`). New: `types.ts` (`MovementParticipant`, `MovementWriter`, `MovementPlanEntry`, `BatchMovementResult`), +7 unit tests. **NO caller migrated.** |
 | **INVENTORY-05b** | 2026-09-04 | `e01819a` | **PASS** — `grnReceiptTransaction.emulator.test.ts` rewritten to the migrated engine+participant shape, all **16/16** Phase-03 cases green (J6–J12, double-submit, **concurrent 6+6 / 4+6 / 7+6 over-receipt → INV-13 holds atomically, no stranded stock**, Procurement/Sales/Accounts roles, cross-company, forged warehouseId, ledger+GRN immutability, reconcile-from-ledger). NO firestore.rules / firestore.indexes change → INVENTORY-03 emulator surface stands. | `goodsReceiptWorkflow.createGoodsReceipt` → `applyStockMovements(receiptMovementInputs(...), grnPurchaseOrderParticipant(...))`. The Phase-03 local `runTransaction` over stock+ledger+PO is **DELETED** — the engine's txn now carries every line's stock+ledger write PLUS the PO participant: `read` re-fetches the PO in-txn, `validate` re-checks `Σ received + applied ≤ ordered` per line (**INV-13**, P1-2) + PO receivable (P1-5), `commit` increments `items[].receivedQty` off the fresh PO + recomputes status. Movement ledger id `STKMV-{enc(PURCHASE_RECEIPT:goods_receipt:{grnId}:{lineIndex})}` (grnId already encodes each line's before+qty → idempotent, P1-1). New rows carry the unified schema + legacy compat (`type`/`referenceType:'GoodsReceipt'`/`referenceId`/`beforeQty`/`afterQty`/`purchaseOrderId` + `grnLineIndex`/`grnPreviouslyReceivedQty` via `ledgerExtra`). `reconcileMissingGrnDocs` reads the new fields (falls back to the -03 parse for old rows). Demo + configured branches unified (both go through the engine). NO caller of `createGoodsReceipt` changed (signature identical) — Desktop + Mobile share it. Removed: `grnReceiptLedgerId` / `grnReceiptIdempotencyKey` / `lineMetaFor` (superseded). Tests: `goodsReceiptWorkflow.test.ts` + `grn.baseline.test.ts` updated to the new ledger shape (behaviour identical). |
 | **INVENTORY-05c** | 2026-09-04 | `8432c22` | **PASS** — `dispatchStockOutTransaction.emulator.test.ts` rewritten to the migrated engine+participant shape, all **8/8** Phase-01 cases green (K2 atomic decrement + DISPATCH_OUT ledger + dispatch Dispatched; **D4/K4 concurrency: stock=1, 2 verifies → exactly one applies, final 0, one ledger row, never negative**; D3/K3 insufficient aborts entirely; D5/K5 idempotent no-op; K5 terminal guard; ledger immutability; P1-3 Accounts denied; cross-warehouse denied). NO firestore.rules change → INVENTORY-03 emulator surface stands. | `dispatchWorkflow.executeAndVerifyDispatch` → `applyStockMovements(DISPATCH_OUT[], dispatchDocParticipant)`. The Phase-01 local `runTransaction` over dispatch+stock+ledger is **DELETED** — every line is a `DISPATCH_OUT` movement; the engine's ONE txn carries all lines' stock+stock_ledger writes PLUS `dispatchDocParticipant` (`read` re-fetches the dispatch; `validate` returns **false** for a terminal dispatch → benign skip / `alreadyVerified`; `commit` writes `status:'Dispatched'` + `items`/`verifiedBy`/`dispatchedAt`). The order-items update + project patch + notifications stay AFTER the engine call (Phase-01 shape — Plan §811). Sequential double-click still rejected by the pre-check throw. `dispatchOutLedgerId(id, productId)` now returns `STKMV-{enc(DISPATCH_OUT:dispatch:{id}:{productId})}` (idempotency key byte-identical to INVENTORY-01). New rows: unified schema + legacy (`type:'OUT'`, `beforeQty`/`afterQty`, `referenceType:'Dispatch'`, `referenceId`). Demo + configured unified through the engine. Zero-line verify + all-idempotent-no-op recovery flip the dispatch status directly (`updateDocById`, Phase-01 parity — a `dispatch`-doc write, NOT a stock write). `executeAndVerifyDispatch` signature unchanged — Desktop (`ProjectDispatchWorkspace`) + Mobile (`MobileDispatchWorkspace`) share it. Tests: `dispatchWorkflow.test.ts` + `dispatchOut.baseline.test.ts` updated to the engine shape (behaviour identical). |
-| **INVENTORY-05d** | 2026-09-04 | `HEAD` | **PASS** — new `singleStockWriter.test.ts` (2) asserts NO `stock`/`stock_ledger` write exists outside the engine + the 4 workflows call it; `stockWorkflow.test.ts` 7/7, `stockIn.baseline` 9/9, `manualEntry.baseline` 7/7, `cancelOrder.baseline` 7/7, `stockMovementEngine.test.ts` 22/22. NO firestore.rules change → INVENTORY-03 emulator surface stands (`stockAdjustTransaction` + `stockRoleMatrix` + engine emulator re-run green). | **P1-4 CLOSED — one stock writer.** `stockWorkflow.stockIn` → thin wrapper over `applyStockMovement` (sourceType map: purchase→PURCHASE_RECEIPT, return→SALES_RETURN_IN, adjustment→ADJUSTMENT_IN + reasonCode); its Phase-00 demo transaction + the configured `runTransaction` are **DELETED**. `useInventory.useSaveStockEntry` → `applyStockMovement` (IN→ADJUSTMENT_IN, OUT→ADJUSTMENT_OUT, reasonCode from `reference`/`notes`, `reference` kept on the row via `ledgerExtra`); its `runTransaction` is DELETED. `stockWorkflow.cancelOrder` restore loop → `applyStockMovement('SALES_RETURN_IN', sourceType:'order_cancel', sourceId:'{orderId}:{dispatchId}:{productId}')`; the old "scan existing `CANCEL:` ledgers" guard is replaced by the engine's in-txn idempotency (`result.applied` drives `restoredItems`). `cancelOrder`'s INVENTORY-04 order+dispatch **status** `runTransaction` is untouched (not a stock write). Manual entries stay NON-idempotent (`stockIn`/`useSaveStockEntry` mint a fresh idempotency key per call unless an explicit `sourceId` is given). `resolveStockSummaryDocumentId` MOVED into `stockMovementEngine.ts` (breaks the `engine → stockWorkflow → engine` cycle) + re-exported from `stockWorkflow.ts`. `stockIn` still has 3 UI callers (`ProductDetailDrawer`, `ProductDetailsModal`, `MobileStockWorkspace`) + `cancelOrder`; signature unchanged. NEW: `singleStockWriter.test.ts`. Baseline tests rewritten to the engine shape (behaviour identical, P1-1 for an explicit `sourceId` now fixed). |
+| **INVENTORY-05d** | 2026-09-04 | `6939c12` | **PASS** — new `singleStockWriter.test.ts` (2) asserts NO `stock`/`stock_ledger` write exists outside the engine + the 4 workflows call it; `stockWorkflow.test.ts` 7/7, `stockIn.baseline` 9/9, `manualEntry.baseline` 7/7, `cancelOrder.baseline` 7/7, `stockMovementEngine.test.ts` 22/22. NO firestore.rules change → INVENTORY-03 emulator surface stands (`stockAdjustTransaction` + `stockRoleMatrix` + engine emulator re-run green). | **P1-4 CLOSED — one stock writer.** `stockWorkflow.stockIn` → thin wrapper over `applyStockMovement` (sourceType map: purchase→PURCHASE_RECEIPT, return→SALES_RETURN_IN, adjustment→ADJUSTMENT_IN + reasonCode); its Phase-00 demo transaction + the configured `runTransaction` are **DELETED**. `useInventory.useSaveStockEntry` → `applyStockMovement` (IN→ADJUSTMENT_IN, OUT→ADJUSTMENT_OUT, reasonCode from `reference`/`notes`, `reference` kept on the row via `ledgerExtra`); its `runTransaction` is DELETED. `stockWorkflow.cancelOrder` restore loop → `applyStockMovement('SALES_RETURN_IN', sourceType:'order_cancel', sourceId:'{orderId}:{dispatchId}:{productId}')`; the old "scan existing `CANCEL:` ledgers" guard is replaced by the engine's in-txn idempotency (`result.applied` drives `restoredItems`). `cancelOrder`'s INVENTORY-04 order+dispatch **status** `runTransaction` is untouched (not a stock write). Manual entries stay NON-idempotent (`stockIn`/`useSaveStockEntry` mint a fresh idempotency key per call unless an explicit `sourceId` is given). `resolveStockSummaryDocumentId` MOVED into `stockMovementEngine.ts` (breaks the `engine → stockWorkflow → engine` cycle) + re-exported from `stockWorkflow.ts`. `stockIn` still has 3 UI callers (`ProductDetailDrawer`, `ProductDetailsModal`, `MobileStockWorkspace`) + `cancelOrder`; signature unchanged. NEW: `singleStockWriter.test.ts`. Baseline tests rewritten to the engine shape (behaviour identical, P1-1 for an explicit `sourceId` now fixed). |
+| **INVENTORY-07** | 2026-09-04 | *UNCOMMITTED (working tree — Phase-07 spec withheld all Git work)* | **PASS** — new `stockReservationTransaction.emulator.test.ts` **15/15** (M1–M8, partial dispatch, cancel release, **real concurrent runTransaction M4: 7+3, total==onHand, never over-reserve**, Sales ALLOW / Manager DENY / cross-company DENY, reservation-doc + ledger immutability, legitimate consume-update ALLOW, full B2B/B2C inventory-spine SMOKE). `stockMovementEngine.test.ts` **30/30** (+8 Phase-07). New `reservations.test.ts` **9/9**, `markPIAsPaidReservation.test.ts` **4/4**. `stockReconciliationEngine.test.ts` **25/25** (+4 reserved-reconcile). Emulator regression (batched): `stockRoleMatrix` / `stockAdjustTransaction` / `dispatchStockOutTransaction` / `grnReceiptTransaction` / `orderLifecycleTransaction` / `stockMovementEngine` / `stockReconciliation` / `multiTenantSecurity` / `sensitiveCollectionsRoleEnforcement` / `rbacPhase8CumulativeSecurity` / `groupAdminFullGroupAccess` / `phase8GroupPerformance` / `firestoreDemoIsolation` / `settingsPersonalOwnershipBackfillFix` / `rolesSystemRolePermissionEditFix` / `missingIsSuperAdminFieldFix` / `attendanceRules` / `biometricFaceReferences` / `leadCreationProjectionWrites` — **20 files, all green when batched** (one cold 9-suite run flaked 2, re-verified clean per BRAIN §2.1). Full vitest: 259 files, **29-fail / 65-fail brittle baseline UNCHANGED**, +97 passing. tsc exit 0, lint 3 pre-existing attendance, build exit 0. | **INVENTORY-07 — Sales Reservation / Allocation.** `reservationsEnabled` flag ACTIVATED (`src/lib/inventory/reservationConfig.ts`; default ON — the activation phase; rollback = flip the constant). New `stock_reservations/{RSV-enc(key)}` collection + `firestore.rules` block + 5 `firestore.indexes.json` composites; added to `isSpecialCollection()` / `WAREHOUSE_SCOPED_COLLECTIONS` / `COLLECTION_PERMISSION_MODULE`. Engine `stockMovementEngine.ts`: `SALES_RESERVE`/`SALES_RELEASE` honour `input.reservationsEnabled ?? isReservationsEnabled()`; new `clampToStock` grants `min(qty, onHand−reserved)` / `min(qty, reserved)` inside the plan (partial reservation M3; stale-safe consume/release); flag OFF → RESERVE/RELEASE are benign no-ops; INV-3 checked on the FINAL per-summary plan state; `availableQty = onHandQty − reservedQty` after every movement (INV-4). New `src/lib/inventory/reservations.ts` (participants + input builders + `applyReservationDelta`). `invoiceWorkflow.markPIAsPaid` → `reserveStockForPaidOrder` (after the payment txn; `applyStockMovements(SALES_RESERVE[], reserveParticipant)`; fulfilment warehouse = `order.fulfilmentWarehouseId||order.warehouseId`, locked; missing → `reservationStatus:'deferred_no_warehouse'`, payment never failed; shortfall merged into `order.stockShortfall[]`; idempotent). `dispatchWorkflow.executeAndVerifyDispatch` → reads order reservations once, `SALES_RELEASE`(dispatch_consume) per verified line in the SAME engine batch, `dispatchDocParticipant` updates the reservation docs; only DISPATCH_OUT results bump order line qty. `stockWorkflow.cancelOrder` → `SALES_RELEASE`(order_cancel) for the unconsumed remainder + `reservationUpdateParticipant` marks `released` (alongside SALES_RETURN_IN; no double count). Reconciliation ADDITIVE: `stockReconciliationMath` gains `storedReserved`/`expectedReserved`/`reservedDelta`/`reservedReconciled`; `StockReconciliationEngine` + `scripts/inventory/reconcile.ts` fetch `stock_reservations`; `generateStockHealthReport` reports `reservedMismatchCount`. Migration `scripts/inventory/backfill-onhand.ts` (dry-run default / `--apply`; start-clean, no retro-reserve; never deletes / never touches ledger; flags + skips ledger-complete mismatches). `firestore.rules`: `match /stock` update gains a reservation-only branch for Sales/Accounts (operational role-match still short-circuits first — E7 neutral); new `match /stock_reservations` block (warehouse+company scoped, `resource==null`, create role-gated, update `hasOnly` accounting fields + identity immutable, `delete: if false`). UI: `StockWorkspace` ON HAND column; `OrdersWorkspace` Stock Reservation panel + shortfall. `types/index.ts`: additive `order.fulfilmentWarehouseId` / `reservationStatus` / `reservedAt` / `stockShortfall[]`. Baseline tests updated for the INV-4 semantic flip (`stockIn` / `manualEntry` / `dispatchOut` / `stockWorkflow`: `availableQty` now `onHand−reserved` where a fixture seeded a non-zero `reservedQty` — expectations intentionally changed). NOT committed. |
+| **INVENTORY-06** | 2026-09-04 | *UNCOMMITTED (working tree)* | **PASS** — new `stockReconciliation.emulator.test.ts` **6/6** (F4 report writes 0; F5 Admin RECONCILE_ADJUST applies+audits+reconciles; F5 idempotent per run-id; F5 Sales-role DENIED — nothing written; F5 cross-company DENIED; F5 correction ledger row immutable). `stockReconciliationEngine.test.ts` **21/21** (classification, detection 1–11, correction 12–20, F4 read-only). `singleStockWriter.test.ts` still green (engine `auditReconciliation` flag is additive). NO firestore.rules change → INVENTORY-03 emulator surface stands. | READ-ONLY `src/engines/StockReconciliationEngine.ts` — `reconcileSummary(id)` / `reconcileWarehouse(id)` / `generateStockHealthReport()` compute `computed = Σ(operational IN qty) − Σ(operational OUT qty)` from `stock_ledger` (reservation rows ignored; **RECONCILE_ADJUST rows EXCLUDED** so a correction genuinely reconciles) and compare to `stock.onHandQty`; return `{ stored, computed, reconcileAdjustTotal, delta, reconciled, ledgerRowCount, unclassifiedRowCount, firstMovementAt, lastMovementAt, ledgerComplete, note }`. `ledgerComplete=false` (no operational rows / an unclassifiable row) → flagged **likely pre-engine opening balance**, not real drift. Classifier `ledgerRowOnHandDelta`: `direction` → `movementType` → legacy `type`; RECONCILE_ADJUST sign from `direction` (engine writes qty ABSOLUTE). Pure math extracted to `src/engines/stockReconciliationMath.ts` (**zero imports**) — reused by the engine + `scripts/inventory/reconcile.ts` (no second implementation). **Correction:** `applyReconciliationCorrection({ summaryId, targetOnHand?, reasonCode, reconciliationRunId, approvedBy? })` — `canDo('edit','stock')` + reason + run-id required; `correctionQty = (targetOnHand ?? computed) − stored` (SIGNED, sign NOT reversed); calls `applyStockMovement('RECONCILE_ADJUST', qty, idempotencyKey:'RECONCILE_ADJUST:reconciliation:{runId}:{summaryId}', ledgerExtra:{ reconciliationRunId, approvedBy, reconciledFromOnHand, reconciledToOnHand, referenceType:'StockReconciliation' })` → engine writes stock+ledger (audit trail: the RECONCILE_ADJUST row stays in the ledger), idempotent per (run-id × summary); `logActivity('Stock','Reconciliation Correction', …)`. Engine change: `+auditReconciliation: true` on RECONCILE_ADJUST ledger rows (additive). UI: `src/features/stock/components/StockReconciliationReport.tsx` (read-only report + correction confirm dialog) wired into `StockWorkspace` "Reconcile" button (`canDo('view','stock')`; corrections `canDo('edit','stock')`). `scripts/inventory/reconcile.ts` — read-only CLI (Firestore REST, zero writes). **NO auto-correction anywhere** (Plan §17). NO rules/indexes/schema change (RECONCILE_ADJUST rows are normal movement rows + a flag). |
 
 ---
 
@@ -102,12 +134,14 @@ files are uncommitted.
 ## CURRENT OBJECTIVE
 
 ```
-INVENTORY-00..05a are committed in order (c043009 checkpoint, then 1368cfd / 58038f4 /
-8e2c799 / 21e502e / 9227ec3 docs / ff45262 (05a)). All phases implemented + verified +
-committed. INVENTORY-05a landed the Stock Movement Engine as DORMANT dead code — no
-caller migrated. The next authorized phase is INVENTORY-05b (migrate the GRN receipt
-path onto the engine behind a flag). It requires its own explicit go-ahead — do NOT
-start it from this file alone.
+INVENTORY-00..05d committed (through 6939c12). INVENTORY-06 (read-only reconciliation +
+human-approved RECONCILE_ADJUST) AND INVENTORY-07 (sales reservation / allocation) are
+BOTH implemented + verified but UNCOMMITTED in the working tree — each phase's spec
+explicitly withheld all Git work. `reservationsEnabled` is ON by default (Phase 07 is
+the activation phase). The next authorized phase is INVENTORY-08 (warehouse transfer) —
+it requires its own explicit go-ahead; do NOT start it from this file alone. Before
+any commit of 06/07, get explicit direction on commit boundaries + whether to run the
+backfill (`scripts/inventory/backfill-onhand.ts --apply`) against a data copy first.
 ```
 
 ---
@@ -1294,6 +1328,94 @@ INVARIANTS:            INV-1 (no negative on-hand), INV-7 (1 movement = 1 ledger
 
 ---
 
+## WHAT WAS CHANGED (INVENTORY-06 — stock ↔ ledger reconciliation, read-only + human correction)
+
+```
+NEW (5 files):
+  src/engines/stockReconciliationMath.ts
+      PURE, ZERO imports. `ledgerRowOnHandDelta(row)` → { delta, classified, isReconcile }
+      (direction → movementType → legacy type; RECONCILE_ADJUST sign from `direction`).
+      `computeReconciliation({ storedOnHand, ledgerRows, … })` → SummaryReconciliation.
+      `computed` = Σ(operational IN qty) − Σ(operational OUT qty). RESERVE/RELEASE ignored.
+      **RECONCILE_ADJUST rows are EXCLUDED from `computed`** (tracked separately as
+      `reconcileAdjustTotal`) — they patch `stored`, not the operational history, so a
+      correction that brings `stored` to `computed` actually reconciles (post-correction
+      delta 0). `ledgerComplete=false` when there are no operational rows (stored != 0) or
+      an unclassifiable row exists → the mismatch is flagged "likely pre-engine opening
+      balance". Shared by the engine + the CLI script (Plan §26 — one implementation).
+  src/engines/StockReconciliationEngine.ts   (mirrors ProcurementValidationEngine)
+      re-exports the pure math + Firestore-backed READ-ONLY:
+        reconcileSummary(summaryId)   — getOne(stock) + getAll(stock_ledger, product+warehouse)
+        reconcileWarehouse(whId)      — getAll(stock, wh) + getAll(stock_ledger, wh) ONCE,
+                                        grouped by product (no N×M fan-out)
+        generateStockHealthReport()   — all summaries + all ledger once; splits mismatches
+                                        into realDriftCount (ledgerComplete) vs
+                                        likelyOpeningBalanceCount
+      Company / warehouse scope is enforced by getAll/getOne (companyScopedQuery +
+      firestore.rules). NOTHING is written by any of these.
+      applyReconciliationCorrection({ summaryId, targetOnHand?, reasonCode,
+        reconciliationRunId, approvedBy? }):
+        - canDo('edit','stock') || throw; reasonCode + reconciliationRunId required.
+        - correctionQty = (targetOnHand ?? computed) − stored  (SIGNED; sign NOT reversed —
+          Plan §13). `|correctionQty| <= EPS` → { applied:false, alreadyReconciled:true }.
+        - applyStockMovement('RECONCILE_ADJUST', qty: correctionQty, unit: summary unit,
+          sourceType:'reconciliation', sourceId: runId, lineKey: summaryId,
+          idempotencyKey:'RECONCILE_ADJUST:reconciliation:{runId}:{summaryId}',
+          reasonCode, ledgerExtra:{ reconciliationRunId, approvedBy, reconciledFromOnHand,
+          reconciledToOnHand, ledgerComputedOnHand, referenceType:'StockReconciliation' }).
+          Idempotent per (run-id × summary) via the engine's in-txn ledger-exists check.
+        - logActivity('Stock','Reconciliation Correction', summaryId, {...}).
+        - NEVER writes stock / stock_ledger directly.
+  src/features/stock/components/StockReconciliationReport.tsx
+      READ-ONLY report (useQuery → generateStockHealthReport) + per-mismatch "Apply
+      Correction" (Modal confirm: physical-count Input + required reason Textarea) →
+      applyReconciliationCorrection with one reconciliationRunId per opened report.
+      Correction UI shown only when canDo('edit','stock').
+  scripts/inventory/reconcile.ts
+      Standalone READ-ONLY CLI (Firestore REST API + a TOKEN; zero writes). Imports the
+      shared pure math. `--company <id>` / `--json`. Exit 0 even with mismatches.
+  src/lib/__tests__/stockReconciliation.emulator.test.ts   (6 — F4 / F5)
+
+MODIFIED (2 files):
+  src/lib/inventory/stockMovementEngine.ts
+      buildLedgerRow: `+auditReconciliation: true` when movementType === 'RECONCILE_ADJUST'
+      (additive audit flag — Plan §863). NOTHING else in the engine changed.
+  src/pages/StockWorkspace.tsx
+      + "Reconcile" hero button (canDo('view','stock')) opening a Modal that renders
+      <StockReconciliationReport/>. No other change.
+  vitest.emulator.config.ts   (+1 line registering the reconciliation emulator test)
+
+FIRESTORE RULES / INDEXES / STORAGE.RULES: NONE. DATABASE: none new — RECONCILE_ADJUST
+  rows are normal `stock_ledger` movement rows (+ the `auditReconciliation` flag +
+  reconciliation `ledgerExtra`). NO backfill, NO historical-data rewrite (Plan §17/§25).
+  P1-4 single-writer invariant intact — the reconciliation engine only READS; corrections
+  go through `applyStockMovement` (singleStockWriter.test.ts still green).
+```
+
+---
+
+## TEST RESULTS (INVENTORY-06)
+
+```
+TYPECHECK:  npx tsc --noEmit -> exit 0. 3 errors, ALL pre-existing (attendancePhase11/12,
+            attendanceRuleEngine). ZERO in any INVENTORY-06 file.
+LINT:       npm run lint (tsc --noEmit) -> same.
+BUILD:      npm run build -> SUCCESS (exit 0). Pre-existing chunk-size warning only.
+UNIT (focused): stockReconciliationEngine.test.ts 21/21; singleStockWriter.test.ts 2/2;
+            stockMovementEngine.test.ts 22/22; the -00..-05 baseline / workflow tests green.
+UNIT (full): npx vitest run -> SAME 29-file / 65-test brittle baseline (BRAIN §35).
+            No reconciliation / engine / stock file among the failures. +1 file
+            (stockReconciliationEngine.test.ts).
+FIRESTORE / EMULATOR:
+            stockReconciliation.emulator.test.ts -> 6/6 (JBR java) — F4 zero-write,
+            F5 authorized correction + audit + post-correction reconcile, F5 idempotent
+            per run-id, F5 Sales-role DENIED, F5 cross-company DENIED, F5 ledger immutable.
+            NO firestore.rules change → the INVENTORY-03 emulator surface stands
+            (grn / dispatch / engine / stockRoleMatrix / stockAdjust re-run green).
+```
+
+---
+
 ## KNOWN REMAINING RISKS (full register in the audit + Plan §2)
 
 ```
@@ -1350,7 +1472,16 @@ P1-8  Order items editable after partial dispatch                             **
       non-line edits still allowed. Orders.tsx + MobileOrderWorkspace.tsx both call updateOrder.
       KNOWN GAP (unchanged, documented): the generic `orders` REST API PUT still bypasses
       this — no dedicated `orders` rules block this phase (deferred rules-consolidation).
-P2-1  No stock<->ledger reconciliation                                         (Plan Phase 06)
+P2-1  No stock<->ledger reconciliation                                         *** DETECTION DONE (INVENTORY-06) — correction human-gated ***
+      src/engines/StockReconciliationEngine.ts (read-only): per summary,
+      computed = Σ(operational ledger IN qty) − Σ(operational ledger OUT qty) vs stock.onHandQty.
+      A /stock "Reconcile" report + scripts/inventory/reconcile.ts (both read-only, zero writes).
+      Correction is a deliberate human action: applyReconciliationCorrection → RECONCILE_ADJUST
+      movement through the engine (canDo('edit','stock') + reason + run-id, audit-logged,
+      idempotent per (run-id × summary)). NO auto-correction, NO scheduled cron (Future). NO
+      firestore.rules / schema change. RECONCILE_ADJUST rows are excluded from `computed`
+      (they patch `stored`) so a correction reconciles. The one-time manual correction
+      campaign (review report + physical count + apply) is a data task, not code.
 P2-2  cancelOrder non-atomic; doesn't reverse PIs/tax invoices                 *** STATUS-ATOMIC + FLAGS (INVENTORY-04); RESTORE ON THE ENGINE (INVENTORY-05d) ***
       Order-status + every affected dispatch-status write in ONE runTransaction (configured)
       re-reading each doc — emulator-proven (all flip or none). Additive
@@ -1573,7 +1704,7 @@ INVENTORY-05c (COMMITTED — 8432c22):
   PRODUCTION SOURCE FILES MODIFIED: dispatchWorkflow.ts (1) + engine demo-read tweak. RULES/INDEXES: NONE.
   UI/MOBILE: executeAndVerifyDispatch signature unchanged (Desktop ProjectDispatchWorkspace + Mobile MobileDispatchWorkspace).
 
-INVENTORY-05d (COMMITTED — <05d>):
+INVENTORY-05d (COMMITTED — 6939c12):
   MODIFIED: src/lib/stockWorkflow.ts  (stockIn → thin applyStockMovement wrapper [demo txn + configured
             runTransaction DELETED]; cancelOrder restore → applyStockMovement('SALES_RETURN_IN'); manual
             CANCEL: scan removed; resolveStockSummaryDocumentId re-exported from the engine)
@@ -1588,6 +1719,25 @@ INVENTORY-05d (COMMITTED — <05d>):
   PRODUCTION SOURCE FILES MODIFIED: stockWorkflow.ts, useInventory.ts, stockMovementEngine.ts (3).
   RULES/INDEXES/storage: NONE. DATABASE: new manual/cancel ledger rows use the unified schema (additive).
   UI: stockIn's 3 UI callers (ProductDetailDrawer, ProductDetailsModal, MobileStockWorkspace) UNCHANGED (signature identical).
+
+INVENTORY-06 (UNCOMMITTED — in the working tree; the user withheld commit for this phase):
+  ADDED:    src/engines/stockReconciliationMath.ts        (PURE, zero imports — the one reconciliation math)
+  ADDED:    src/engines/StockReconciliationEngine.ts       (read-only reconcile* + applyReconciliationCorrection)
+  ADDED:    src/engines/__tests__/stockReconciliationEngine.test.ts   (21 tests)
+  ADDED:    src/lib/__tests__/stockReconciliation.emulator.test.ts    (6 tests — F4 / F5)
+  ADDED:    src/features/stock/components/StockReconciliationReport.tsx  (read-only report + correction dialog)
+  ADDED:    scripts/inventory/reconcile.ts                 (standalone read-only CLI — Firestore REST, zero writes)
+  MODIFIED: src/lib/inventory/stockMovementEngine.ts       (+auditReconciliation flag on RECONCILE_ADJUST rows — additive)
+  MODIFIED: src/pages/StockWorkspace.tsx                   (+"Reconcile" button + Modal → <StockReconciliationReport/>)
+  MODIFIED: vitest.emulator.config.ts                      (+1 line)
+  MODIFIED: INVENTORY_IMPLEMENTATION_STATE.md + INVENTORY_REGRESSION_MATRIX.md
+
+  PRODUCTION SOURCE FILES MODIFIED BY INVENTORY-06: stockMovementEngine.ts (1 additive flag),
+    StockWorkspace.tsx (1 button). The engines + report + script are new.
+  FIRESTORE RULES / INDEXES / storage.rules: NONE. DATABASE: none new (RECONCILE_ADJUST rows are
+    normal movement rows + a flag). NO backfill, NO historical rewrite.
+  P1-4: intact — the reconciliation engine only READS; corrections go through applyStockMovement
+    (singleStockWriter.test.ts still green).
 ```
 
 ---
@@ -1654,7 +1804,12 @@ INVENTORY-05a: NO production database write. The engine is DORMANT — its addit
   ONLY when applyStockMovement is first called, which happens in Phase 05b. NO rules / index
   / migration / backfill this phase.
 
-Planned additive schema (05a engine defines it; NOT yet written — first write in 05b):
+INVENTORY-06: NO production database write from reconciliation (read-only). A human-approved
+  RECONCILE_ADJUST correction writes ONE normal `stock_ledger` movement row (+ `auditReconciliation`
+  flag + reconciliation `ledgerExtra`) + the summary delta, through the engine. NO rules / index
+  / migration / backfill. NO automatic drift correction.
+
+Planned additive schema (05a engine defines it; first written in 05b):
   Phase 05a/05b: stock.onHandQty; stock_ledger.{movementType,direction,idempotencyKey,onHandBefore/After,reservedBefore/After}
   Phase 07: NEW collection stock_reservations + rules block + index;
             order.fulfilmentWarehouseId, order.stockShortfall[]; availableQty semantic = onHand - reserved
@@ -1731,6 +1886,15 @@ INVENTORY-05a rollback = `git revert ff45262` (or reset to 9227ec3). Files:
   NO firestore.rules / indexes / deploy / data / migration. NOTHING to un-migrate — the engine
   was never called. Reverting simply removes the (unused) 05b-05d foundation.
 
+INVENTORY-06 rollback = revert the (uncommitted) working-tree changes: delete
+  src/engines/stockReconciliationMath.ts + StockReconciliationEngine.ts + their tests,
+  src/features/stock/components/StockReconciliationReport.tsx, scripts/inventory/reconcile.ts,
+  src/lib/__tests__/stockReconciliation.emulator.test.ts; revert the 1-line
+  `auditReconciliation` flag in stockMovementEngine.ts, the "Reconcile" button in
+  StockWorkspace.tsx, and the vitest.emulator.config.ts line. NO firestore.rules / indexes /
+  deploy / data / migration. Any RECONCILE_ADJUST rows written during testing are inert
+  additive movement rows.
+
 Rollback readiness for future phases (Plan §18):
   - Tag firestore.rules before Phases 07, 08, 09, 11 as rules-pre-INVENTORY-0X
   - Feature flags: USE_MOVEMENT_ENGINE_{GRN,DISPATCH,MANUAL} (05b-05d), reservationsEnabled (07)
@@ -1746,20 +1910,24 @@ Rollback readiness for future phases (Plan §18):
 ## NEXT PHASE
 
 ```
-NEXT PHASE:            INVENTORY-06 — Stock ↔ Ledger reconciliation (read-only). A
-                       StockReconciliationEngine + report surface computing `Σ ledger` per
-                       summary and flagging mismatches with `onHandQty`. NO automatic
-                       correction. Now meaningful because (a) exactly one writer exists
-                       (05d — INV-7), and (b) the ledger schema is unified across every
-                       movement type (05a applied by 05b/c/d).
-BLOCKED BY:            Explicit human go-ahead for INVENTORY-06. Each phase runs on its own
-                       instruction (Plan §23 / §30). Do NOT auto-start.
-DEPENDS ON:            INVENTORY-05b + 05c + 05d (all DONE). P1-4 closed.
-GIT NOTE:              INVENTORY-01..05d committed in order (… → ff45262 05a → d5010e2 05a.1 →
-                       e01819a 05b → 8432c22 05c → <05d>) on c043009. NO firestore.rules change
-                       across 05a→05d. Uncommitted: only the 4 unrelated pre-existing changes +
-                       untracked BRAIN.md / audit. Safety refs: branch `pre-05a-backup-head`
-                       (old 30920c2), tag `pre-05a-worktree-snapshot`.
+NEXT PHASE:            INVENTORY-07 — Sales Reservation / Allocation. Activate `reservedQty`,
+                       redefine `availableQty = onHandQty − reservedQty`, reserve on PI-paid,
+                       release on cancel, consume on dispatch. NEW `stock_reservations`
+                       collection + rules block + index. **REQUIRES business sign-off on
+                       Plan §7's five open reservation decisions FIRST** (retro-reserve vs
+                       start-clean; over-reservation/backorder policy; multi-warehouse
+                       fulfilment; partial-payment reserve; release-on-what).
+BLOCKED BY:            (1) explicit human go-ahead for INVENTORY-07; (2) business sign-off on
+                       the §7 decisions; (3) INVENTORY-06 should be committed + a one-time
+                       reconciliation pass run so Phase 07 builds on trusted numbers.
+DEPENDS ON:            INVENTORY-04 (order lock), INVENTORY-05 (single writer), INVENTORY-06
+                       (trust the numbers). All implemented.
+GIT NOTE:              INVENTORY-01..05d committed (… → e01819a 05b → 8432c22 05c → 6939c12
+                       05d). **INVENTORY-06 is UNCOMMITTED in the working tree** (the user
+                       withheld commit). NO firestore.rules change across 05a→06. The 4
+                       unrelated pre-existing changes + untracked BRAIN.md / audit also remain
+                       uncommitted — do NOT touch those. Safety refs: branch
+                       `pre-05a-backup-head`, tag `pre-05a-worktree-snapshot`.
 ```
 
 ---
@@ -1767,38 +1935,38 @@ GIT NOTE:              INVENTORY-01..05d committed in order (… → ff45262 05a
 ## EXACT NEXT ACTION
 
 ```
-INVENTORY-01..05d IMPLEMENTED + VERIFIED + COMMITTED in order (… → ff45262 05a → d5010e2
-05a.1 → e01819a 05b → 8432c22 05c → <05d>). **PHASE 05 (movement engine) COMPLETE — P1-4
-closed, ONE stock writer.** Nothing inventory-related is uncommitted. Do NOT do anything
-further without a new instruction.
+INVENTORY-01..05d COMMITTED (… → e01819a 05b → 8432c22 05c → 6939c12 05d). **INVENTORY-06
+IMPLEMENTED + VERIFIED but UNCOMMITTED** (the user withheld commit for that phase). Phase 05
+(movement engine) is complete — P1-4 closed, ONE stock writer. Do NOT do anything further
+without a new instruction.
 
-Before the next phase, a human should:
-  a. (optional) drop the safety refs: `git branch -D pre-05a-backup-head` + `git tag -d
-     pre-05a-worktree-snapshot`. Push when ready (`origin/main` is at 46e3aab; main is ahead ~17).
-  b. Deploy: firestore.rules + firestore.indexes are UNCHANGED since INVENTORY-03, so
-     `firebase deploy --only firestore:indexes,firestore:rules` is still the -03 deploy
-     (the 2 composite indexes). No new rules/indexes in 05a→05d.
-  c. Manually exercise (running app):
-     - GRN (05b): PO Sent → GRN partial(4) → GRN(6) → Received, receivedQty 10, two
-       STKMV-… rows, stock +10 once; over-receipt rejected; double-click → one effect.
-     - Dispatch (05c): verify a dispatch → stock drops once + one STKMV DISPATCH_OUT row;
-       re-verify → "already verified"; insufficient → rejected; concurrent verify safe.
-     - Manual (05d): Add Stock / Adjust Stock (+/−) → onHandQty moves, one ledger row;
-       an OUT below zero rejected.
-     - Cancel (05d): cancel a dispatched order → stock restored once (SALES_RETURN_IN),
-       order + dispatches flip; a retry does not double-restore.
+Before INVENTORY-07, a human should:
+  a. **Commit INVENTORY-06** (the working tree is clean apart from the pre-existing unrelated
+     changes). Suggested message: `feat(inventory): stock-ledger reconciliation engine + report (INVENTORY-06, P2-1)`
+     — stage: src/engines/stockReconciliationMath.ts, src/engines/StockReconciliationEngine.ts,
+     src/engines/__tests__/stockReconciliationEngine.test.ts,
+     src/lib/__tests__/stockReconciliation.emulator.test.ts,
+     src/features/stock/components/StockReconciliationReport.tsx, scripts/inventory/reconcile.ts,
+     src/lib/inventory/stockMovementEngine.ts, src/pages/StockWorkspace.tsx,
+     vitest.emulator.config.ts, INVENTORY_IMPLEMENTATION_STATE.md, INVENTORY_REGRESSION_MATRIX.md.
+     Do NOT stage LEADS_UI_UX_SOURCE_OF_TRUTH.md / ProfileSection.tsx / useMyProfile.ts /
+     userProfile.ts / BRAIN.md / COMPLETE_INVENTORY_INTEGRITY_AUDIT.md.
+  b. Run the one-time reconciliation pass: open Stock → Reconcile (or
+     `TOKEN=$(gcloud auth application-default print-access-token) node --experimental-strip-types
+     scripts/inventory/reconcile.ts --json`), review each mismatch against a physical count,
+     apply RECONCILE_ADJUST where the count is known. Record the mismatch count in this file.
+  c. Deploy: firestore.rules + firestore.indexes are UNCHANGED since INVENTORY-03.
+  d. Manually exercise: GRN / dispatch / manual / cancel (05b–05d) + the reconciliation
+     report (loads → zero writes; a correction → RECONCILE_ADJUST row + summary moves;
+     re-open the report → that summary reconciles).
 
-When INVENTORY-06 is authorized, execute it per Plan "INVENTORY-06 — Reconciliation":
-  1. Re-read: brain.md (INVENTORY/STOCK §), Plan INVENTORY-06 (§844+), dependency map.
-  2. Build a READ-ONLY StockReconciliationEngine (mirrors ProcurementValidationEngine):
-     for each stock summary, computed = Σ(ledger IN qty) − Σ(ledger OUT qty); flag if
-     computed ≠ onHandQty. NEVER auto-write. Surface: a /stock reconciliation report +
-     a CLI/script. A human-triggered RECONCILE_ADJUST movement (through the engine) is the
-     only correction path.
-  3. Standard gate. Update THIS file. STOP.
+When INVENTORY-07 is authorized: it requires business sign-off on Plan §7's five open
+reservation decisions FIRST. Then build `stock_reservations` + activate `reservedQty` +
+`availableQty = onHandQty − reservedQty`, reserve on PI-paid / release on cancel / consume
+on dispatch. Full batched emulator + E7 (new rules block). Update THIS file.
 
 Do NOT touch the movement engine's transaction shape / the frozen MovementType enum,
-firestore.rules, reservations (07), transfers (08), or any later-phase scope.
+firestore.rules, transfers (08), or any later-phase scope.
 ```
 
 ---
@@ -1829,13 +1997,22 @@ firestore.rules, reservations (07), transfers (08), or any later-phase scope.
   DELETED. **P1-4 is CLOSED** — `singleStockWriter.test.ts` fails the build if a second
   stock/stock_ledger writer is reintroduced. Do NOT "re-transactionalize" any of them, do NOT
   add a `USE_MOVEMENT_ENGINE_*` flag path (the migration is unconditional and shipped).
+- Do NOT re-do INVENTORY-06 — `StockReconciliationEngine` (read-only) + `stockReconciliationMath`
+  (the ONE reconciliation math) + the report + `scripts/inventory/reconcile.ts` are BUILT +
+  verified. Reconciliation NEVER auto-corrects (Plan §17). Corrections are human-gated
+  `RECONCILE_ADJUST` movements through the engine ONLY — do NOT add a direct stock write, do NOT
+  build a batch/auto-heal, do NOT count RECONCILE_ADJUST rows in `computed` (they patch `stored`),
+  do NOT backfill or rewrite historical ledger rows. INVENTORY-06 is UNCOMMITTED — the human
+  commits it before INVENTORY-07.
 - Git: INVENTORY-00..05d are committed in order (…c043009 → … → ff45262 05a → d5010e2 05a.1
-  → e01819a 05b → 8432c22 05c → <05d>). NO firestore.rules / firestore.indexes change across
-  05a→05d. The 4 unrelated pre-existing changes + untracked BRAIN.md/audit stay in the working
-  tree — do NOT commit/stash/revert those. Safety refs: branch `pre-05a-backup-head` (old
-  30920c2), tag `pre-05a-worktree-snapshot`. `origin/main` is still at 46e3aab (not pushed).
+  → e01819a 05b → 8432c22 05c → 6939c12 05d). **INVENTORY-06 is UNCOMMITTED in the working tree.**
+  NO firestore.rules / firestore.indexes change across 05a→06. The 4 unrelated pre-existing
+  changes + untracked BRAIN.md/audit stay in the working tree — do NOT commit/stash/revert those.
+  Safety refs: branch `pre-05a-backup-head` (old 30920c2), tag `pre-05a-worktree-snapshot`.
+  `origin/main` is still at 46e3aab (not pushed).
 - Do NOT re-derive the emulator command — it is recorded above (JBR java).
-- Do NOT start INVENTORY-06 (or any later phase) without an explicit new instruction.
+- Do NOT start INVENTORY-07 (or any later phase) without an explicit new instruction + the §7
+  business sign-off.
 - Do NOT attempt to "fix everything" — one phase, verify, update STATE, then STOP.
 - The 29 failing unit-test files are the documented pre-existing baseline (BRAIN.md §35) — do NOT "fix" them.
 ```
@@ -1848,8 +2025,9 @@ firestore.rules, reservations (07), transfers (08), or any later-phase scope.
 See "FILES / AREAS NOT TO TOUCH" above and Plan §21. In particular:
 - firestore.rules: INVENTORY-01 = `stock_ledger` READ-guard. INVENTORY-02 = none. INVENTORY-03
   = `stock` field-guard role list + `purchase_orders` lean update + PO transition self-loop.
-  INVENTORY-05a = none (engine write shape passes the -03 rules unchanged). Next rules edit is
-  Phase 07 (new stock_reservations block) — full batched emulator + E7 each time.
+  INVENTORY-05a…06 = NONE (engine write shape + the RECONCILE_ADJUST correction pass the -03
+  rules unchanged). Next rules edit is Phase 07 (new stock_reservations block) — full batched
+  emulator + E7 each time.
 - Stock quantity/write logic: EVERYTHING is on `stockMovementEngine.ts` now (05b GRN, 05c
   dispatch, 05d manual + stockIn + cancel-restore). `singleStockWriter.test.ts` enforces it.
   Do NOT add another writer. Reconciliation (06) is READ-ONLY.
@@ -1870,20 +2048,24 @@ If you are a new session with no history:
 1. You have read: brain.md, INVENTORY_IMPLEMENTATION_PLAN.md, this file, INVENTORY_REGRESSION_MATRIX.md,
    INVENTORY_PHASE_DEPENDENCY_MAP.md.
 2. PLAN STATUS: APPROVED. Overall approval exists, BUT each phase runs on its own explicit instruction.
-3. CURRENT PHASE = INVENTORY-05d, STATUS = COMPLETE + COMMITTED. **PHASE 05 (movement engine)
-   COMPLETE** — GRN/dispatch/manual/stockIn/cancel-restore ALL on `stockMovementEngine.ts`,
-   P1-4 closed, one stock writer (`singleStockWriter.test.ts`). NEXT PHASE = INVENTORY-06
-   (read-only reconciliation). INVENTORY-00..05d committed in order
-   (… → ff45262 05a → d5010e2 05a.1 → e01819a 05b → 8432c22 05c → <05d>).
-   -> If the user has just asked you to run INVENTORY-06, do EXACTLY what "EXACT NEXT ACTION" says.
-   -> If they asked for manual verification, do that (see EXACT NEXT ACTION c).
-   -> Otherwise STOP and report: Phase 05 complete + committed; -06 awaits a go-ahead.
-4. `git log --oneline -12` shows the ordered inventory commits on c043009.
-   `git status --short` shows ONLY: 4 unrelated pre-existing changes (LEADS_UI_UX delete,
-   ProfileSection.tsx, useMyProfile.ts, userProfile.ts) + untracked BRAIN.md /
-   COMPLETE_INVENTORY_INTEGRITY_AUDIT.md — do NOT commit, revert, or stash the unrelated /
-   untracked items. (The INVENTORY_*.md checkpoint edits are committed WITH the 05a commit
-   per the phase instruction §18.)
+3. CURRENT PHASE = INVENTORY-06 (read-only stock↔ledger reconciliation + human-approved
+   RECONCILE_ADJUST). STATUS = IMPLEMENTED + VERIFIED but **UNCOMMITTED** (the user withheld
+   commit for this phase). Phase 05 (movement engine) is COMPLETE + committed
+   (… → e01819a 05b → 8432c22 05c → 6939c12 05d); P1-4 closed, one stock writer.
+   NEXT PHASE = INVENTORY-07 (reservations — needs the §7 business sign-off first).
+   -> If the user asks to run INVENTORY-07, first confirm the §7 sign-off + that -06 is committed.
+   -> If they ask to commit -06, use the message + file list in "EXACT NEXT ACTION a".
+   -> Otherwise STOP and report: -06 implemented + verified, uncommitted; -07 awaits sign-off.
+4. `git log --oneline -12` shows the ordered inventory commits (05d = 6939c12).
+   `git status --short` shows: the INVENTORY-06 working-tree files (src/engines/stockReconciliation*,
+   src/engines/__tests__/stockReconciliationEngine.test.ts,
+   src/lib/__tests__/stockReconciliation.emulator.test.ts,
+   src/features/stock/components/StockReconciliationReport.tsx, scripts/inventory/reconcile.ts,
+   + modified src/lib/inventory/stockMovementEngine.ts / src/pages/StockWorkspace.tsx /
+   vitest.emulator.config.ts / the two INVENTORY_*.md) PLUS the 4 unrelated pre-existing
+   changes (LEADS_UI_UX delete, ProfileSection.tsx, useMyProfile.ts, userProfile.ts) +
+   untracked BRAIN.md / COMPLETE_INVENTORY_INTEGRITY_AUDIT.md — do NOT commit, revert, or
+   stash the unrelated / untracked items.
 5. Do not touch any phase beyond the one you were told to run. End with Plan §23. Update this
    file. STOP.
 6. Emulator: use the JBR-java command in ROLLBACK STATUS / WHAT WAS VERIFIED. Do not re-derive it.

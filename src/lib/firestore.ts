@@ -218,6 +218,7 @@ const PLATFORM_READ_COLLECTIONS = new Set<string>([
 const WAREHOUSE_SCOPED_COLLECTIONS = new Set<string>([
   COLLECTIONS.STOCK,
   COLLECTIONS.STOCK_LEDGER,
+  COLLECTIONS.STOCK_RESERVATIONS,   // INVENTORY-07
   COLLECTIONS.DISPATCH,
   COLLECTIONS.GOODS_RECEIPTS,
 ]);
@@ -425,6 +426,11 @@ const COLLECTION_PERMISSION_MODULE: Record<string, string> = {
   [COLLECTIONS.WAREHOUSES]: 'warehouses',
   [COLLECTIONS.STOCK]: 'stock',
   [COLLECTIONS.STOCK_LEDGER]: 'stock',
+  // INVENTORY-07: sales reservations are shared operational stock state — they
+  // follow the same 'stock' module visibility as the summary + ledger (never
+  // per-user record ownership; a reservation is not "owned" by whoever paid the
+  // PI). Company + warehouse scoping still applies (below).
+  [COLLECTIONS.STOCK_RESERVATIONS]: 'stock',
   [COLLECTIONS.ORDERS]: 'orders',
   [COLLECTIONS.PROFORMA_INVOICES]: 'invoices',
   [COLLECTIONS.TAX_INVOICES]: 'tax_invoices',
