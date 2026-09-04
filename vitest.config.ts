@@ -12,7 +12,7 @@ export default defineConfig({
     environment: 'node',
     testTimeout: 15000,
     include: ['src/**/*.test.ts'],
-    exclude: ['node_modules', 'dist', 'src/lib/__tests__/*.emulator.test.ts'],
+    exclude: ['node_modules', 'dist', 'src/lib/__tests__/*.emulator.test.ts', 'src/**/*.emulator.test.ts'],
     coverage: {
       provider: 'v8',
       include: [

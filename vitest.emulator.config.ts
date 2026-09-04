@@ -24,6 +24,7 @@ export default defineConfig({
       'src/lib/__tests__/dispatchStockOutTransaction.emulator.test.ts',
       'src/lib/__tests__/grnReceiptTransaction.emulator.test.ts',
       'src/lib/__tests__/orderLifecycleTransaction.emulator.test.ts',
+      'src/lib/inventory/__tests__/stockMovementEngine.emulator.test.ts',
       'src/lib/__tests__/sensitiveCollectionsRoleEnforcement.emulator.test.ts',
       'src/lib/__tests__/biometricFaceReferences.emulator.test.ts',
       'src/lib/__tests__/leadCreationProjectionWrites.emulator.test.ts',

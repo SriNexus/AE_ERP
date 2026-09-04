@@ -4,6 +4,9 @@ import {
   getAll, createDocWithId, updateDocById, deleteDocById, genId, fmtDate, resolveWriteGroupId,
 } from '../../../lib/firestore';
 import { COLLECTIONS } from '../../../lib/firebase';
+// INVENTORY-05a: single canonical stock-summary identity — the local copy was
+// a byte-identical duplicate of this one; deleted so there is ONE source.
+import { stockSummaryId } from '../../../lib/workflow';
 import { useCurrentUser, useAppStore } from '../../../store/useAppStore';
 import { queryKeys } from '../../../lib/queryKeys';
 import { UNITS } from '../../../config/company';
@@ -129,11 +132,6 @@ function stockErrorMessage(error: any) {
   if (lower.includes('active company')) return 'Company missing';
   if (lower.includes('quantity') || lower.includes('product') || lower.includes('warehouse') || lower.includes('insufficient stock')) return message;
   return 'Stock update failed';
-}
-
-function stockSummaryId(companyId: string, productId: string, warehouseId: string) {
-  const part = (value: string) => encodeURIComponent(value || 'default');
-  return `SUM-${part(companyId)}-${part(productId)}-${part(warehouseId)}`;
 }
 
 function stockSummaryKey(row: any) {

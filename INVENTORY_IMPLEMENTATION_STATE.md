@@ -24,18 +24,17 @@ APPROVAL NOTES:         Project owner approved INVENTORY_IMPLEMENTATION_PLAN.md 
 ## CURRENT POSITION
 
 ```
-CURRENT PHASE:          INVENTORY-04 — Order & PO Lifecycle Locks (COMPLETE)
-STATUS:                 IMPLEMENTED + VERIFIED + COMMITTED. Phase-commit sequencing was
-                        RECONCILED in a PRE-05a checkpoint: INVENTORY-01→02→03→04 are now
-                        four separate commits in logical order on top of c043009. The
-                        original one-off Phase-04 commit 30920c2 was replaced by 21e502e
-                        (identical -04 content) via a SAFE LOCAL history rebuild — no
-                        force-push, no lost work. Safety refs kept: branch
-                        `pre-05a-backup-head` -> old 30920c2; tag `pre-05a-worktree-snapshot`.
-LAST VERIFIED COMMIT:   21e502e  fix(inventory): order line lock + atomic cancel + PI/convert guards (INVENTORY-04)
-                        HEAD chain: c043009 → 1368cfd (01) → 58038f4 (02) → 8e2c799 (03) → 21e502e (04).
+CURRENT PHASE:          INVENTORY-05a — Stock Movement Engine + Adapter (DORMANT) — COMPLETE
+STATUS:                 IMPLEMENTED + VERIFIED + COMMITTED. New engine module lands DEAD CODE
+                        — no existing caller migrated (05b/05c/05d do the migrations). The only
+                        behaviour-adjacent change is de-duplicating `stockSummaryId` (byte-
+                        identical output, tested). NO firestore.rules change — the engine's
+                        write shape passes today's `stock`/`stock_ledger` rules unchanged
+                        (emulator-proven).
+LAST VERIFIED COMMIT:   HEAD  feat(inventory): dormant stock movement engine + adapter (INVENTORY-05a)
+                        HEAD chain: c043009 → 1368cfd (01) → 58038f4 (02) → 8e2c799 (03) → 21e502e (04) → 9227ec3 (docs) → HEAD (05a).
 DATE OF THIS UPDATE:    2026-09-04
-UPDATED BY:             INVENTORY-04 + PRE-05a git-checkpoint session
+UPDATED BY:             INVENTORY-05a implementation session
 ```
 
 ---
@@ -51,6 +50,7 @@ UPDATED BY:             INVENTORY-04 + PRE-05a git-checkpoint session
 | **INVENTORY-02** | 2026-09-03 | `58038f4` | **PASS** (unchanged — no rules touched; spot-check 4 files / 315 tests 100%) | REST API `stock` + `stock_ledger` made READ-ONLY (P0-2): every mutating method -> 405 before auth/DB, zero Firestore write. **NO firestore.rules change. NO SDK stock-writer change. NO UI change.** New: `api/__tests__/apiInventoryWriteBoundary.test.ts` (18 tests). API suite 11 files / 303 tests 100%. |
 | **INVENTORY-03** | 2026-09-04 | `8e2c799` | **PASS** (JBR java 21, full suite 16 files / 624 tests 100%, sub-batched; new `grnReceiptTransaction.emulator.test.ts` 16/16; concurrency + INV-13 + P1-3 proven; re-verified in the acceptance audit) | GRN receipt is now **idempotent + atomic per receipt + over-receipt-proof under concurrency** (P1-1/P1-2/P1-5/INV-13): one `runTransaction` over `stock`+`stock_ledger`+`purchase_orders`, deterministic per-line ledger id, PO `receivedQty` incremented (never a stale array). **P1-3 RESOLVED** — `stock` write-role list gains `Procurement` (Sales/Accounts stay denied). **P2-4 RESOLVED** — one shared `PURCHASE_ORDER_TRANSITIONS` (workflow ↔ ProcurementValidationEngine ↔ rules mirror). `firestore.rules`: `stock` field-guard role list (+Procurement, 3 calls→1); `purchase_orders` update made LEAN (budget) + `PartiallyReceived→PartiallyReceived` self-transition. Additive: `stock_ledger.purchaseOrderId`/`stockId`, `goods_receipts.stockApplied[]`, 2 composite indexes. |
 | **INVENTORY-04** | 2026-09-04 | `21e502e` (was `30920c2` before the PRE-05a rebuild — identical -04 content) | **PASS** — new `orderLifecycleTransaction.emulator.test.ts` 5/5 (convert-race + cancel-atomicity); NO firestore.rules / firestore.indexes change so the INVENTORY-03 emulator surface (16 files / 624 tests) stands. | Order line lock (P1-8 / INV-12): shared `isOrderLineLocked(order)` + `updateOrder(id,patch)` in `orderWorkflow.ts` — a dispatched order's line product/qty/price can no longer change (workflow-layer, `Orders.tsx` + `MobileOrderWorkspace.tsx` both call it); non-line edits stay allowed. `cancelOrder` (P2-2): order + affected dispatch status flip in ONE `runTransaction` (configured) that re-reads each; additive `orders.piReversalRequired` + `orders.reversalInvoiceIds[]` (info only — NO reversal/GST/amount change). Stock restore UNCHANGED (still `stockIn` — 05d). `generatePIsFromOrder` (P2-7): re-read + repeat guard (`{force:true}` escape). `convertQuotationToOrder` (P2-8): lock-check + order-create + quotation-mark in ONE `runTransaction` re-reading `convertedOrderId` — concurrent conversions → one order, same id. **NO rules change; `orders` API PUT bypass documented, still deferred.** |
+| **INVENTORY-05a** | 2026-09-04 | `HEAD` | **PASS** — new `src/lib/inventory/__tests__/stockMovementEngine.emulator.test.ts` 8/8 (engine write shape passes CURRENT rules unchanged; atomic; idempotent; INV-1 abort; cross-company + Sales-role + forged-warehouse DENY; ledger immutable). NO firestore.rules change → INVENTORY-03 emulator surface (16 files / 624) stands. | **DORMANT** `src/lib/inventory/stockMovementEngine.ts` — `applyStockMovement(input): Promise<MovementResult>` (Plan §4.1/§9/§10). ONE `runTransaction` over `stock` + `stock_ledger` + in-txn idempotency (deterministic **injective** id `STKMV-{encodeURIComponent(idempotencyKey)}` — INV-8 by construction); INV-1/INV-2 guards abort the txn; INV-3/INV-4 gated behind `reservationsEnabled` (FALSE for 05–06: `availableQty == onHandQty`, `reservedQty` 0); `companyId`+`groupId` manually stamped; legacy ledger fields (`type`/`referenceType`/`referenceId`/`date`) dual-written. New `types.ts` (MovementType enum §8) + `idempotency.ts`. **NO caller migrated** (05b/05c/05d). `stockSummaryId` de-duplicated: `useInventory.ts` deletes its local copy, imports the one in `workflow.ts` (byte-identical — tested). New: `stockMovementEngine.test.ts` (15). Additive schema (only when called, not in 05a): `stock.onHandQty`, `stock_ledger.{movementType,direction,idempotencyKey,onHandBefore/After,reservedBefore/After}`. |
 
 ---
 
@@ -65,7 +65,8 @@ c043009  docs(inventory): record INVENTORY-00 commit hash in STATE checkpoint
 58038f4  fix(inventory): make stock read-only via REST API (INVENTORY-02, P0-2)
 8e2c799  fix(inventory): idempotent+atomic GRN, unified PO transitions, stock write-role alignment (INVENTORY-03)
 21e502e  fix(inventory): order line lock + atomic cancel + PI/convert guards (INVENTORY-04)
-<HEAD>   docs(inventory): checkpoint STATE + regression matrix for INVENTORY-01..04  (the current HEAD commit — this file)
+9227ec3  docs(inventory): checkpoint STATE + regression matrix for INVENTORY-01..04
+HEAD   feat(inventory): dormant stock movement engine + adapter (INVENTORY-05a)   (current HEAD — this commit ALSO carries this STATE + the regression-matrix update, per the phase §18 instruction; a future session replaces "HEAD" here with the real short hash once 05b lands, exactly as -04's row was backfilled to 21e502e)
 
 PRE-05a git checkpoint (2026-09-04): the earlier session committed only Phase-04 (as 30920c2)
 while -01/-02/-03 sat uncommitted, so history was out of phase order. Reconciled by a SAFE
@@ -76,7 +77,7 @@ between commits (verified byte-exact against the pre-checkpoint working tree). O
 30920c2 is preserved on branch `pre-05a-backup-head`; a full pre-checkpoint tracked-tree
 snapshot is tag `pre-05a-worktree-snapshot`.
 
-LAST VERIFIED COMMIT = 21e502e (INVENTORY-04). Uncommitted in the working tree: the 4 unrelated
+LAST VERIFIED COMMIT = HEAD (INVENTORY-05a). Uncommitted in the working tree: the 4 unrelated
 pre-existing changes (LEADS_UI_UX delete, ProfileSection.tsx, useMyProfile.ts, userProfile.ts)
 + untracked BRAIN.md / COMPLETE_INVENTORY_INTEGRITY_AUDIT.md. ZERO inventory implementation
 files are uncommitted.
@@ -87,11 +88,12 @@ files are uncommitted.
 ## CURRENT OBJECTIVE
 
 ```
-INVENTORY-00..04 are five ordered commits (c043009 checkpoint, then 1368cfd / 58038f4 /
-8e2c799 / 21e502e). All five phases implemented + verified + committed. Phase-commit
-sequencing was reconciled in the PRE-05a git checkpoint. The next authorized phase is
-INVENTORY-05a (Movement Engine — dormant). It requires its own explicit go-ahead — do
-NOT start it from this file alone.
+INVENTORY-00..05a are committed in order (c043009 checkpoint, then 1368cfd / 58038f4 /
+8e2c799 / 21e502e / 9227ec3 docs / HEAD 05a). All phases implemented + verified +
+committed. INVENTORY-05a landed the Stock Movement Engine as DORMANT dead code — no
+caller migrated. The next authorized phase is INVENTORY-05b (migrate the GRN receipt
+path onto the engine behind a flag). It requires its own explicit go-ahead — do NOT
+start it from this file alone.
 ```
 
 ---
@@ -814,6 +816,166 @@ MANUAL SMOKE: NOT performed in a running app — deferred with the owner's manua
 
 ---
 
+## WHAT WAS CHANGED (INVENTORY-05a — Stock Movement Engine + Adapter, DORMANT)
+
+```
+NEW MODULE (3 files, DEAD CODE — no production caller):
+  src/lib/inventory/types.ts
+      MovementType union (12 types, FROZEN at Phase 05 — Plan §8): PURCHASE_RECEIPT,
+      OPENING_STOCK, ADJUSTMENT_IN, ADJUSTMENT_OUT, DAMAGE_OUT, SALES_RESERVE,
+      SALES_RELEASE, DISPATCH_OUT, SALES_RETURN_IN, TRANSFER_OUT, TRANSFER_IN,
+      RECONCILE_ADJUST. MOVEMENT_DIRECTION map (IN/OUT/RESERVE/RELEASE),
+      MOVEMENT_TYPES[], REASON_CODE_REQUIRED[] (ADJUSTMENT_IN/OUT, DAMAGE_OUT,
+      RECONCILE_ADJUST). StockMovementInput + MovementResult interfaces. NO Firestore
+      access, NO callers.
+  src/lib/inventory/idempotency.ts
+      buildIdempotencyKey(movementType, sourceType, sourceId, lineKey?) ->
+      `{movementType}:{sourceType}:{sourceId}[:{lineKey}]` (Plan §5).
+      movementLedgerId(key) -> `STKMV-{encodeURIComponent(key)}` — an INJECTIVE map, so
+      "no two ledger rows share an idempotencyKey" (INV-8) holds BY CONSTRUCTION.
+  src/lib/inventory/stockMovementEngine.ts
+      applyStockMovement(input): Promise<MovementResult> (Plan §4.1 / §9 / §10).
+      * prepare(): resolves companyId (resolveWorkflowCompanyId) + groupId
+        (resolveWriteGroupId) + actorId; validates qty finite & > 0 (a signed qty is
+        allowed ONLY for RECONCILE_ADJUST); requires reasonCode for the REASON_CODE_REQUIRED
+        types; computes idempotencyKey + ledgerId = movementLedgerId(key).
+      * canonical stock summary id = stockSummaryId(companyId, productId, warehouseId)
+        = `SUM-{enc(companyId)}-{enc(productId)}-{enc(warehouseId)}` (Plan §8), then
+        resolveStockSummaryDocumentId() reconciles against any legacy-id match.
+      * CONFIGURED branch: query the summary id outside the txn (>1 active match -> throw
+        "Duplicate stock summaries"), then ONE runTransaction:
+          transaction.get(ledgerRef) -> exists -> return { applied:false, ...existing row }
+                                                  (IN-TXN idempotency check — Plan §5).
+          transaction.get(stockRef);
+          onHandBefore = existing.onHandQty ?? existing.availableQty ?? existing.available ?? 0;
+          applyDelta(direction, onHandBefore, reservedBefore, |qty|);
+          assertInvariants(): onHandAfter < -EPSILON -> throw "Insufficient stock" (INV-1);
+                              reservedAfter < -EPSILON -> throw (INV-2);
+                              INV-3/INV-4 (reserved <= onHand, available == onHand - reserved)
+                              gated behind prep.reservationsEnabled (FALSE for Phase 05-06).
+          deriveAvailable() = reservationsEnabled ? onHandAfter - reservedAfter : onHandAfter.
+          transaction.set(stockRef, { ...companyId, groupId, productId, warehouseId,
+              onHandQty, reservedQty, availableQty, updatedAt, ... });
+          transaction.set(ledgerRef, buildLedgerRow(...)).
+        The stock summary write + the ledger write commit together or not at all (INV-7:
+        one movement = one ledger row = one summary delta).
+      * DEMO branch (!firebaseEnv.isConfigured): the same guards, sequential
+        getOne / createDocWithId (unchanged risk class, demo-only).
+      * buildLedgerRow(): UNIFIED schema (movementType, direction, qty, onHandBefore/After,
+        reservedBefore/After, idempotencyKey, actorId, transactionId, movementAt, createdAt,
+        createdBy, isDeleted) PLUS legacy dual-write (type: 'IN'|'OUT' from direction,
+        referenceType: sourceType, referenceId: sourceId, date) so existing readers keep working.
+      * companyId + groupId manually stamped on BOTH docs (raw runTransaction bypasses
+        auto-stamping — HR-9).
+      * NO logActivity / notifyUsers in the engine — callers add those on migration (05b-05d).
+      * EPSILON = 1e-6 for the invariant float comparisons.
+
+  stockSummaryId CONSOLIDATION (Plan §11):
+    src/features/inventory/hooks/useInventory.ts — DELETED its local
+      `function stockSummaryId(companyId, productId, warehouseId)` (was byte-identical to
+      the one in src/lib/workflow.ts); now imports it from '../../../lib/workflow'.
+      stockSummaryKey / canonicalizeStockSummary now use the imported function. Output is
+      byte-identical for every input (tested, incl. values needing encodeURIComponent).
+
+TESTS:
+  src/lib/inventory/__tests__/stockMovementEngine.test.ts — NEW (15): IN/OUT deltas;
+    INV-1 rejection (OUT below zero); zero / non-finite qty rejected; reasonCode required;
+    Phase-05 model (reservedQty stays 0, availableQty == onHandQty across a run); every
+    movement type's direction; idempotency (twice -> one effect, 2nd { applied:false });
+    deterministic injective ledger id; explicit idempotencyKey override; companyId/groupId
+    stamped on both docs; explicit companyId override; legacy dual-write fields present.
+    PLUS a `stockSummaryId consolidation` block asserting useInventory.ts imports the shared
+    function, has no local copy, and produces identical output to the old local formula.
+  src/lib/inventory/__tests__/stockMovementEngine.emulator.test.ts — NEW (8): the engine's
+    configured-branch txn shape replicated in movementTxn(); Warehouse IN passes CURRENT
+    rules + summary/ledger atomic; OUT decrements, availableQty tracks onHandQty; idempotent
+    twice; INV-1 OUT-below-zero aborts with NO partial write; cross-company DENIED; Sales-role
+    DENIED on an existing-summary change (P1-3 least privilege); forged cross-company
+    warehouseId DENIED; ledger row immutable (assertFails on overwrite).
+  vitest.config.ts — exclude list broadened: `src/**/*.emulator.test.ts` (so the new
+    emulator test under src/lib/inventory/__tests__/ is excluded from the default vitest run).
+  vitest.emulator.config.ts — +1 line registering stockMovementEngine.emulator.test.ts.
+
+NO caller migrated. NO firestore.rules / firestore.indexes / storage.rules change. NO
+schema write to production (the additive fields land only WHEN the engine is first called,
+in 05b). NO mobile change (Plan §13 — no separate mobile movement engine). NO change to
+goodsReceiptWorkflow / dispatchWorkflow / stockWorkflow.stockIn / cancelOrder / useSaveStockEntry.
+```
+
+---
+
+## WHAT WAS VERIFIED (INVENTORY-05a)
+
+```
+- ENGINE IS DORMANT: grep across src/ finds NO `import ... stockMovementEngine`, NO
+  `applyStockMovement(` outside the engine's own two test files. The four legacy stock
+  writers (stockIn, useSaveStockEntry, dispatchWorkflow, goodsReceiptWorkflow.applyGrnReceipt)
+  are UNCHANGED — confirmed by grep + by their unchanged unit/emulator tests.
+
+- NO FIRESTORE RULES BLOCKER (Plan §10): the engine's write shape (stock summary set with
+  companyId/groupId/productId/warehouseId/onHandQty/reservedQty/availableQty; stock_ledger
+  create with transactionId:string, movementAt != null, referenceType/referenceId, the
+  warehouseBelongsToCompany + sameWarehouse FK checks) passes the CURRENT `stock` /
+  `stock_ledger` rules (as set by INVENTORY-03) UNCHANGED. Proven by
+  stockMovementEngine.emulator.test.ts test 1 (Warehouse IN) + test 2 (OUT). => NO rules
+  weakening needed, NO blocker to report.
+
+- ATOMICITY (INV-7): emulator test 4 — an INV-1-violating OUT aborts the whole runTransaction;
+  stock summary AND ledger both unchanged (no partial write).
+
+- IDEMPOTENCY (INV-8, Plan §5): the idempotency check is INSIDE the transaction
+  (transaction.get(ledgerRef) before any write). Emulator test 3 + unit test — the same
+  movement applied twice produces ONE summary delta + ONE ledger row; the 2nd call returns
+  { applied:false } with the existing row. The ledger id is an injective function of the
+  idempotencyKey, so INV-8 also holds structurally.
+
+- QUANTITY MODEL (Plan §6): across a multi-movement unit run, reservedQty stays 0 and
+  availableQty == onHandQty at every step (reservationsEnabled is FALSE — Phase 07 flips it).
+  An OUT can never drive onHandQty below 0 (INV-1 throw).
+
+- TENANT + WAREHOUSE SAFETY: emulator tests 5/6/7 — a cross-company actor, a Sales-role
+  actor changing an existing summary, and a forged cross-company warehouseId are ALL denied
+  by the existing rules. companyId + groupId are stamped on both docs.
+
+- LEDGER COMPATIBILITY (Plan §9): buildLedgerRow writes the unified schema AND the legacy
+  fields (type, referenceType, referenceId, date) so INVENTORY-01/-03 readers and any
+  dashboard query keep working after a future migration.
+
+- stockSummaryId: exactly ONE definition remains in src/ (src/lib/workflow.ts); the
+  useInventory.ts local copy is gone; output is byte-identical (unit-tested with
+  encodeURIComponent-sensitive inputs). resolveStockSummaryDocumentId still reconciles
+  legacy ids.
+
+- MANUAL BUSINESS VERIFICATION: N/A — the engine has no caller and no UI. Nothing to click.
+```
+
+---
+
+## TEST RESULTS (INVENTORY-05a)
+
+```
+TYPECHECK:  npm run lint (tsc --noEmit) -> 3 errors, ALL pre-existing (attendancePhase11/12,
+            attendanceRuleEngine — missing gpsAccuracyCeilingMeters /
+            locationConsistencyMaxSpreadMeters on AttendanceSettings). ZERO in any
+            INVENTORY-05a file. Identical to the -00..-04 baseline.
+BUILD:      npm run build -> SUCCESS (exit 0). Pre-existing chunk-size warning only.
+UNIT (full): npx vitest run -> 255 test files (226 passed | 29 failed) ; 3485 tests
+            (3420 passed | 65 failed). SAME 29-file / 65-test brittle baseline as
+            INVENTORY-04 (BRAIN §35) — no engine/inventory file among the failures.
+            +1 file / +15 net new passing (stockMovementEngine.test.ts). The new emulator
+            test file is excluded from the default run.
+UNIT (focused): npx vitest run src/lib/inventory/
+            -> stockMovementEngine.test.ts 15/15; the -00 baseline/*.baseline.test.ts +
+               INVENTORY_INVARIANTS still green.
+FIRESTORE / EMULATOR:
+            NO firestore.rules / firestore.indexes change this phase -> the INVENTORY-03
+            emulator surface (16 files / 623-624 tests, 100%) STANDS. NEW:
+            stockMovementEngine.emulator.test.ts -> 8/8 (JBR java, sub-batched per BRAIN §2.1).
+            E7 budget: unaffected (no rules touched).
+```
+
+---
+
 ## KNOWN REMAINING RISKS (full register in the audit + Plan §2)
 
 ```
@@ -844,9 +1006,14 @@ P1-3  stock field guard BLOCKED Procurement from updating availableQty          
       NB: the Accounts-can-reach-Verify-but-not-complete dispatch gap (INVENTORY-01) is UNCHANGED
       — deliberately not widened here; a privileged cancel-restore path, if ever needed, is a
       later movement-engine concern.
-P1-4  Two parallel stock-write implementations, divergent ledger schemas       (Plan Phase 05a-05d)
-      NB (INVENTORY-03): GRN now has its OWN local applyGrnReceipt writer (no longer calls stockIn).
-      Three writers now: stockIn, useSaveStockEntry, dispatchWorkflow, goodsReceiptWorkflow. Unify in 05.
+P1-4  Two parallel stock-write implementations, divergent ledger schemas       *** ENGINE BUILT (INVENTORY-05a); migrations 05b-05d ***
+      INVENTORY-05a landed src/lib/inventory/stockMovementEngine.ts — the single future write
+      chokepoint (one runTransaction over stock + stock_ledger, in-txn idempotency, unified
+      ledger schema + legacy dual-write, INV-1/2/7/8 enforced). It is DORMANT — no caller
+      migrated. The four legacy writers (stockIn, useSaveStockEntry, dispatchWorkflow,
+      goodsReceiptWorkflow.applyGrnReceipt) are unchanged. 05b migrates GRN, 05c dispatch,
+      05d manual + cancel-restore (and retires the duplicate writers). stockSummaryId is
+      already de-duplicated (05a).
 P1-5  Multi-doc stock ops non-atomic (dispatch, GRN)                            (dispatch: DONE INVENTORY-01; GRN: DONE INVENTORY-03; unify in 05)
 P1-6  No product/warehouse existence check at order/dispatch/adjust            (dispatch: DONE INVENTORY-01; GRN slice: DONE INVENTORY-03 — product/warehouse existence + same-company check; order/adjust + broader: Plan Phase 09)
 P1-7  genId random + setDoc(merge:true) -> collision silently merges           (Plan Phase 09)
@@ -1022,6 +1189,25 @@ INVENTORY-04 (COMMITTED — 21e502e; was 30920c2 pre-checkpoint):
   UNRELATED PRE-EXISTING working-tree changes remain UNTOUCHED (LEADS_UI_UX_SOURCE_OF_TRUTH.md
     delete; ProfileSection.tsx; useMyProfile.ts; userProfile.ts). BRAIN.md + audit still untracked.
   INVENTORY-01/-02/-03 now committed (1368cfd/58038f4/8e2c799). Only the INVENTORY_*.md doc updates + 4 unrelated changes remain in the working tree.
+
+INVENTORY-05a (COMMITTED — HEAD):
+  ADDED:    src/lib/inventory/types.ts             (MovementType enum + direction map + interfaces — Plan §8)
+  ADDED:    src/lib/inventory/idempotency.ts        (buildIdempotencyKey + injective movementLedgerId — INV-8)
+  ADDED:    src/lib/inventory/stockMovementEngine.ts (applyStockMovement — DORMANT, one runTransaction over
+            stock + stock_ledger, in-txn idempotency, unified + legacy ledger schema, INV-1/2/7 guards)
+  MODIFIED: src/features/inventory/hooks/useInventory.ts  (DELETED local stockSummaryId; imports the one in
+            src/lib/workflow.ts — byte-identical output, tested)
+  ADDED:    src/lib/inventory/__tests__/stockMovementEngine.test.ts           (15 unit tests)
+  ADDED:    src/lib/inventory/__tests__/stockMovementEngine.emulator.test.ts  (8 emulator tests)
+  MODIFIED: vitest.config.ts            (exclude glob broadened: src/**/*.emulator.test.ts)
+  MODIFIED: vitest.emulator.config.ts   (+1 line registering stockMovementEngine.emulator.test.ts)
+  MODIFIED: INVENTORY_IMPLEMENTATION_STATE.md + INVENTORY_REGRESSION_MATRIX.md
+
+  PRODUCTION SOURCE FILES MODIFIED BY INVENTORY-05a: useInventory.ts only (1 — stockSummaryId de-dup).
+    The 3 new engine files are DEAD CODE (no caller).
+  FIRESTORE RULES / INDEXES / storage.rules: NONE. DATABASE: no production write (the additive engine
+    fields land only when the engine is first CALLED — Phase 05b). No migration/backfill.
+  UI / MOBILE: UNCHANGED (Plan §13 — no separate mobile movement engine).
 ```
 
 ---
@@ -1082,8 +1268,14 @@ APPLIED (INVENTORY-04, code committed — not deployed):
     (was relying on createDocWithId auto-stamp; raw runTransaction needs it — HR-9).
   - NO rules / index / migration / backfill.
 
-Planned additive schema (NOT yet applied — listed for continuity):
-  Phase 05a: stock.onHandQty; stock_ledger.{movementType,direction,onHandBefore/After,reservedBefore/After}
+INVENTORY-05a: NO production database write. The engine is DORMANT — its additive fields
+  (stock.onHandQty; stock_ledger.{movementType,direction,idempotencyKey,onHandBefore/After,
+  reservedBefore/After}; deterministic ledger id STKMV-{enc(idempotencyKey)}) are written
+  ONLY when applyStockMovement is first called, which happens in Phase 05b. NO rules / index
+  / migration / backfill this phase.
+
+Planned additive schema (05a engine defines it; NOT yet written — first write in 05b):
+  Phase 05a/05b: stock.onHandQty; stock_ledger.{movementType,direction,idempotencyKey,onHandBefore/After,reservedBefore/After}
   Phase 07: NEW collection stock_reservations + rules block + index;
             order.fulfilmentWarehouseId, order.stockShortfall[]; availableQty semantic = onHand - reserved
   Phase 08: NEW collection stock_transfers + rules block + index
@@ -1150,6 +1342,15 @@ INVENTORY-04 rollback = `git revert 21e502e` (or reset to 8e2c799). Files:
   P2-7/P2-8. `orders.piReversalRequired`/`reversalInvoiceIds[]` written during any local testing
   are inert additive fields.
 
+INVENTORY-05a rollback = `git revert HEAD` (or reset to 9227ec3). Files:
+  src/lib/inventory/types.ts, src/lib/inventory/idempotency.ts, src/lib/inventory/stockMovementEngine.ts
+  (all DEAD CODE — deleting them affects nothing), src/features/inventory/hooks/useInventory.ts
+  (restores the local stockSummaryId copy — byte-identical, so no behaviour change either way),
+  src/lib/inventory/__tests__/stockMovementEngine.test.ts + .emulator.test.ts, vitest.config.ts
+  (the exclude glob), vitest.emulator.config.ts (the engine line).
+  NO firestore.rules / indexes / deploy / data / migration. NOTHING to un-migrate — the engine
+  was never called. Reverting simply removes the (unused) 05b-05d foundation.
+
 Rollback readiness for future phases (Plan §18):
   - Tag firestore.rules before Phases 07, 08, 09, 11 as rules-pre-INVENTORY-0X
   - Feature flags: USE_MOVEMENT_ENGINE_{GRN,DISPATCH,MANUAL} (05b-05d), reservationsEnabled (07)
@@ -1165,17 +1366,16 @@ Rollback readiness for future phases (Plan §18):
 ## NEXT PHASE
 
 ```
-NEXT PHASE:            INVENTORY-05a — Stock Movement Engine (lands DORMANT, no caller migrated)
-                       (P1-4 foundation). Then 05b (GRN -> engine), 05c (dispatch -> engine),
-                       05d (manual + cancel-restore -> engine; retire the duplicate writer).
-BLOCKED BY:            Explicit human go-ahead for INVENTORY-05a. Each phase runs on its own
+NEXT PHASE:            INVENTORY-05b — migrate the GRN receipt path onto stockMovementEngine
+                       behind a flag (USE_MOVEMENT_ENGINE_GRN). Then 05c (dispatch -> engine),
+                       05d (manual + cancel-restore -> engine; retire the duplicate writers).
+BLOCKED BY:            Explicit human go-ahead for INVENTORY-05b. Each phase runs on its own
                        instruction (Plan §23 / §30). Do NOT auto-start.
-DEPENDS ON:            INVENTORY-01/02/03 (stabilise the stock/ledger rules + stop the active
-                       bleeds) + INVENTORY-04 (stable order shape for 05c/05d). All done.
-GIT NOTE:              INVENTORY-01..04 are four ordered commits (1368cfd / 58038f4 / 8e2c799 /
-                       21e502e) on c043009 — sequencing reconciled in the PRE-05a checkpoint.
-                       05* must be built against the FINAL stock rules, which are now committed
-                       in 8e2c799 (INVENTORY-03). Uncommitted: only the 4 unrelated pre-existing
+DEPENDS ON:            INVENTORY-05a (the engine — DONE, dormant). The engine's write shape is
+                       already proven against the current rules (05a emulator test).
+GIT NOTE:              INVENTORY-01..05a are committed in order (1368cfd / 58038f4 / 8e2c799 /
+                       21e502e / 9227ec3 docs / HEAD 05a) on c043009 — sequencing reconciled
+                       in the PRE-05a checkpoint. Uncommitted: only the 4 unrelated pre-existing
                        changes + untracked BRAIN.md / audit. Safety refs: branch
                        `pre-05a-backup-head` (old 30920c2), tag `pre-05a-worktree-snapshot`.
 ```
@@ -1185,9 +1385,10 @@ GIT NOTE:              INVENTORY-01..04 are four ordered commits (1368cfd / 5803
 ## EXACT NEXT ACTION
 
 ```
-INVENTORY-01..04 IMPLEMENTED + VERIFIED + COMMITTED in order (1368cfd / 58038f4 / 8e2c799 /
-21e502e), sequencing reconciled in the PRE-05a checkpoint. Nothing inventory-related is
-uncommitted. Do NOT do anything further without a new instruction.
+INVENTORY-01..05a IMPLEMENTED + VERIFIED + COMMITTED in order (1368cfd / 58038f4 / 8e2c799 /
+21e502e / 9227ec3 docs / HEAD 05a), sequencing reconciled in the PRE-05a checkpoint.
+Nothing inventory-related is uncommitted. The Stock Movement Engine exists but is DORMANT
+(no caller). Do NOT do anything further without a new instruction.
 
 Before the next phase, a human should:
   a. (optional) drop the safety refs once satisfied: `git branch -D pre-05a-backup-head` +
@@ -1204,14 +1405,19 @@ Before the next phase, a human should:
        check piReversalRequired + reversalInvoiceIds); "Generate PI" twice (2nd rejected);
        convert a quotation, then try to convert it again (returns the same order, no 2nd order).
 
-When INVENTORY-05a is authorized, execute it per Plan "INVENTORY-05a — Stock Movement Engine":
-  1. Re-read: brain.md (INVENTORY/STOCK §), Plan INVENTORY-05a, dependency map §2/§5.
-  2. Build src/lib/inventory/stockMovementEngine.ts — DORMANT (no caller migrated), fully unit-
-     tested, satisfying the CURRENT stock/stock_ledger rules (as set by -03). Unified ledger schema.
-  3. Standard gate. Update THIS file. STOP. (05b/05c/05d migrate callers, each its own phase.)
+When INVENTORY-05b is authorized, execute it per Plan "INVENTORY-05b — GRN -> Movement Engine":
+  1. Re-read: brain.md (INVENTORY/STOCK §), Plan INVENTORY-05b, dependency map §2/§5,
+     src/lib/inventory/stockMovementEngine.ts (the dormant engine 05a built).
+  2. Route goodsReceiptWorkflow.applyGrnReceipt through applyStockMovement (movementType
+     PURCHASE_RECEIPT, sourceType 'goods_receipt', lineKey the PO line) behind a flag
+     (USE_MOVEMENT_ENGINE_GRN). Keep the pre-engine local transaction in code for one release.
+     Add logActivity/notifyUsers at the caller (the engine does not).
+  3. Full batched emulator run (behaviour path changes even if rules don't). Standard gate.
+     Update THIS file. STOP. (05c dispatch, 05d manual + cancel-restore, each its own phase.)
 
-Do NOT touch order/quotation/invoice/cancel workflow logic (INVENTORY-04 is done), GRN/dispatch
-internals, firestore.rules, reservations, or any later-phase scope.
+Do NOT touch order/quotation/invoice/cancel workflow logic (INVENTORY-04 is done), dispatch
+internals (05c), firestore.rules, reservations, or any later-phase scope. Do NOT change the
+frozen MovementType enum or the engine's transaction shape without a rules re-verification.
 ```
 
 ---
@@ -1233,13 +1439,19 @@ internals, firestore.rules, reservations, or any later-phase scope.
 - Do NOT re-do INVENTORY-04 — IMPLEMENTED + verified + CODE COMMITTED. P1-8/P2-2(status)/
   P2-7/P2-8 are FIXED (workflow layer). Do not move cancel stock-restore into the engine
   (Phase 05d), do not add an `orders` rules block (deferred), do not touch PI money math.
-- Git: INVENTORY-00..04 are five ordered commits (…c043009 → 1368cfd → 58038f4 → 8e2c799 →
-  21e502e). Sequencing was reconciled in the PRE-05a checkpoint (safe local rebuild, no
-  force-push). The 4 unrelated pre-existing changes + untracked BRAIN.md/audit stay in the
-  working tree — do NOT commit/stash/revert those. Safety refs: branch `pre-05a-backup-head`
-  (old 30920c2), tag `pre-05a-worktree-snapshot`. `origin/main` is still at 46e3aab (not pushed).
+- Do NOT re-do INVENTORY-05a — the Stock Movement Engine (src/lib/inventory/stockMovementEngine.ts
+  + types.ts + idempotency.ts) is BUILT + verified + committed. It is DORMANT by design. Do NOT
+  migrate any caller here (05b GRN / 05c dispatch / 05d manual+cancel each own their migration),
+  do NOT change the frozen MovementType enum, do NOT re-consolidate stockSummaryId (done), do
+  NOT weaken firestore.rules for it (its write shape already passes — emulator-proven).
+- Git: INVENTORY-00..05a are committed in order (…c043009 → 1368cfd → 58038f4 → 8e2c799 →
+  21e502e → 9227ec3 docs → HEAD 05a). Sequencing was reconciled in the PRE-05a checkpoint
+  (safe local rebuild, no force-push). The 4 unrelated pre-existing changes + untracked
+  BRAIN.md/audit stay in the working tree — do NOT commit/stash/revert those. Safety refs:
+  branch `pre-05a-backup-head` (old 30920c2), tag `pre-05a-worktree-snapshot`. `origin/main`
+  is still at 46e3aab (not pushed).
 - Do NOT re-derive the emulator command — it is recorded above (JBR java).
-- Do NOT start INVENTORY-05a (or any later phase) without an explicit new instruction.
+- Do NOT start INVENTORY-05b (or any later phase) without an explicit new instruction.
 - Do NOT attempt to "fix everything" — one phase, verify, update STATE, then STOP.
 - The 29 failing unit-test files are the documented pre-existing baseline (BRAIN.md §35) — do NOT "fix" them.
 ```
@@ -1252,10 +1464,12 @@ internals, firestore.rules, reservations, or any later-phase scope.
 See "FILES / AREAS NOT TO TOUCH" above and Plan §21. In particular:
 - firestore.rules: INVENTORY-01 = `stock_ledger` READ-guard. INVENTORY-02 = none. INVENTORY-03
   = `stock` field-guard role list + `purchase_orders` lean update + PO transition self-loop.
-  Next rules edit is Phase 07 (new stock_reservations block) — full batched emulator + E7 each time.
+  INVENTORY-05a = none (engine write shape passes the -03 rules unchanged). Next rules edit is
+  Phase 07 (new stock_reservations block) — full batched emulator + E7 each time.
 - Stock quantity/write logic: dispatch OUT done (INVENTORY-01), GRN IN done (INVENTORY-03).
-  No edits to stockIn / manual adjust before Phase 05 (engine). cancel stock-restore stays
-  as-is (INVENTORY-04 only made the STATUS writes atomic) -> engine in 05d.
+  The movement engine exists (INVENTORY-05a) but is DORMANT — do NOT migrate stockIn / manual
+  adjust / GRN / dispatch / cancel-restore onto it except in their owning phase (05b/05c/05d).
+  cancel stock-restore stays as-is (INVENTORY-04 only made the STATUS writes atomic) -> 05d.
 - REST API: `stock`/`stock_ledger` are read-only (INVENTORY-02). Do not touch other API entities.
 - PO transition table: ONE `PURCHASE_ORDER_TRANSITIONS` (INVENTORY-03). Do not fork it again.
 - Order lifecycle: `isOrderLineLocked` / `updateOrder` (INVENTORY-04) are the authoritative
@@ -1273,18 +1487,19 @@ If you are a new session with no history:
 1. You have read: brain.md, INVENTORY_IMPLEMENTATION_PLAN.md, this file, INVENTORY_REGRESSION_MATRIX.md,
    INVENTORY_PHASE_DEPENDENCY_MAP.md.
 2. PLAN STATUS: APPROVED. Overall approval exists, BUT each phase runs on its own explicit instruction.
-3. CURRENT PHASE = INVENTORY-04, STATUS = COMPLETE + COMMITTED (21e502e).
-   NEXT PHASE = INVENTORY-05a. INVENTORY-00..04 are five ordered commits
-   (c043009 → 1368cfd → 58038f4 → 8e2c799 → 21e502e).
-   -> If the user has just asked you to run INVENTORY-05a, do EXACTLY what "EXACT NEXT ACTION" says.
+3. CURRENT PHASE = INVENTORY-05a, STATUS = COMPLETE + COMMITTED (HEAD). The Stock Movement
+   Engine is built but DORMANT (no caller). NEXT PHASE = INVENTORY-05b (migrate GRN onto the
+   engine). INVENTORY-00..05a are committed in order
+   (c043009 → 1368cfd → 58038f4 → 8e2c799 → 21e502e → 9227ec3 docs → HEAD 05a).
+   -> If the user has just asked you to run INVENTORY-05b, do EXACTLY what "EXACT NEXT ACTION" says.
    -> If they asked for manual verification, do that (see EXACT NEXT ACTION b).
-   -> Otherwise STOP and report: INVENTORY-00..04 committed in order; -05a awaits a go-ahead.
-4. `git log --oneline -6` shows the five ordered inventory commits on c043009.
-   `git status --short` shows ONLY: INVENTORY_IMPLEMENTATION_STATE.md +
-   INVENTORY_REGRESSION_MATRIX.md (this checkpoint's own doc edits, committed separately as
-   a docs commit) + 4 unrelated pre-existing changes (LEADS_UI_UX delete, ProfileSection.tsx,
-   useMyProfile.ts, userProfile.ts) + untracked BRAIN.md / COMPLETE_INVENTORY_INTEGRITY_AUDIT.md
-   — do NOT commit, revert, or stash the unrelated / untracked items.
+   -> Otherwise STOP and report: INVENTORY-00..05a committed in order; -05b awaits a go-ahead.
+4. `git log --oneline -8` shows the ordered inventory commits on c043009.
+   `git status --short` shows ONLY: 4 unrelated pre-existing changes (LEADS_UI_UX delete,
+   ProfileSection.tsx, useMyProfile.ts, userProfile.ts) + untracked BRAIN.md /
+   COMPLETE_INVENTORY_INTEGRITY_AUDIT.md — do NOT commit, revert, or stash the unrelated /
+   untracked items. (The INVENTORY_*.md checkpoint edits are committed WITH the 05a commit
+   per the phase instruction §18.)
 5. Do not touch any phase beyond the one you were told to run. End with Plan §23. Update this
    file. STOP.
 6. Emulator: use the JBR-java command in ROLLBACK STATUS / WHAT WAS VERIFIED. Do not re-derive it.
