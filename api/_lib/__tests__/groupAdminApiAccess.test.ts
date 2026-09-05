@@ -1,49 +1,49 @@
 /**
- * RBAC Phase 1 (AUTH-D4) — GroupAdmin server-side API role resolution.
+ * RBAC Phase 1 (AUTH-D4) — GroupAdmin server-side API role resolution, and
+ * RBAC Phase 6 (AUTH-D1) — the deterministic, company-scoped role-document
+ * lookup these tests now exercise.
  *
- * Before this phase, `EXACT_ROLE_COMPATIBILITY` in `api/_lib/permissions.ts`
- * had no entry for 'groupadmin' (or 'tl', 'demo operator', 'demo admin'), so
- * `resolveCompatibleRole()` returned null and `canDo()`/`requirePermission()`
- * failed closed for EVERY module/action, for EVERY GroupAdmin, on every
- * `/api/*` request — a false DENY, not an intentional restriction (the
- * client's own alias table has always resolved GroupAdmin to the Admin
- * template — GroupAdmin is a scope extension, not a distinct permission set).
+ * AUTH-D4 history: before Phase 1, `EXACT_ROLE_COMPATIBILITY` in
+ * `api/_lib/permissions.ts` had no entry for 'groupadmin' (or 'tl', 'demo
+ * operator', 'demo admin'), so `resolveCompatibleRole()` returned null and
+ * `canDo()`/`requirePermission()` failed closed for EVERY module/action, for
+ * EVERY GroupAdmin, on every `/api/*` request — a false DENY, not an
+ * intentional restriction (the client's own alias table has always resolved
+ * GroupAdmin to the Admin template — GroupAdmin is a scope extension, not a
+ * distinct permission set).
  *
- * These tests mock Firestore (`getAdminDb`) directly so the actual resolved
- * permission value can be asserted, not just "did not throw" — the existing
- * `api/__tests__/api.test.ts` `canDo` alias tests intentionally run without a
- * Firestore mock and only assert `typeof result === 'boolean'`, since
- * `getRoleDocument`'s try/catch swallows the real connection failure.
- *
- * This file deliberately does NOT fix `getRoleDocument`'s case-sensitivity
- * bug (AUTH-D1, deferred to Phase 6) — the fake Firestore below reproduces
- * that exact, still-current lookup path (primary query always empty,
- * fallback full-collection scan matches case-insensitively) so these tests
- * exercise the real, current runtime behavior, not a hypothetical fixed one.
+ * AUTH-D1 history (fixed this phase): `getRoleDocument()` used to query
+ * `where('name', '==', roleName.toLowerCase())` against docs whose stored
+ * `name` is capitalized — that primary query always returned empty, on
+ * every request, and the "fallback" it fell through to every time was an
+ * UNSCOPED `db.collection('roles').get()` across every company, matched
+ * case-insensitively, first-match-wins. This file's fake Firestore now
+ * mirrors the FIXED lookup — a direct `.doc('{companyId}_{RoleName}').get()`
+ * — and includes an explicit multi-company isolation test proving the old
+ * cross-tenant leak is closed: two companies' identically-named "Sales"
+ * role, with DIFFERENT grants, now resolve independently.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthenticatedUser } from '../auth';
 
 type FakeRoleDoc = { name: string; schemaVersion: 1; permissions: Record<string, Record<string, boolean> | undefined> };
 
-let roleDocs: FakeRoleDoc[] = [];
+// Keyed by the exact deterministic id scheme (`{companyId}_{RoleName}`,
+// mirroring src/lib/roleBootstrap.ts's roleDocumentId()) the fixed
+// getRoleDocument() now looks up directly.
+let roleDocsById: Record<string, FakeRoleDoc> = {};
 
 vi.mock('../firebase', () => ({
   getAdminDb: () => ({
     collection: (name: string) => {
       if (name !== 'roles') throw new Error(`unexpected collection: ${name}`);
       return {
-        // Mirrors getRoleDocument's real primary query: where('name','==',
-        // <lowercased key>) against docs whose stored `name` is capitalized
-        // (e.g. 'Admin') — this NEVER matches today (AUTH-D1, not fixed here).
-        where: () => ({
-          limit: () => ({
-            get: async () => ({ empty: true, docs: [] }),
-          }),
+        doc: (id: string) => ({
+          get: async () => {
+            const data = roleDocsById[id];
+            return { exists: Boolean(data), data: () => data };
+          },
         }),
-        // Mirrors the real fallback: an unscoped read of the whole
-        // collection, matched case-insensitively by the caller.
-        get: async () => ({ docs: roleDocs.map((d) => ({ data: () => d })) }),
       };
     },
   }),
@@ -94,7 +94,11 @@ const MANAGER_ROLE_DOC: FakeRoleDoc = {
 };
 
 beforeEach(() => {
-  roleDocs = [ADMIN_ROLE_DOC, SALES_ROLE_DOC, MANAGER_ROLE_DOC];
+  roleDocsById = {
+    'company-a_Admin': ADMIN_ROLE_DOC,
+    'company-a_Sales': SALES_ROLE_DOC,
+    'company-a_Manager': MANAGER_ROLE_DOC,
+  };
 });
 
 afterEach(() => {
@@ -102,7 +106,7 @@ afterEach(() => {
 });
 
 describe('AUTH-D4 — GroupAdmin server-side role resolution', () => {
-  it('POSITIVE: a GroupAdmin resolves to the Admin role document and can perform an action Admin is granted', async () => {
+  it('POSITIVE: a GroupAdmin resolves to their own company\'s Admin role document and can perform an action Admin is granted', async () => {
     const user = mockUser({ role: 'GroupAdmin' });
     await expect(canDo(user, 'view', 'projects')).resolves.toBe(true);
     await expect(canDo(user, 'delete', 'roles')).resolves.toBe(true);
@@ -114,7 +118,7 @@ describe('AUTH-D4 — GroupAdmin server-side role resolution', () => {
   });
 
   it('POSITIVE: the previously-missing legacy aliases (TL -> Manager, demo operator/admin -> Admin) now resolve instead of failing closed', async () => {
-    // TL -> Manager: before this phase, 'tl' had no EXACT_ROLE_COMPATIBILITY
+    // TL -> Manager: before Phase 1, 'tl' had no EXACT_ROLE_COMPATIBILITY
     // entry, so this always returned false regardless of the Manager doc's
     // actual grants. It now correctly reaches and reflects that grant.
     await expect(canDo(mockUser({ role: 'TL' }), 'view', 'leads')).resolves.toBe(true);
@@ -150,5 +154,52 @@ describe('AUTH-D4 — GroupAdmin server-side role resolution', () => {
     const groupAdminUser = { companyId: 'company-a', isSuperAdmin: false };
     expect(canAccessApiResource(groupAdminUser, 'projects', { companyId: 'company-b' })).toBe(false);
     expect(canAccessApiResource(groupAdminUser, 'projects', { companyId: 'company-a' })).toBe(true);
+  });
+});
+
+describe('AUTH-D1 — deterministic, company-scoped role-document lookup', () => {
+  it('POSITIVE: a missing role document (unknown role name for this company) fails closed, not by accidentally matching another document', async () => {
+    const user = mockUser({ role: 'Sales', companyId: 'company-nonexistent' });
+    await expect(canDo(user, 'view', 'leads')).resolves.toBe(false);
+  });
+
+  it('NEGATIVE (the exact bug this phase closes): two companies with an identically-named "Sales" role, holding DIFFERENT grants, resolve completely independently — Company B\'s customization never leaks into Company A\'s evaluation, and vice versa', async () => {
+    // Company A's Sales: as seeded above — leads view+create, no roles grant.
+    // Company B customizes its OWN "Sales" role document to ALSO grant
+    // roles:delete — a deliberately dangerous customization that must never
+    // be visible to a Company A caller.
+    roleDocsById['company-b_Sales'] = {
+      name: 'Sales',
+      schemaVersion: 1,
+      permissions: {
+        leads: { view: true, create: true },
+        roles: { view: true, create: true, edit: true, delete: true },
+      },
+    };
+
+    const companyAUser = mockUser({ role: 'Sales', companyId: 'company-a' });
+    const companyBUser = mockUser({ role: 'Sales', companyId: 'company-b' });
+
+    // Company A's Sales must NOT inherit Company B's customization.
+    await expect(canDo(companyAUser, 'delete', 'roles')).resolves.toBe(false);
+    // Company B's Sales genuinely does have it — on its OWN document only.
+    await expect(canDo(companyBUser, 'delete', 'roles')).resolves.toBe(true);
+    // Both still see their own, identical leads:view/create grant.
+    await expect(canDo(companyAUser, 'view', 'leads')).resolves.toBe(true);
+    await expect(canDo(companyBUser, 'view', 'leads')).resolves.toBe(true);
+  });
+
+  it('NEGATIVE: a caller with no companyId fails closed rather than resolving an unscoped/malformed document id', async () => {
+    const user = mockUser({ role: 'Admin', companyId: '' });
+    await expect(canDo(user, 'view', 'projects')).resolves.toBe(false);
+  });
+
+  it('the lookup never calls an unscoped collection-wide read — this mock\'s collection() only ever exposes doc(id), proving the fixed code path cannot fall back to a full scan even if it wanted to', async () => {
+    const user = mockUser({ role: 'Admin', companyId: 'company-a' });
+    await expect(canDo(user, 'view', 'projects')).resolves.toBe(true);
+    // If getRoleDocument() still called collection('roles').where(...) or
+    // collection('roles').get() anywhere, the mock above would throw
+    // (no such methods exist on it) rather than let this resolve — this
+    // test passing IS the proof.
   });
 });

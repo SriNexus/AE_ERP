@@ -7,10 +7,18 @@
 
 import { getAdminDb } from './firebase';
 import type { AuthenticatedUser } from './auth';
+import { roleDocumentId } from '../../src/lib/roleBootstrap';
 
 // ── Permission types (mirrors client-side) ────────────────────
 
-export type Permission = 'view' | 'create' | 'edit' | 'delete' | 'cancel' | 'approve' | 'export' | 'import' | 'view_pricing';
+// RBAC Phase 6 (AUTH-D7): 'disburse' exists on the client Permission type
+// (src/lib/permissions.ts, used for Accounts' payout-disbursement grant)
+// but was missing here — a server-side canDo(user,'disburse',...) call
+// always failed isPermission() and returned false regardless of role.
+// Additive only: no ENTITY_REGISTRY entry exposes 'payouts' over the REST
+// API yet (confirmed unchanged since Phase 1), so this changes no current
+// request's outcome.
+export type Permission = 'view' | 'create' | 'edit' | 'delete' | 'cancel' | 'approve' | 'disburse' | 'export' | 'import' | 'view_pricing';
 export type Visibility = 'all' | 'team' | 'self';
 
 export type Module =
@@ -40,7 +48,7 @@ interface RoleDocument {
   permissions: Record<string, Record<string, boolean | string> | undefined>;
 }
 
-const ALL_PERMISSIONS: Permission[] = ['view', 'create', 'edit', 'delete', 'cancel', 'approve', 'export', 'import', 'view_pricing'];
+const ALL_PERMISSIONS: Permission[] = ['view', 'create', 'edit', 'delete', 'cancel', 'approve', 'disburse', 'export', 'import', 'view_pricing'];
 const ALL_MODULES: Module[] = [
   'dashboard', 'projects', 'leads', 'customers', 'quotations', 'orders', 'dispatch',
   'surveys', 'engineering', 'installations', 'qc', 'commissioning', 'net_metering', 'subsidy', 'service_tickets',
@@ -61,26 +69,38 @@ function isPermission(value: string): value is Permission {
 }
 
 /**
- * Fetch a role document from Firestore by role name.
+ * Fetch the CALLER'S OWN company's role document by deterministic id.
+ *
+ * RBAC Phase 6 (AUTH-D1): the previous implementation queried
+ * `where('name', '==', roleName.trim().toLowerCase())` — every seeded role
+ * is stored with a CAPITALIZED `name` (e.g. 'Sales'), so this primary query
+ * always returned empty, on every single request, for every role. The
+ * "fallback" it fell through to on every miss — an unscoped
+ * `db.collection('roles').get()` reading every role document across every
+ * company, matched case-insensitively, first-match-wins with no guaranteed
+ * order — was therefore not an edge case: it was the only code path that
+ * had ever executed, and it could resolve a DIFFERENT company's
+ * same-named role document (e.g. Company A's customized "Sales" grants
+ * evaluating a Company B caller's request).
+ *
+ * Fixed by using the exact same deterministic id scheme the client and the
+ * role-seeding code already use (`roleDocumentId`, `src/lib/roleBootstrap.ts`
+ * — `{companyId}_{RoleName}`) for a single, direct `.doc(id).get()`. This
+ * is O(1), requires no scan of any kind, and is scoped by construction to
+ * the company the CALLER authenticated as — never a client-supplied value,
+ * since `companyId` comes from `AuthenticatedUser` (resolved server-side
+ * from the verified token/mapping, see api/_lib/auth.ts). A missing role
+ * document (including an unknown/malformed companyId) fails closed —
+ * `snap.exists` is false, this returns null, and canDo() below already
+ * treats a null role document as `false`.
  */
-async function getRoleDocument(roleName: string): Promise<RoleDocument | null> {
+async function getRoleDocument(companyId: string, roleName: string): Promise<RoleDocument | null> {
   try {
     const db = getAdminDb();
-    const normalizedKey = roleName.trim().toLowerCase();
-    const snap = await db.collection('roles')
-      .where('name', '==', normalizedKey)
-      .limit(1)
-      .get();
-
-    if (snap.empty) {
-      // Try case-insensitive match
-      const allDocs = await db.collection('roles').get();
-      const matched = allDocs.docs.find((d) => d.data().name?.toLowerCase() === normalizedKey);
-      if (!matched) return null;
-      return matched.data() as RoleDocument;
-    }
-
-    return snap.docs[0].data() as RoleDocument;
+    const docId = roleDocumentId(companyId, roleName);
+    const snap = await db.collection('roles').doc(docId).get();
+    if (!snap.exists) return null;
+    return snap.data() as RoleDocument;
   } catch {
     return null;
   }
@@ -152,10 +172,16 @@ export async function canDo(
   if (!isPermission(action)) return false;
   if (!isModule(module)) return false;
 
+  // RBAC Phase 6 (AUTH-D1): fail closed on a missing companyId rather than
+  // let getRoleDocument build a malformed doc id — every real
+  // AuthenticatedUser has one (api/_lib/auth.ts's validateProfile requires
+  // it), so this only guards a genuinely broken/forged identity.
+  if (!user.companyId) return false;
+
   const resolvedRole = resolveCompatibleRole(user.role);
   if (!resolvedRole) return false;
 
-  const roleDoc = await getRoleDocument(resolvedRole);
+  const roleDoc = await getRoleDocument(user.companyId, resolvedRole);
   if (!roleDoc) return false;
 
   const modulePermissions = roleDoc.permissions[module];

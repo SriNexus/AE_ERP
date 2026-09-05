@@ -61,15 +61,23 @@ function fakeDb(existingData: Record<string, unknown> | null, moduleName = confi
       currentData = { ...(currentData || {}), ...data };
     }),
   };
-  const roleDoc = { data: () => ({ name: 'admin', schemaVersion: 1, permissions: { [moduleName]: { view: true, create: true, edit: true, delete: true } } }) };
-  const rolesQuery: any = {
-    where: vi.fn(() => rolesQuery),
-    limit: vi.fn(() => rolesQuery),
-    get: vi.fn(async () => ({ empty: false, docs: [roleDoc] })),
+  // RBAC Phase 6 (AUTH-D1): getRoleDocument() now fetches by deterministic
+  // id ('{companyId}_{RoleName}', mirroring src/lib/roleBootstrap.ts's
+  // roleDocumentId()) via a direct .doc(id).get() — no where()/limit()/
+  // unscoped collection scan remains in the code path. mockUser() below
+  // defaults to role:'Admin', companyId:'company-1', so the actor's role
+  // document id is deterministically 'company-1_Admin'.
+  const rolesCollection: any = {
+    doc: vi.fn((id: string) => ({
+      get: vi.fn(async () => ({
+        exists: id === 'company-1_Admin',
+        data: () => ({ name: 'Admin', schemaVersion: 1, permissions: { [moduleName]: { view: true, create: true, edit: true, delete: true } } }),
+      })),
+    })),
   };
   return {
     db: {
-      collection: vi.fn((name: string) => (name === 'roles' ? rolesQuery : { doc: vi.fn(() => entityDocRef) })),
+      collection: vi.fn((name: string) => (name === 'roles' ? rolesCollection : { doc: vi.fn(() => entityDocRef) })),
     } as any,
     updateCalls,
     getCurrentData: () => currentData,
