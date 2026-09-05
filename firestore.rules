@@ -881,12 +881,46 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // RBAC Phase 2 (AUTH-C6 / S-4): a STATIC reserved-word list (mirrors
+    // SYSTEM_ROLE_NAMES, src/lib/roleBootstrap.ts — the 15 names every
+    // company is seeded with), not a live Firestore read of existing role
+    // docs: the Master Plan explicitly requires this decision stay
+    // deterministic and never depend on a get()/exists() query against the
+    // roles collection (both for the 1000-expression budget this file is
+    // already tight against, and to avoid a live-data dependency in a
+    // security-critical check). Keep this list in exact sync with
+    // SYSTEM_ROLE_NAMES if that array ever changes.
+    //
+    // Deliberately kept as a STANDALONE function, never folded into
+    // roleNotSystemProtected() below — a first attempt did exactly that and
+    // broke roleSystemIdentityUnchanged()'s branch-2 escape hatch: that
+    // branch's "!roleNotSystemProtected(oldData) && !roleNotSystemProtected
+    // (newData)" pair originally means, precisely, "isSystem was true on
+    // both sides" — folding the name check in there made a reserved name
+    // ALSO satisfy "!roleNotSystemProtected", so a request that flips
+    // isSystem:true -> false while leaving the (still-reserved) name
+    // untouched satisfied branch-2's own "name unchanged" condition and was
+    // WRONGLY allowed to demote a real system role — caught immediately by
+    // the pre-existing rolesSystemRolePermissionEditFix.emulator.test.ts
+    // regression suite before this ever reached a commit. Applied instead as
+    // its own independent AND-clause on the create/update rules below, which
+    // cannot interact with roleSystemIdentityUnchanged()'s internal algebra.
+    function isReservedSystemRoleName(name) {
+      return name in [
+        'Admin', 'Director', 'Sales', 'Accounts', 'Warehouse', 'HR',
+        'Operations', 'Partner', 'Manager', 'Surveyor', 'Engineer',
+        'InstallationLead', 'ServiceTechnician', 'ComplianceOfficer', 'Procurement',
+      ];
+    }
+
     // A role is a system role only when it EXPLICITLY carries isSystem==true.
     // roles docs created before the data-driven model may lack the field — and
     // Firestore rules FAIL CLOSED on reading a missing map field (the same
     // live-bisected class as hasManagerId), so the check MUST gate field access
     // on keys().hasAny(['isSystem']) first. A missing/absent field means the
-    // role is custom/manageable by company Admins.
+    // role is custom/manageable by company Admins. UNCHANGED by Phase 2 — see
+    // isReservedSystemRoleName() above for why the reserved-name guard is
+    // applied separately rather than folded in here.
     function roleNotSystemProtected(data) {
       return !data.keys().hasAny(['isSystem']) || data.isSystem != true;
     }
@@ -1001,10 +1035,18 @@ service cloud.firestore {
       // most direct way to make "GroupAdmin cannot forge/move via groupId"
       // true, and it restricts nothing SuperAdmin legitimately does today
       // (roleBootstrap.ts's seeds never write groupId either).
+      // RBAC Phase 2 (AUTH-C6 / S-4): a non-Super-Admin creator may not name
+      // their new role document after a reserved system role name (see
+      // isReservedSystemRoleName() above) — independent of, and unaffected
+      // by, the isSystem-based roleNotSystemProtected() check on the same
+      // clause: an Admin/GroupAdmin creating an ordinary custom role (no
+      // isSystem flag) previously sailed through roleNotSystemProtected()
+      // even when its `name` collided with "Admin"/"Sales"/etc.
       allow create: if actorIsActive() && (
         (isAdmin() && sameCompany(request.resource.data) && (roleNotSystemProtected(request.resource.data) || isSuperAdmin()))
         || (groupAdminCanReadRole(request.resource.data) && roleNotSystemProtected(request.resource.data))
-      ) && !request.resource.data.keys().hasAny(['groupId']);
+      ) && !request.resource.data.keys().hasAny(['groupId'])
+        && (isSuperAdmin() || !request.resource.data.keys().hasAny(['name']) || !isReservedSystemRoleName(request.resource.data.name));
       // Expression-budget note (live-verified 2026-08-22, same class as this
       // session's earlier Stock/Attendance overflows): the "obviously
       // correct" first draft here — sameCompany() called on BOTH resource.data
@@ -1020,12 +1062,26 @@ service cloud.firestore {
       // own get()) is dropped; (2) `(A||C) && (B||C)` is algebraically
       // `(A&&B)||C` — the two separate `|| isSuperAdmin()` fallbacks collapse
       // into one, cutting a duplicated isSuperAdmin()/currentUser() re-entry.
+      // RBAC Phase 2 (AUTH-C6 / S-4): symmetric to the create-side guard
+      // above — a non-Super-Admin may not RENAME an existing (non-system)
+      // role INTO a reserved system role name either. `request.resource.data
+      // .name == resource.data.name` short-circuits this clause to true for
+      // every update that doesn't touch `name` at all (the overwhelming
+      // majority — permission-matrix edits), so it cannot interact with
+      // roleSystemIdentityUnchanged()'s own, separate, already-correct
+      // handling of a genuine system role's identity immutability.
       allow update: if actorIsActive() && (
         (isAdmin() && sameCompany(resource.data) && companyIdUnchanged()
           && (roleSystemIdentityUnchanged(resource.data, request.resource.data) || isSuperAdmin()))
         || (groupAdminCanReadRole(resource.data) && companyIdUnchanged()
           && roleSystemIdentityUnchanged(resource.data, request.resource.data))
-      ) && !request.resource.data.keys().hasAny(['groupId']);
+      ) && !request.resource.data.keys().hasAny(['groupId'])
+        && (
+          isSuperAdmin()
+          || !request.resource.data.keys().hasAny(['name'])
+          || request.resource.data.name == resource.data.name
+          || !isReservedSystemRoleName(request.resource.data.name)
+        );
       // DELETE: out of Phase 1 scope — RBAC-F01/RBAC-F16 are create/update-only
       // findings. allow delete: if false is preserved unchanged for every
       // actor, including Super Admin (soft-delete, via deleteDocById ->
@@ -1962,8 +2018,23 @@ service cloud.firestore {
       // Role grants: Admin (full), GroupAdmin (own Group), Sales/Accounts/
       // Director/Manager (view only). No non-Admin role has banks
       // create/edit/delete today — write is Admin/GroupAdmin-only.
+      //
+      // RBAC Phase 2 (AUTH-S1): this read regex tested only the exact
+      // canonical role strings — a raw role.matches() has no idea about
+      // EXACT_ROLE_COMPATIBILITY (src/lib/permissions.ts), so 'Sales
+      // Executive'/'BDM'/'BDE' (all alias -> Sales) and 'TL' (alias ->
+      // Manager) failed this exact-alternation match even though canDo()
+      // already resolves them to Sales'/Manager's real 'banks:view' grant —
+      // a "UI allows, rules reject" false DENY for those specific alias
+      // roles, not an intentional restriction. Expanded to list every
+      // currently-active alias of Sales and Manager verbatim (derived
+      // directly from EXACT_ROLE_COMPATIBILITY's 'sales executive'/'bdm'/
+      // 'bde'/'tl' entries — do not add an entry here that doesn't have a
+      // matching line in that table). GroupAdmin is unaffected — it is
+      // already routed through the isGroupAdmin() ternary above, never
+      // through this regex.
       allow read: if actorIsActive()
-        && (isGroupAdmin() ? groupAdminCanRead(resource.data) : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|Sales|Accounts|Director|Manager'))));
+        && (isGroupAdmin() ? groupAdminCanRead(resource.data) : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|Sales|Sales Executive|BDM|BDE|Accounts|Director|Manager|TL'))));
       allow create: if actorIsActive()
         && (isGroupAdmin() ? groupAdminCanCreate(request.resource.data) : (canCreateCompanyScoped() && (actorIsSuperAdmin() || actorRoleMatches('Admin'))));
       allow update: if actorIsActive()

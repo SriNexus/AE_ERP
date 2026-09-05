@@ -34,6 +34,8 @@ export default defineConfig({
       'src/lib/__tests__/sensitiveCollectionsRoleEnforcement.emulator.test.ts',
       'src/lib/__tests__/biometricFaceReferences.emulator.test.ts',
       'src/lib/__tests__/leadCreationProjectionWrites.emulator.test.ts',
+      'src/lib/__tests__/rolesReservedSystemNameProtection.emulator.test.ts',
+      'src/lib/__tests__/banksRoleAliasParity.emulator.test.ts',
     ],
   },
 });
