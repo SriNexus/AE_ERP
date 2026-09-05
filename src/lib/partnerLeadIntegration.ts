@@ -15,6 +15,7 @@
 
 import { updateDocById, genId, createDocWithId, getOne, getAll, resolveWriteCompanyId, resolveWriteGroupId } from './firestore';
 import { resolveCurrentPartnerDocId, partnerDisplayName } from './partnerOwnership';
+import { leadDisplayName } from './leadDisplayName';
 import type { ChannelPartner } from '../features/channel-partner/types';
 import { fetchAssignableSalesUsers } from './salesTeam';
 import { COLLECTIONS } from './firebase';
@@ -278,7 +279,13 @@ export async function updatePayoutStatus(
 // ── Partner Creates Lead ────────────────────────────────────
 
 export interface PartnerCreateLeadInput {
-  name: string;
+  // Genuinely optional: PartnerCreateLeadModal.tsx only requires "name OR
+  // phone" (a partner may capture just a phone number before they have the
+  // customer's name) — `phone` carries the native HTML `required` attribute
+  // there, `name` does not. Blank is valid, everyday data, not malformed
+  // input — see leadDisplayName.ts for the display/avatar fallback this
+  // implies downstream.
+  name?: string;
   phone: string;
   email?: string;
   city?: string;
@@ -366,7 +373,7 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     id: leadId,
     companyId,
     ...(groupId ? { groupId } : {}),
-    name: input.name,
+    name: input.name || '',
     phone: input.phone,
     email: input.email || '',
     city: input.city || '',
@@ -414,7 +421,7 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
     ['Admin', 'Sales'],
     NotificationType.LEAD_CREATED_BY_PARTNER,
     'New partner lead',
-    `${effectivePartnerName} created a new lead: ${input.name || input.phone}`,
+    `${effectivePartnerName} created a new lead: ${leadDisplayName(input)}`,
     'lead',
     leadId,
     notificationCompanyId,
@@ -428,7 +435,7 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
       resolvedAssignee.id,
       NotificationType.LEAD_ASSIGNED,
       'Lead assigned',
-      `${effectivePartnerName} assigned you a new lead: ${input.name || input.phone}`,
+      `${effectivePartnerName} assigned you a new lead: ${leadDisplayName(input)}`,
       'lead',
       leadId,
       notificationCompanyId,

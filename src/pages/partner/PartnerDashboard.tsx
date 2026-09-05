@@ -34,6 +34,7 @@ import { statusBadge } from '../../components/ui/Badge';
 import { useAppStore } from '../../store/useAppStore';
 import { usePartnerSelf } from '../../features/channel-partner/hooks/usePartnerSelf';
 import { partnerDisplayName } from '../../lib/partnerOwnership';
+import { leadDisplayName, leadInitial } from '../../lib/leadDisplayName';
 import { COLLECTIONS } from '../../lib/firebase';
 import { getAll, fmtCurrency, fmtCompactCurrency, ageDays } from '../../lib/firestore';
 import { queryKeys } from '../../lib/queryKeys';
@@ -438,10 +439,10 @@ export default function PartnerDashboard() {
                           <td className="px-4 py-2.5">
                             <div className="flex items-center gap-2">
                               <div className="h-6 w-6 rounded-lg bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-400 flex items-center justify-center text-[10px] font-bold shrink-0">
-                                {(lead.name ?? '?')[0].toUpperCase()}
+                                {leadInitial(lead)}
                               </div>
                               <div>
-                                <p className="text-xs font-semibold text-[var(--color-text)] leading-tight">{lead.name}</p>
+                                <p className="text-xs font-semibold text-[var(--color-text)] leading-tight">{leadDisplayName(lead)}</p>
                                 <p className="text-[10px] text-[var(--color-text-muted)]">{lead.city || '—'} · {lead.source || '—'}</p>
                               </div>
                             </div>

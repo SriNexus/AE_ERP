@@ -12,20 +12,20 @@
 import { describe, it, expect } from 'vitest';
 import { computeStatus, hasEarlyExit, generatePolicyVersion } from '../../features/attendance/services/attendanceRuleEngine';
 import type { AttendanceRecord, AttendanceSettings } from '../../features/attendance/types';
+import { DEFAULT_ATTENDANCE_SETTINGS } from '../../features/attendance/types';
 
 // ═══════════════════════════════════════════════════════════════════
 // Fixtures
 // ═══════════════════════════════════════════════════════════════════
 
+// Root cause of a recurring TS2739 here: this fixture used to re-declare the
+// settings shape by hand and drifted out of sync when `gpsAccuracyCeilingMeters`/
+// `locationConsistencyMaxSpreadMeters` were added to `AttendanceSettings` —
+// spreading the canonical default (the same object `normalizeAttendanceSettings`
+// falls back to) means a future field addition can't silently break this file
+// the same way again.
 const DEFAULT_SETTINGS: AttendanceSettings = {
-  geofenceRadiusDefaultMeters: 200,
-  gpsAccuracyThresholdMeters: 50,
-  gracePeriodMinutes: 15,
-  shiftStartTime: '09:00',
-  shiftEndTime: '18:00',
-  halfDayThresholdHours: 4,
-  staleLocationMaxAgeSeconds: 300,
-  checkInMethod: 'gps',
+  ...DEFAULT_ATTENDANCE_SETTINGS,
   weeklyOffDays: [0],
 };
 
