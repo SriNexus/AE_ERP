@@ -14,6 +14,7 @@ export default defineConfig({
       'src/lib/__tests__/multiTenantSecurity.emulator.test.ts',
       'src/lib/__tests__/rbacPhase8CumulativeSecurity.emulator.test.ts',
       'src/lib/__tests__/groupAdminFullGroupAccess.emulator.test.ts',
+      'src/lib/__tests__/groupAdminProductCrud.emulator.test.ts',
       'src/lib/__tests__/settingsPersonalOwnershipBackfillFix.emulator.test.ts',
       'src/lib/__tests__/rolesSystemRolePermissionEditFix.emulator.test.ts',
       'src/lib/__tests__/missingIsSuperAdminFieldFix.emulator.test.ts',
