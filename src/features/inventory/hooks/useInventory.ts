@@ -221,7 +221,15 @@ export function useSaveProduct(editId: string | null, onSuccess: () => void) {
         lowStockThreshold: Number(data.lowStockThreshold) || 5,
         specs: data.specs ? (() => { try { return JSON.parse(data.specs); } catch { return {}; } })() : {},
       };
-      const companyId = String(activeCompanyId || resolveWriteCompanyId() || '');
+      // RBAC Master Plan Phase 8: resolveWriteCompanyId() — NOT a raw
+      // `activeCompanyId || …` — resolves the neutral sentinels ('group',
+      // 'all', 'default') to the real target company, exactly like
+      // createDoc()/createDocWithId() and every other write path already do.
+      // createProductWithSkuLock() stamps this companyId directly inside a
+      // raw runTransaction (no re-sanitizing helper in the path), so the
+      // literal 'group' sentinel a GroupAdmin's group-view selection now
+      // carries would otherwise be persisted and denied by the rules.
+      const companyId = resolveWriteCompanyId();
       if (editId) {
         await updateProductWithSkuLock(editId, payload, { companyId, actorId: user.id });
         await notifyRoleUsers(['Warehouse', 'Operations'], NotificationType.INVENTORY_UPDATED, 'Product updated', `Product ${data.name || editId} was updated.`, 'stock', editId, activeCompanyId);
