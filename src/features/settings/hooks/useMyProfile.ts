@@ -24,6 +24,23 @@ export function useMyProfile() {
     queryKey: [...MY_PROFILE_QUERY_KEY, auth.currentUser?.uid || storedUserId],
     queryFn: async () => {
       const authUser = auth.currentUser;
+
+      // Platform Owner identity (src/lib/ownerAccess.ts createOwnerAppIdentity,
+      // set by Login.tsx for the single hardcoded owner email): a client-only
+      // synthetic identity (id `owner:{authUid}`) with NO backing users/{id}
+      // Firestore document by design — useGlobalBoot.ts's own profile
+      // self-heal effect already skips this exact case for the same reason
+      // ("if (!user?.id || user.isOwner) return; ... the Owner's synthetic
+      // identity has no users/{id} doc by design (skipped)"). loadCurrentUserProfile()
+      // and resolveAuthenticatedErpUser() both correctly assume every OTHER
+      // authenticated identity has a real ERP user document and throw when it
+      // doesn't — for the Owner that document will never exist, so build the
+      // canonical profile directly from the already-authenticated synthetic
+      // identity instead of attempting a Firestore read that can only fail.
+      if (storedUser?.isOwner) {
+        return normalizeUserProfile({ ...storedUser, id: storedUser.id, phone: storedUser.phone || '' });
+      }
+
       const storeIdentityIsCanonical = Boolean(
         authUser && storedUser && storedUser.id !== authUser.uid
         && storedUser.email.trim().toLowerCase() === authUser.email?.trim().toLowerCase(),

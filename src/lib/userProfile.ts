@@ -67,7 +67,8 @@ export class UserProfileError extends Error {
       | 'mapping-missing'
       | 'rollback-failed'
       | 'asset-upload-failed'
-      | 'bootstrap-failed',
+      | 'bootstrap-failed'
+      | 'owner-identity-readonly',
     message: string,
     options?: { cause?: unknown },
   ) {
@@ -268,6 +269,21 @@ async function commitProfilePatch(
 
 export async function loadCurrentUserProfile(userId: string): Promise<CanonicalUserProfile> {
   if (!text(userId)) throw new UserProfileError('profile-missing', 'Your ERP user profile could not be resolved.');
+  // The platform Owner identity (id `owner:{authUid}`, see lib/ownerAccess.ts)
+  // is a client-only synthetic identity with NO backing users/{id} Firestore
+  // document by design — callers that need the Owner's profile (useMyProfile's
+  // load path) must read it from the already-authenticated identity instead
+  // of calling this function. A caller reaching this function with an
+  // `owner:`-prefixed id (e.g. a profile SAVE attempt) has no real ERP
+  // document to update, so fail with a specific, accurate reason rather than
+  // the generic "record does not exist" — which would otherwise be true but
+  // misleading (there is no missing record to repair; none is expected to exist).
+  if (userId.startsWith('owner:')) {
+    throw new UserProfileError(
+      'owner-identity-readonly',
+      'The platform Owner identity has no editable ERP user record — it authenticates directly via Firebase Authentication. Use Change Password to update credentials.',
+    );
+  }
   try {
     // Canonical identity reads must not pass through the generic entity visibility
     // filter in firestore.getOne(). Firestore rules already authorize this exact

@@ -57,6 +57,14 @@ export function ProfileSection() {
   const [showEmailConfirm, setShowEmailConfirm] = useState(false);
   const [emailPassword, setEmailPassword] = useState('');
   const loadedProfile = profileQuery.data;
+  // Platform Owner identity (lib/ownerAccess.ts): a client-only identity with
+  // no backing users/{id} ERP record (see useMyProfile.ts / userProfile.ts's
+  // loadCurrentUserProfile 'owner-identity-readonly' guard) — there is
+  // nothing for a display-name/phone/photo edit to persist to, so those
+  // fields are read-only for this identity. Password management is
+  // unaffected: it goes through Firebase Authentication directly, never the
+  // ERP users collection.
+  const isOwnerIdentity = currentUser?.isOwner === true;
 
   useEffect(() => {
     if (!loadedProfile || isDirty) return;
@@ -81,11 +89,13 @@ export function ProfileSection() {
   }, [form.email, loadedProfile]);
 
   function patchForm(patch: Partial<typeof form>) {
+    if (isOwnerIdentity) return;
     setForm((prev) => ({ ...prev, ...patch }));
     setIsDirty(true);
   }
 
   function handleAvatarUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    if (isOwnerIdentity) return;
     const file = e.target.files?.[0];
     if (!file) return;
     if (!isValidImageFile(file)) {
@@ -98,6 +108,7 @@ export function ProfileSection() {
   }
 
   function handleSignatureUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    if (isOwnerIdentity) return;
     const file = e.target.files?.[0];
     if (!file) return;
     if (!isValidImageFile(file)) {
@@ -266,6 +277,16 @@ export function ProfileSection() {
         </div>
       ) : null}
 
+      {isOwnerIdentity ? (
+        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-hover)] p-4 text-sm text-[var(--color-text-secondary)]">
+          <p className="font-semibold text-[var(--color-text)]">Platform Owner identity</p>
+          <p className="mt-1">
+            This account authenticates directly via Firebase Authentication and has no editable ERP user record, so name/photo/phone below are read-only.
+            Use <strong>Change Password</strong> to update your credentials.
+          </p>
+        </div>
+      ) : null}
+
       <SettingsCard title="Profile Photo" description="This photo appears in your header and account menu." className="overflow-hidden">
         <div className="flex flex-col items-start gap-5 sm:flex-row sm:items-center">
           <div className="relative">
@@ -277,17 +298,19 @@ export function ProfileSection() {
               </div>
             )}
           </div>
-          <div className="space-y-1">
-            <label className="inline-block cursor-pointer rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)]">
-              Upload Photo
-              <input type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} aria-label="Upload profile photo" />
-            </label>
-            <p className="text-[10px] text-[var(--color-text-muted)]">PNG, JPG, WEBP. Max 2MB.</p>
-          </div>
+          {isOwnerIdentity ? null : (
+            <div className="space-y-1">
+              <label className="inline-block cursor-pointer rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)]">
+                Upload Photo
+                <input type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} aria-label="Upload profile photo" />
+              </label>
+              <p className="text-[10px] text-[var(--color-text-muted)]">PNG, JPG, WEBP. Max 2MB.</p>
+            </div>
+          )}
         </div>
       </SettingsCard>
 
-      <SettingsCard title="Account Information" description="Your name and email are stored on your canonical ERP user account.">
+      <SettingsCard title="Account Information" description={isOwnerIdentity ? 'Read-only — the platform Owner identity has no editable ERP user record.' : 'Your name and email are stored on your canonical ERP user account.'}>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="flex flex-col gap-1">
             <label className="text-xs font-semibold uppercase text-[var(--color-text-secondary)]">Display Name</label>
@@ -295,7 +318,8 @@ export function ProfileSection() {
               type="text"
               value={form.displayName}
               onChange={(e) => patchForm({ displayName: e.target.value })}
-              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
+              disabled={isOwnerIdentity}
+              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
               placeholder="Your name"
             />
           </div>
@@ -305,10 +329,11 @@ export function ProfileSection() {
               type="email"
               value={form.email}
               onChange={(e) => patchForm({ email: e.target.value })}
-              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
+              disabled={isOwnerIdentity}
+              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
               placeholder="email@example.com"
             />
-            <p className="text-[10px] text-[var(--color-text-muted)]">Changing email requires reauthentication and updates Firebase Auth plus the canonical ERP user record.</p>
+            <p className="text-[10px] text-[var(--color-text-muted)]">{isOwnerIdentity ? 'The Owner login email is fixed by platform configuration and cannot be changed here.' : 'Changing email requires reauthentication and updates Firebase Auth plus the canonical ERP user record.'}</p>
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs font-semibold uppercase text-[var(--color-text-secondary)]">Phone</label>
@@ -316,7 +341,8 @@ export function ProfileSection() {
               type="tel"
               value={form.phone}
               onChange={(e) => patchForm({ phone: e.target.value })}
-              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
+              disabled={isOwnerIdentity}
+              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
               placeholder="+91 9876543210"
             />
           </div>
@@ -326,10 +352,12 @@ export function ProfileSection() {
               {signaturePreview ? (
                 <img src={signaturePreview} alt="Signature" className="h-9 rounded border border-[var(--color-border)] bg-white px-2 object-contain" />
               ) : null}
-              <label className="cursor-pointer rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)]">
-                Upload
-                <input type="file" accept="image/*" className="hidden" onChange={handleSignatureUpload} aria-label="Upload signature image" />
-              </label>
+              {isOwnerIdentity ? null : (
+                <label className="cursor-pointer rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)]">
+                  Upload
+                  <input type="file" accept="image/*" className="hidden" onChange={handleSignatureUpload} aria-label="Upload signature image" />
+                </label>
+              )}
             </div>
           </div>
         </div>
