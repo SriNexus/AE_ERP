@@ -17,6 +17,19 @@ export interface AuthenticatedUser {
   name: string;
   role: string;
   companyId: string;
+  /**
+   * RBAC Master Plan Phase 8 — the actor's authoritative Group id, read from
+   * the same trusted `users/{id}` document every other identity field comes
+   * from (never client-supplied). Empty string when the profile has no
+   * group. For a GroupAdmin this is the group whose companies they may
+   * legitimately reach over the REST API (mirrors the client's
+   * `user.groupId` and `firestore.rules`' `actorGroupId()`); for every other
+   * role it is inert — a non-GroupAdmin's API tenant scope stays their own
+   * `companyId` exactly as before. Optional on the type (backward-compatible
+   * with existing inline test fixtures); every path that builds a real
+   * `AuthenticatedUser` sets it, and every consumer reads it defensively.
+   */
+  groupId?: string;
   isSuperAdmin: boolean;
 }
 
@@ -54,6 +67,7 @@ function buildAuthenticatedUser(authUid: string, userId: string, raw: Record<str
     name: text(raw.name) || text(raw.displayName) || normalizeAuthEmail(raw.email) || 'User',
     role: text(raw.role) || 'Employee',
     companyId: text(raw.companyId),
+    groupId: text(raw.groupId),
     isSuperAdmin: raw.isSuperAdmin === true,
   };
 }
@@ -172,6 +186,7 @@ async function authenticateWithApiKey(apiKey: string, deps: AuthDependencies = d
     name: 'API User',
     role: 'Admin',
     companyId,
+    groupId: '',
     isSuperAdmin: true,
   };
 }
@@ -194,6 +209,7 @@ async function authenticateWithBearerToken(authHeader: string, deps: AuthDepende
       name: 'ERP Owner',
       role: 'Owner',
       companyId: process.env.OWNER_DEFAULT_COMPANY_ID || 'default',
+      groupId: '',
       isSuperAdmin: true,
     };
   }

@@ -150,10 +150,12 @@ describe('AUTH-D4 — GroupAdmin server-side role resolution', () => {
     await expect(canDo(user2, 'delete', 'roles')).resolves.toBe(true);
   });
 
-  it('TENANT BOUNDARY: this fix does not touch company/group scoping — a non-superAdmin GroupAdmin still cannot access another company\'s record via canAccessApiResource', () => {
-    const groupAdminUser = { companyId: 'company-a', isSuperAdmin: false };
-    expect(canAccessApiResource(groupAdminUser, 'projects', { companyId: 'company-b' })).toBe(false);
-    expect(canAccessApiResource(groupAdminUser, 'projects', { companyId: 'company-a' })).toBe(true);
+  it('TENANT BOUNDARY: an ordinary non-super identity (no GroupAdmin role/groupId) still cannot access another company\'s record via canAccessApiResource — byte-identical to the pre-Phase-8 inline check', () => {
+    const ordinaryUser = { companyId: 'company-a', isSuperAdmin: false };
+    expect(canAccessApiResource(ordinaryUser, 'projects', { companyId: 'company-b' })).toBe(false);
+    expect(canAccessApiResource(ordinaryUser, 'projects', { companyId: 'company-a' })).toBe(true);
+    // A groupId on the doc changes nothing for a non-GroupAdmin.
+    expect(canAccessApiResource(ordinaryUser, 'projects', { companyId: 'company-b', groupId: 'GROUP-A' })).toBe(false);
   });
 });
 

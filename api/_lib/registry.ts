@@ -105,13 +105,136 @@ export function isRestWriteBlocked(entityName: string, method: string | undefine
   if (!config || config.readOnly !== true) return false;
   return MUTATING_METHODS.has(String(method || '').toUpperCase());
 }
-export type ApiTenantIdentity = { companyId: string; isSuperAdmin?: boolean };
+export type ApiTenantIdentity = {
+  companyId: string;
+  isSuperAdmin?: boolean;
+  /** RBAC Master Plan Phase 8 — see AuthenticatedUser.role/groupId. */
+  role?: string;
+  groupId?: string;
+};
+
+/** Error thrown when an API create/write targets a company the actor may not reach. */
+export class ApiTenantScopeError extends Error {
+  readonly statusCode = 403;
+  readonly code = 'TENANT_SCOPE';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ApiTenantScopeError';
+  }
+}
+
+const trimmed = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+
+/**
+ * RBAC Master Plan Phase 8 — a GroupAdmin whose profile carries an
+ * authoritative groupId. Mirrors the client's `user?.role === 'GroupAdmin'`
+ * scope check and `firestore.rules`' `actorIsGroupAdmin()`. A GroupAdmin
+ * with NO real groupId (broken profile) fails this check and is treated
+ * exactly like an ordinary single-company user — never widened, fail closed.
+ * SuperAdmin/Owner are handled by their own unconditional bypass everywhere
+ * and are deliberately excluded here so this predicate stays "group-bounded
+ * authority", never "platform authority".
+ */
+export function isApiGroupAdmin(user: ApiTenantIdentity): boolean {
+  return user.isSuperAdmin !== true
+    && trimmed(user.role).toLowerCase() === 'groupadmin'
+    && trimmed(user.groupId).length > 0;
+}
 
 export function resolveApiCompanyScope(user: ApiTenantIdentity, requestedCompanyId?: unknown): string {
   if (user.isSuperAdmin && typeof requestedCompanyId === 'string' && requestedCompanyId.trim()) return requestedCompanyId.trim();
   return String(user.companyId || '').trim();
 }
 
+/**
+ * Central API resource-access decision for a single already-fetched document.
+ * Used by api/[entity]/[id].ts (GET / UPDATE / DELETE) and elsewhere instead
+ * of an inline `data.companyId !== user.companyId` check.
+ *
+ * - global collections (roles): always readable (Company scoping does not apply)
+ * - SuperAdmin / Owner: unconditional
+ * - anyone: their own company's documents
+ * - GroupAdmin (with a real groupId): any document whose `groupId` equals
+ *   their authoritative group — mirrors `firestore.rules`' `groupAdminCanRead`
+ *   (`data.groupId == actorGroupId()`). A document with NO groupId, or a
+ *   GroupAdmin with no groupId, falls back to the company-only rule above.
+ *
+ * Non-GroupAdmin behaviour is byte-identical to the previous inline check.
+ */
 export function canAccessApiResource(user: ApiTenantIdentity, collection: string, data?: Record<string, unknown>): boolean {
-  return isGlobalCollection(collection) || user.isSuperAdmin === true || data?.companyId === user.companyId;
+  if (isGlobalCollection(collection)) return true;
+  if (user.isSuperAdmin === true) return true;
+  if (data?.companyId === user.companyId) return true;
+  if (isApiGroupAdmin(user)) {
+    const docGroupId = trimmed(data?.groupId);
+    if (docGroupId.length > 0 && docGroupId === trimmed(user.groupId)) return true;
+  }
+  return false;
+}
+
+/**
+ * Reads a company's own authoritative `groupId` (the value the client's
+ * `resolveWriteGroupId()` stamps). '' when the company doc is missing or
+ * carries no groupId — the caller then decides whether that is fatal.
+ */
+export async function readCompanyGroupId(
+  db: { collection(name: string): { doc(id: string): { get(): Promise<{ exists: boolean; data(): Record<string, unknown> | undefined }> } } },
+  companyId: string,
+): Promise<string> {
+  const id = trimmed(companyId);
+  if (!id) return '';
+  try {
+    const snap = await db.collection('companies').doc(id).get();
+    return snap.exists ? trimmed(snap.data()?.groupId) : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Central API create/write tenant resolution — returns the `companyId` AND
+ * the authoritative `groupId` a new document must be stamped with.
+ *
+ * - SuperAdmin / Owner: may target any company (existing behaviour); groupId
+ *   is resolved from that company's own doc.
+ * - GroupAdmin (with a real groupId): may target any company IN THEIR GROUP.
+ *   An explicit request for a company outside the group is rejected
+ *   (`ApiTenantScopeError`), not silently redirected. With no explicit
+ *   request, their home company is used.
+ * - every other role: their home company, exactly as before — an explicit
+ *   `requestedCompanyId` is ignored (unchanged), and the ONLY new behaviour
+ *   is that the resolved doc now also carries the company's `groupId`
+ *   (additive; the client write path already stamps this — closes the API's
+ *   missing-groupId gap so GroupAdmin group-scoped reads can see the record).
+ */
+export async function resolveApiCreateTenant(
+  db: Parameters<typeof readCompanyGroupId>[0],
+  user: ApiTenantIdentity,
+  requestedCompanyId?: unknown,
+): Promise<{ companyId: string; groupId: string }> {
+  const req = trimmed(requestedCompanyId);
+  const home = trimmed(user.companyId);
+
+  if (user.isSuperAdmin === true) {
+    const companyId = req || home;
+    return { companyId, groupId: await readCompanyGroupId(db, companyId) };
+  }
+
+  if (isApiGroupAdmin(user)) {
+    const actorGroupId = trimmed(user.groupId);
+    const target = req || home;
+    const targetGroupId = await readCompanyGroupId(db, target);
+    if (targetGroupId && targetGroupId === actorGroupId) {
+      return { companyId: target, groupId: actorGroupId };
+    }
+    if (req && req !== home) {
+      throw new ApiTenantScopeError('The requested company is not in your group.');
+    }
+    // Home company whose own doc has no resolvable/matching groupId — allow,
+    // stamping the actor's authoritative group so the record stays reachable.
+    return { companyId: home, groupId: targetGroupId || actorGroupId };
+  }
+
+  // Every other role: home company only; requestedCompanyId ignored (unchanged).
+  return { companyId: home, groupId: await readCompanyGroupId(db, home) };
 }

@@ -11,7 +11,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getAdminDb } from '../_lib/firebase';
 import { verifyAuthToken } from '../_lib/auth';
 import { requirePermission } from '../_lib/permissions';
-import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked } from '../_lib/registry';
+import { ENTITY_REGISTRY, isRestWriteBlocked, canAccessApiResource } from '../_lib/registry';
 import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
 import { isHiddenOwnerRecord } from '../../src/lib/ownerAccess';
 import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, sendMethodNotAllowed, buildWritableUpdatePayload } from '../_lib/response';
@@ -105,7 +105,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
 // ── Handlers ─────────────────────────────────────────────────
 
-async function handleGetById(
+export async function handleGetById(
   req: VercelRequest,
   res: VercelResponse,
   config: typeof ENTITY_REGISTRY[string],
@@ -125,7 +125,12 @@ async function handleGetById(
   if (config.collection === 'users' && isHiddenOwnerRecord(data)) {
     return sendNotFound(res, 'Resource not found.');
   }
-  if (!isGlobalCollection(config.collection) && !user.isSuperAdmin && data?.companyId !== user.companyId) {
+  // RBAC Master Plan Phase 8 — central tenant check. For a non-GroupAdmin
+  // this is byte-identical to the previous `!isSuperAdmin && data.companyId
+  // !== user.companyId` inline check; a GroupAdmin additionally reaches any
+  // document whose `groupId` equals their authoritative group (mirrors
+  // firestore.rules' groupAdminCanRead).
+  if (!canAccessApiResource(user, config.collection, data)) {
     return sendNotFound(res, 'Resource not found.');
   }
   if (data?.isDeleted) {
@@ -163,7 +168,8 @@ export async function handleUpdate(
   if (config.collection === 'users' && isHiddenOwnerRecord(existingSnap.data())) {
     return sendNotFound(res, 'Resource not found.');
   }
-  if (!isGlobalCollection(config.collection) && !user.isSuperAdmin && existingSnap.data()?.companyId !== user.companyId) {
+  // RBAC Master Plan Phase 8 — central tenant check (see handleGetById).
+  if (!canAccessApiResource(user, config.collection, existingSnap.data())) {
     return sendNotFound(res, 'Resource not found.');
   }
   if (existingSnap.data()?.isDeleted) {
@@ -217,7 +223,8 @@ async function handleDelete(
   if (config.collection === 'users' && isHiddenOwnerRecord(existingSnap.data())) {
     return sendNotFound(res, 'Resource not found.');
   }
-  if (!isGlobalCollection(config.collection) && !user.isSuperAdmin && existingSnap.data()?.companyId !== user.companyId) {
+  // RBAC Master Plan Phase 8 — central tenant check (see handleGetById).
+  if (!canAccessApiResource(user, config.collection, existingSnap.data())) {
     return sendNotFound(res, 'Resource not found.');
   }
   if (existingSnap.data()?.isDeleted) {

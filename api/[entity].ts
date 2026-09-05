@@ -11,7 +11,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getAdminDb } from './_lib/firebase';
 import { verifyAuthToken } from './_lib/auth';
 import { requirePermission } from './_lib/permissions';
-import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked } from './_lib/registry';
+import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked, isApiGroupAdmin, resolveApiCreateTenant, ApiTenantScopeError } from './_lib/registry';
 import { checkRateLimit, getRateLimitKey } from './_lib/rateLimit';
 import { filterManageableUsers, isOwnerEmail } from '../src/lib/ownerAccess';
 import { createProductWithSkuLockAdmin, SkuConflictError } from './_lib/productSkuLock';
@@ -113,11 +113,19 @@ async function handleList(req: VercelRequest, res: VercelResponse, config: typeo
   const { page, perPage } = parsePagination(req.query as any);
   const { search, status, sortBy, sortOrder } = parseSearch(req.query as any);
 
-  // Company isolation: only super-admin can filter by arbitrary companyId
+  // Company isolation: only super-admin can filter by arbitrary companyId.
   const isGlobal = isGlobalCollection(config.collection);
   const companyId = user.isSuperAdmin && req.query.companyId
     ? String(req.query.companyId)
     : (user.companyId || '');
+  // RBAC Master Plan Phase 8 — a GroupAdmin's API tenant scope is its whole
+  // group (mirrors the client's companyScopedQuery + firestore.rules'
+  // groupAdminCanRead: data.groupId == actorGroupId()), NOT just the home
+  // company. An optional ?companyId= narrows within the group. Non-GroupAdmin
+  // actors keep the exact companyId-only scoping above.
+  const groupScoped = isApiGroupAdmin(user);
+  const groupId = groupScoped ? String(user.groupId || '') : '';
+  const subCompanyId = groupScoped && req.query.companyId ? String(req.query.companyId) : '';
 
   // Use perPage+1 heuristic to determine if there are more results
   // instead of an expensive count query
@@ -130,9 +138,14 @@ async function handleList(req: VercelRequest, res: VercelResponse, config: typeo
     // Always filter out soft-deleted records
     query = query.where('isDeleted', '==', false);
 
-    // Apply company filter (skip global collections like roles, companies, users)
-    if (companyId && !isGlobal) {
-      query = query.where('companyId', '==', companyId);
+    // Apply tenant filter (skip global collections like roles).
+    if (!isGlobal) {
+      if (groupScoped && groupId) {
+        query = query.where('groupId', '==', groupId);
+        if (subCompanyId) query = query.where('companyId', '==', subCompanyId);
+      } else if (companyId) {
+        query = query.where('companyId', '==', companyId);
+      }
     }
 
     // Apply status filter if provided
@@ -193,8 +206,12 @@ async function handleList(req: VercelRequest, res: VercelResponse, config: typeo
           .filter((doc: any) => !doc.isDeleted);
         if (config.collection === 'users') allDocs = filterManageableUsers(allDocs);
 
-        if (companyId && !isGlobal) {
-          allDocs = allDocs.filter((doc: any) => doc.companyId === companyId);
+        if (!isGlobal) {
+          if (groupScoped && groupId) {
+            allDocs = allDocs.filter((doc: any) => doc.groupId === groupId && (!subCompanyId || doc.companyId === subCompanyId));
+          } else if (companyId) {
+            allDocs = allDocs.filter((doc: any) => doc.companyId === companyId);
+          }
         }
         if (status) {
           allDocs = allDocs.filter((doc: any) => doc.status === status);
@@ -240,9 +257,23 @@ async function handleCreate(req: VercelRequest, res: VercelResponse, config: typ
     return sendBadRequest(res, 'Request body must be a JSON object.');
   }
 
-  const companyId = user.isSuperAdmin && typeof body.companyId === 'string'
-    ? body.companyId.trim()
-    : user.companyId;
+  // RBAC Master Plan Phase 8 — one centralized tenant resolution: SuperAdmin
+  // may target any company; a GroupAdmin may target any company IN THEIR
+  // GROUP (an out-of-group request is a 403, never a silent redirect); every
+  // other role gets their home company exactly as before. Also returns the
+  // authoritative groupId the new doc must carry (the client write path
+  // already stamps this; the generic API path did not — closing that gap so
+  // a GroupAdmin's group-scoped reads can see records created here).
+  let companyId: string;
+  let resolvedGroupId: string;
+  try {
+    ({ companyId, groupId: resolvedGroupId } = await resolveApiCreateTenant(db, user, body.companyId));
+  } catch (error) {
+    if (error instanceof ApiTenantScopeError) {
+      return res.status(403).json({ success: false, error: { code: error.code, message: error.message } });
+    }
+    throw error;
+  }
   if (!companyId) return sendBadRequest(res, 'Authenticated identity has no company scope.');
 
   // Phase 15: this used to ALSO enforce a hard per-entity cap (max 5
@@ -259,6 +290,13 @@ async function handleCreate(req: VercelRequest, res: VercelResponse, config: typ
   }
 
   const docData = sanitizeCreateBody(body, user.uid, companyId);
+  // sanitizeCreateBody() strips the reserved `groupId` field (mass-assignment
+  // protection); re-stamp the authoritative, server-resolved value — the
+  // exact parallel of the client's resolveWriteGroupId(). Company-scoped
+  // collections only; global collections (roles) never carry a groupId.
+  if (resolvedGroupId && !isGlobalCollection(config.collection)) {
+    docData.groupId = resolvedGroupId;
+  }
 
   try {
     // INVENTORY-09 (§A): the `products` write path additionally claims the

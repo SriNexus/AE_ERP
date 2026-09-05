@@ -31,7 +31,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeEach } from 'vitest';
 import { resolveSessionCompanyId } from '../tenantRouting';
-import { companyScopedQuery } from '../firestore';
+import { companyScopedQuery, applyAccessFilters, resolveWriteCompanyId, resolveWriteGroupId } from '../firestore';
 import { COLLECTIONS } from '../firebase';
 import { useAppStore } from '../../store/useAppStore';
 
@@ -225,5 +225,84 @@ describe('Phase 8 — companyScopedQuery: NON-GroupAdmin actors are byte-for-byt
     } as never);
     expect(companyScopedQuery(COLLECTIONS.ROLES)).toHaveLength(0);
     expect(companyScopedQuery(COLLECTIONS.COMPANIES)).toHaveLength(0);
+  });
+});
+
+/**
+ * Product CRUD — deterministic assembled-path proof.
+ *
+ * A literal browser test (React render -> click "Add Product" -> submit ->
+ * poll the list) is impractical in this repo's test architecture (no RTL +
+ * emulator + app-`db`-to-emulator wiring). This is the closest deterministic
+ * assembly: it drives the REAL client tenant helpers a GroupAdmin's Product
+ * flow uses and proves the write shape and the read/list shape are MUTUALLY
+ * CONSISTENT — i.e. a product created by useSaveProduct WOULD be returned by
+ * getAll(PRODUCTS) and WOULD survive applyAccessFilters().
+ *
+ * COVERED here: resolveWriteCompanyId / resolveWriteGroupId (what
+ * useSaveProduct -> createProductWithSkuLock stamp), companyScopedQuery
+ * (what getAll queries), applyAccessFilters (the in-memory narrowing).
+ * COVERED elsewhere (emulator, groupAdminFullGroupAccess / multiTenant
+ * Security / customersOwnershipScope — 80/80): firestore.rules ACCEPT a
+ * {companyId, groupId} create and a where('groupId','==') list for a
+ * GroupAdmin. NOT covered by any automated test: a live DOM render.
+ */
+describe('Phase 8 — GroupAdmin Product CRUD: write shape ⟷ list shape are mutually consistent (assembled-path proof)', () => {
+  const setGA = (activeCompanyId: string) => useAppStore.setState({
+    user: { id: 'ga-p', name: 'GA', email: 'ga@test.erp', role: 'GroupAdmin', companyId: HOME, groupId: GROUP },
+    activeCompanyId, isAuthenticated: true,
+    company: { ...(useAppStore.getState().company), id: HOME, groupId: GROUP },
+    globalCompany: { ...(useAppStore.getState().company), id: HOME, groupId: GROUP } as never,
+    companyGroupIds: { [HOME]: GROUP, [SIBLING]: GROUP },
+  } as never);
+
+  for (const [label, active, expectVisibleCompany] of [
+    ['focused on the HOME company', HOME, HOME],
+    ['focused on an in-group SIBLING', SIBLING, SIBLING],
+    ["in the 'group' aggregate view", 'group', HOME],
+  ] as const) {
+    it(`${label}: the created product's tenant fields satisfy the list query AND survive applyAccessFilters`, () => {
+      setGA(active);
+
+      // 1. What useSaveProduct -> createProductWithSkuLock would stamp:
+      const writeCompanyId = resolveWriteCompanyId();
+      const writeGroupId = resolveWriteGroupId(writeCompanyId);
+      expect(writeCompanyId).not.toBe('group');           // never the sentinel (increment 1 fix)
+      expect(writeCompanyId).not.toBe('all');
+      expect(writeGroupId).toBe(GROUP);                    // authoritative group, always resolvable here
+      const createdProduct: any = { id: 'PRD-new', companyId: writeCompanyId, groupId: writeGroupId, name: 'New Product', isDeleted: false };
+
+      // 2. What getAll(PRODUCTS) queries:
+      const constraints = companyScopedQuery(COLLECTIONS.PRODUCTS);
+      const c = constraintJson(constraints[0]);
+      expect(c).toContain('groupId');                      // GroupAdmin group-scoped (increment 2 fix)
+      expect(c).toContain(GROUP);
+      expect(c).not.toContain('companyId');
+
+      // 3. The created product would be RETURNED by that query (its groupId matches):
+      expect(createdProduct.groupId).toBe(GROUP);
+
+      // 4. ...and would SURVIVE the in-memory narrowing:
+      const visible = applyAccessFilters(COLLECTIONS.PRODUCTS, [createdProduct] as never, null);
+      expect(visible.map((d: any) => d.id)).toEqual(['PRD-new']);
+      if (active !== 'group') expect(createdProduct.companyId).toBe(expectVisibleCompany);
+    });
+  }
+
+  it('a product in ANOTHER group is NOT returned by the query and IS filtered out (isolation preserved)', () => {
+    setGA(HOME);
+    const foreign: any = { id: 'PRD-foreign', companyId: 'CO-OTHER', groupId: 'GRP-OTHER', name: 'Foreign', isDeleted: false };
+    // The where('groupId','==', GROUP) query would never return it; and even if
+    // it somehow did, applyAccessFilters drops it.
+    const visible = applyAccessFilters(COLLECTIONS.PRODUCTS, [foreign] as never, null);
+    expect(visible).toHaveLength(0);
+  });
+
+  it('EDIT / DELETE reach the same record: canAccessApiResource-equivalent client filter keeps an in-group product editable, an out-of-group one not', () => {
+    setGA(SIBLING);
+    const inGroup: any = { id: 'PRD-1', companyId: SIBLING, groupId: GROUP, isDeleted: false };
+    const outGroup: any = { id: 'PRD-2', companyId: 'CO-OTHER', groupId: 'GRP-OTHER', isDeleted: false };
+    // Focused on the sibling: only the sibling's in-group product is shown for edit/delete.
+    expect(applyAccessFilters(COLLECTIONS.PRODUCTS, [inGroup, outGroup] as never, null).map((d: any) => d.id)).toEqual(['PRD-1']);
   });
 });
