@@ -117,12 +117,13 @@ describe('buildCustomerDraftDelta — only real, changed, Customer-owned fields'
     expect(delta).toEqual({ name: 'New Name', phone: '8888888888' });
   });
 
-  it('CUSTOMER_DRAFT_FIELDS matches the real Edit Customer field set, now including `type` (Header/action cleanup mission: B2B/B2C type is editable through this same deferred-commit editor, the legacy structural-edit form is retired) and altName/altMobile (Customer + Leads Workspace Completion Pass mission: Alternate Name/Number, the one B2C-originated field pair given a real edit path)', () => {
+  it('CUSTOMER_DRAFT_FIELDS matches the real Edit Customer field set, now including `type` (Header/action cleanup mission: B2B/B2C type is editable through this same deferred-commit editor, the legacy structural-edit form is retired), altName/altMobile (Customer + Leads Workspace Completion Pass mission: Alternate Name/Number, the one B2C-originated field pair given a real edit path), and consumerNumber (optional B2C-only Consumer Number field)', () => {
     expect(CUSTOMER_DRAFT_FIELDS).toEqual([
       'name', 'phone', 'altName', 'altMobile', 'email', 'type', 'company', 'gst', 'pan',
       'address', 'city', 'state', 'pincode',
       'creditLimit', 'paymentTerms', 'notes',
       'assignedToId', 'assignedToName',
+      'consumerNumber',
     ]);
     expect(CUSTOMER_DRAFT_FIELDS).not.toContain('roofType');
     expect(CUSTOMER_DRAFT_FIELDS).not.toContain('aadhaar');

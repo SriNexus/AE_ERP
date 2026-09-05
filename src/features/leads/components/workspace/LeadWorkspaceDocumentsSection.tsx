@@ -212,7 +212,6 @@ export default function LeadWorkspaceDocumentsSection({ lead, isEditing, activeC
       isEditing={isEditing}
       storagePath={storagePath}
       onChange={handleChange}
-      maxDocuments={2}
       currentUser={{ id: currentUser.id, name: currentUser.name }}
       captureMode="both"
       onCaptureLocation={handleCaptureLocation}

@@ -119,6 +119,9 @@ export default function CustomerWorkspaceEditor({ customer, draft, onFieldChange
         )}
         {isB2B && <Input label="Company" disabled={!canEdit} value={val('company')} onChange={set('company')} />}
         {isB2B && <Input label="GST" disabled={!canEdit} value={val('gst')} onChange={(e) => onFieldChange('gst', e.target.value.toUpperCase())} />}
+        {/* Consumer Number — B2C-only, optional (the electricity connection
+            consumer number; never required for B2B or B2C). */}
+        {!isB2B && <Input label="Consumer Number" disabled={!canEdit} value={val('consumerNumber')} onChange={set('consumerNumber')} placeholder="Optional" />}
         <Input label="PAN" disabled={!canEdit} value={val('pan')} onChange={(e) => onFieldChange('pan', e.target.value.toUpperCase())} />
         <Textarea label="Address" disabled={!canEdit} value={val('address')} onChange={set('address')} />
         <div className="grid grid-cols-2 gap-2">
