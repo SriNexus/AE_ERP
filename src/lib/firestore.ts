@@ -295,25 +295,56 @@ export function resolveReadCompanyId(): string {
 export function companyScopedQuery(colName: string): QueryConstraint[] {
   const { activeCompanyId, user } = useAppStore.getState();
 
-  // Phase 2 (Master Plan §9.4): Group-view mode — the active context is the
-  // GroupAdmin's authoritative Group. The groupId comes from the booted
-  // identity (user.groupId — the GroupAdmin's group, §3.2); the rules'
-  // groupAdminCanRead()/sameGroup() branches make `where('groupId','==',...)`
-  // provable for a Group Admin (including on `companies`, whose docs carry
-  // groupId per §3.2), and groupId itself is write-helper-stamped, never
-  // client-controlled. Only a GroupAdmin identity may resolve this branch
-  // (the boot flow never sets 'group' for other roles). Placed BEFORE the
-  // companies/roles special-casing so Group-view lists never fall through to
-  // a companyId constraint.
-  if (activeCompanyId === 'group') {
-    const groupId = user?.groupId;
-    if (!groupId) {
+  // RBAC Master Plan Phase 8 — GroupAdmin group-scoped read shape.
+  //
+  // A GroupAdmin's rules-layer access is groupId-based for EVERY
+  // tenant-scoped collection: firestore.rules' groupAdminCanRead() (and the
+  // Phase-7 leads/customers blocks' own groupAdminCanRead() OR-branch) all
+  // resolve via `data.groupId == actorGroupId()`. So every list query a
+  // GroupAdmin issues MUST carry the groupId equality to be provable against
+  // those rules — whether the GroupAdmin is in the 'group' aggregate view OR
+  // focused on a single company inside their group. applyAccessFilters()
+  // then narrows the DISPLAYED rows to resolveReadCompanyId() (the whole
+  // group in 'group' view, or the one focused company). This ONE branch
+  // replaces the former activeCompanyId==='group'-only branch AND the former
+  // attendance-only GroupAdmin special case — there are no per-collection
+  // GroupAdmin query exceptions. Non-GroupAdmin actors never enter it (the
+  // boot flow never sets 'group' for them, and the role check excludes
+  // them), so their query shape is byte-identical to before this change.
+  //
+  // `roles` is the SOLE exception: role documents never carry a groupId
+  // (§3.2 excludes them from the groupId denormalization); the roles rule's
+  // groupAdminCanReadRole() keys on companies/{data.companyId}.groupId
+  // instead, which IS statically provable from a where('companyId','==',X)
+  // list query. `roles` therefore falls through to the companyId branch
+  // below, scoped to the FOCUSED company — which is exactly what makes
+  // per-company role/permission management work for a GroupAdmin.
+  // (`roles` is still groupId-scoped in the explicit 'group' aggregate view
+  // — where it deliberately resolves to zero rows and roles_global's own
+  // queryFn does the real home-company fetch — but for a GroupAdmin FOCUSED
+  // on a specific company it drops to the companyId branch below.)
+  const actorIsScopedGroupAdmin = user?.role === 'GroupAdmin' && !user?.isOwner && !user?.isSuperAdmin;
+  const inGroupAggregateView = activeCompanyId === 'group';
+  if ((inGroupAggregateView || actorIsScopedGroupAdmin) && (inGroupAggregateView || colName !== COLLECTIONS.ROLES)) {
+    const focusedCompanyId = isRealCompanyId(activeCompanyId) ? activeCompanyId : user?.companyId;
+    const resolvedGroupId = isRealGroupId(user?.groupId) && user?.groupId !== 'group'
+      ? user!.groupId!
+      : resolveWriteGroupId(focusedCompanyId);
+    if (isRealGroupId(resolvedGroupId) && resolvedGroupId !== 'group') {
+      return [where('groupId', '==', resolvedGroupId)];
+    }
+    // The explicit 'group' aggregate view with NO resolvable group is a hard
+    // error — the user asked for group scope and the identity cannot supply
+    // it. A GroupAdmin who merely has a broken/missing groupId while focused
+    // on a real company falls through to the ordinary company-scoped path
+    // below (their home company) — fail closed to LESS access, never an
+    // unexplained error screen.
+    if (activeCompanyId === 'group') {
       throw new Error(
         'Group context is not resolved: the Group Admin identity has no authoritative groupId. ' +
         'Contact an administrator to repair the user profile.'
       );
     }
-    return [where('groupId', '==', groupId)];
   }
 
   // F-01 (Phase 0): `companies` was previously returned with NO constraint by
@@ -346,27 +377,10 @@ export function companyScopedQuery(colName: string): QueryConstraint[] {
     return [where('companyId', '==', companyId)];
   }
 
-  // `attendance` GroupAdmin read fix: the rules' groupAdminCanRead() branch
-  // depends on resource.data.groupId (not companyId), so a companyId-only
-  // list query is unprovable for a GroupAdmin actor and Firestore denies the
-  // whole list outright — live-verified 2026-08-21 (Group Admin's Attendance
-  // page showing 0 records, and the manual Check-In/Check-Out duplicate-check
-  // query throwing permission-denied for any employee other than the actor's
-  // own self-service record). isAdmin()/isOwnerIdentity()/isSuperAdmin() are
-  // document-independent so companyId-scoping already works for them; only
-  // GroupAdmin needs the groupId constraint instead, mirroring the identical,
-  // already-working `companies` Group-view pattern above (§9.3/§9.4).
-  if (colName === COLLECTIONS.ATTENDANCE && user?.role === 'GroupAdmin' && !user?.isOwner && !user?.isSuperAdmin) {
-    const companyId = isRealCompanyId(activeCompanyId) ? activeCompanyId : user?.companyId;
-    const groupId = resolveWriteGroupId(companyId);
-    if (!isRealGroupId(groupId)) {
-      throw new Error(
-        'Group context is not resolved: the Group Admin identity has no authoritative groupId. ' +
-        'Contact an administrator to repair the user profile.'
-      );
-    }
-    return [where('groupId', '==', groupId)];
-  }
+  // (The former `attendance`-only GroupAdmin groupId branch that lived here
+  // is now subsumed by the general GroupAdmin group-scoped branch above —
+  // every tenant-scoped collection, not just attendance, gets the groupId
+  // equality for a GroupAdmin.)
 
   if (!user) {
     throw new Error(

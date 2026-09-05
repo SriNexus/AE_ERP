@@ -15,13 +15,15 @@ const NON_COMPANY_SENTINELS = new Set(['', 'all', 'default', 'group']);
 
 /**
  * RBAC Master Plan Phase 8 — GroupAdmin is a group-wide scope-extension of
- * Admin (§5.2/§10), NOT an ordinary single-company user. Its two valid
- * tenant contexts are:
- *   - its home company (the company on its own profile), and
- *   - the `'group'` view sentinel (the query layer — companyScopedQuery /
- *     applyAccessFilters / resolveWriteCompanyId — already scopes every
- *     collection correctly for this; firestore.rules' actorGroupId() is the
- *     real, independent boundary, §11 Bucket A).
+ * Admin (§5.2/§10), NOT an ordinary single-company user. Its valid tenant
+ * contexts are the `'group'` aggregate view sentinel OR any real company id
+ * inside its own group (the home company or an in-group sibling). The
+ * client query layer (companyScopedQuery / applyAccessFilters /
+ * resolveWriteCompanyId) issues a groupId-scoped read for a GroupAdmin
+ * regardless of which specific company is focused, and firestore.rules'
+ * actorGroupId() is the real, independent boundary (§11 Bucket A) — a
+ * selection outside the group simply resolves to empty screens, and the
+ * CompanySwitcher only ever offers in-group companies.
  *
  * Before this branch existed, `resolveSessionCompanyId` had only the
  * owner/super-admin ("free selection") and everyone-else ("pinned to home
@@ -61,12 +63,17 @@ export function resolveSessionCompanyId(
     // Neutral pre-boot placeholder: let the companies effect resolve it
     // (to the home company for a GroupAdmin) — exactly as it already does.
     if (!requestedCompanyId || requestedCompanyId === 'default') return requestedCompanyId;
-    // The two valid, fully query-supported GroupAdmin contexts.
-    if (requestedCompanyId === 'group' || requestedCompanyId === canonicalCompanyId) return requestedCompanyId;
-    // Any other real selection (a sibling company in the group) resolves to
-    // the group view — never snapped back to home, never widened to the
-    // platform `'all'` sentinel.
-    return 'group';
+    // The platform-wide sentinel is owner/super-admin only — a GroupAdmin's
+    // equivalent is the 'group' view.
+    if (requestedCompanyId === 'all') return 'group';
+    // The 'group' aggregate view and ANY real company id (the home company
+    // OR an in-group sibling) are all valid, fully query-supported contexts:
+    // companyScopedQuery() now issues a groupId-scoped read for a GroupAdmin
+    // regardless of which specific company is focused, and firestore.rules'
+    // actorGroupId() is the real boundary (a selection outside the group
+    // simply resolves to empty screens — the CompanySwitcher only ever
+    // offers in-group companies). Never snapped back to home.
+    return requestedCompanyId;
   }
 
   return canonicalCompanyId;
