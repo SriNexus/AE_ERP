@@ -2,34 +2,55 @@
  * phase8GroupAdminTenantContext.test.ts — RBAC Master Implementation Plan,
  * Phase 8 (SuperAdmin / GroupAdmin Hardening).
  *
- * ROOT CAUSE this pins: `resolveSessionCompanyId()` (src/lib/tenantRouting.ts)
- * had only two branches — owner/super-admin (free company selection) and
- * everyone-else (pinned to the profile's home company). A GroupAdmin fell
- * into "everyone else", so useGlobalBoot's tenant-routing effect snapped
- * any "Group view" / sibling-company selection straight back to the
- * GroupAdmin's home company on the next render — leaving every group-context
- * client mechanism (companyScopedQuery's 'group' branch, the roles_global
- * 'group' fetch, applyAccessFilters' 'group' branch, resolveReadCompanyId/
- * resolveWriteCompanyId's 'group' handling) as dead code, and every
- * client-side authorization plane home-company-only while firestore.rules
- * grant group-wide access. That mismatch is exactly the recurring
- * "UI/client denies what the backend allows" + "fix one page, break
- * another" pattern.
+ * ROOT CAUSE this pins: the client authorization planes each independently
+ * confined a GroupAdmin to their home company while firestore.rules grant
+ * group-wide access — the recurring "UI/client denies what the backend
+ * allows" + "fix one page, break another" pattern. Two distinct defects:
  *
- * FIX: a bounded GroupAdmin branch — a GroupAdmin WITH an authoritative
- * groupId retains the 'group' view or its own home company; any other
- * selection resolves to 'group' (never snapped to home, never widened to
- * the platform 'all' sentinel). firestore.rules' actorGroupId() remains the
- * real, independent boundary — unchanged by this fix.
+ *  1. `resolveSessionCompanyId()` (src/lib/tenantRouting.ts) had only two
+ *     branches — owner/super-admin (free selection) and everyone-else
+ *     (pinned to home) — so useGlobalBoot's tenant-routing effect snapped a
+ *     GroupAdmin's "Group view" / sibling selection straight back to home.
  *
- * This file also proves every NON-GroupAdmin role's behavior is
- * byte-identical (the fix must not touch Admin/Sales/Manager/Warehouse/
- * Accounts/Partner/Owner/SuperAdmin).
+ *  2. `companyScopedQuery()` (src/lib/firestore.ts), after the first Phase 8
+ *     pass, issued a `where('groupId','==')` read for a GroupAdmin in EVERY
+ *     context including their own home company. That made the core session
+ *     depend on the identity's groupId AND on every legacy document carrying
+ *     a groupId — and a fresh session, landing on an arbitrary in-group
+ *     SIBLING (companies[0] of a now-groupId-scoped list), wrote new records
+ *     under that sibling's companyId with no resolvable groupId, which the
+ *     rules' groupAdminCanCreate / canCreateCompanyScoped then rejected.
+ *     THIS is why "GroupAdmin cannot create a Product" survived the first
+ *     passes.
+ *
+ * FIX (this increment): the split is by ADMINISTRATIVE SCOPE, not business
+ * permission —
+ *   - a GroupAdmin focused on their HOME company reads/writes with a plain
+ *     `where('companyId','==', home)` — pre-Phase-8 behaviour, always
+ *     provable via canReadCompanyScoped / the Phase-7 catch-all, ZERO
+ *     dependency on the identity groupId or on document groupId. Their core
+ *     session (list + create + edit on their own company, legacy records
+ *     included) works unconditionally.
+ *   - a GroupAdmin focused on an in-group SIBLING, or the 'group' aggregate
+ *     view, reads with `where('groupId','==', actorGroupId)` (the only shape
+ *     firestore.rules' groupAdminCanRead can prove there).
+ *   - `companies` is ALWAYS group-scoped for a GroupAdmin (so the switcher
+ *     lists the whole group); `roles` is NEVER group-scoped (companyId of
+ *     the focused company — groupAdminCanReadRole keys on
+ *     companies/{id}.groupId).
+ *   - a fresh ('' / 'default') session lands on the HOME company, never an
+ *     arbitrary sibling.
+ *   - a GroupAdmin whose group cannot be resolved degrades to home-company
+ *     companyId scope (fail closed to LESS access) — never a hard error
+ *     except in the explicit 'group' view.
+ *
+ * firestore.rules' actorGroupId() remains the real, independent boundary —
+ * unchanged by this fix. This file also proves every NON-GroupAdmin role's
+ * behaviour is byte-identical.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { beforeEach } from 'vitest';
 import { resolveSessionCompanyId } from '../tenantRouting';
 import { companyScopedQuery, applyAccessFilters, resolveWriteCompanyId, resolveWriteGroupId } from '../firestore';
 import { COLLECTIONS } from '../firebase';
@@ -48,7 +69,7 @@ function constraintJson(c: unknown) {
 }
 
 describe('Phase 8 — resolveSessionCompanyId: GroupAdmin group-context is no longer snapped back to home', () => {
-  it("'group' view selection PERSISTS (the core fix — previously snapped to the home company)", () => {
+  it("'group' view selection PERSISTS (previously snapped to the home company)", () => {
     expect(resolveSessionCompanyId(groupAdmin(), 'group')).toBe('group');
   });
 
@@ -56,7 +77,7 @@ describe('Phase 8 — resolveSessionCompanyId: GroupAdmin group-context is no lo
     expect(resolveSessionCompanyId(groupAdmin(), HOME)).toBe(HOME);
   });
 
-  it('an in-group sibling-company selection PERSISTS as a real company id (companyScopedQuery now issues a groupId-scoped read regardless of the focused company; the rules are the real boundary) — never snapped back to home', () => {
+  it('an in-group sibling-company selection PERSISTS as a real company id — never snapped back to home', () => {
     expect(resolveSessionCompanyId(groupAdmin(), SIBLING)).toBe(SIBLING);
   });
 
@@ -64,20 +85,15 @@ describe('Phase 8 — resolveSessionCompanyId: GroupAdmin group-context is no lo
     expect(resolveSessionCompanyId(groupAdmin(), 'all')).toBe('group');
   });
 
-  it('the neutral "default"/empty pre-boot placeholder passes through (the companies effect resolves it to home)', () => {
-    expect(resolveSessionCompanyId(groupAdmin(), 'default')).toBe('default');
-    expect(resolveSessionCompanyId(groupAdmin(), '')).toBe('');
+  it('the neutral "default"/empty pre-boot placeholder resolves to the HOME company (not an arbitrary sibling)', () => {
+    expect(resolveSessionCompanyId(groupAdmin(), 'default')).toBe(HOME);
+    expect(resolveSessionCompanyId(groupAdmin(), '')).toBe(HOME);
   });
 
   it('a GroupAdmin with NO authoritative groupId is treated exactly like an ordinary single-company user (fail closed — pinned to home)', () => {
     expect(resolveSessionCompanyId(groupAdmin({ groupId: '' }), 'group')).toBe(HOME);
     expect(resolveSessionCompanyId(groupAdmin({ groupId: undefined }), SIBLING)).toBe(HOME);
-    // A sentinel value in the groupId field is not a real group.
     expect(resolveSessionCompanyId(groupAdmin({ groupId: 'group' }), 'group')).toBe(HOME);
-  });
-
-  it('a GroupAdmin with an authoritative groupId keeps a focused company selection (the home company)', () => {
-    expect(resolveSessionCompanyId(groupAdmin(), HOME)).toBe(HOME);
   });
 
   it('role matching is case-insensitive and trims (mirrors resolveCompatibleRole / firestore.ts)', () => {
@@ -94,6 +110,7 @@ describe('Phase 8 — resolveSessionCompanyId: NON-GroupAdmin roles are byte-for
       expect(resolveSessionCompanyId(identity, SIBLING)).toBe(HOME);
       expect(resolveSessionCompanyId(identity, 'all')).toBe(HOME);
       expect(resolveSessionCompanyId(identity, HOME)).toBe(HOME);
+      expect(resolveSessionCompanyId(identity, 'default')).toBe(HOME);
     });
   }
 
@@ -110,8 +127,7 @@ describe('Phase 8 — resolveSessionCompanyId: NON-GroupAdmin roles are byte-for
     expect(resolveSessionCompanyId({ companyId: '', role: 'Sales' }, 'fallback-co')).toBe('fallback-co');
   });
 
-  it('a GroupAdmin-named custom identity without the isOwner/isSuperAdmin flags does NOT gain owner-tier "all" access', () => {
-    // Defense-in-depth: the branch never returns 'all'.
+  it('a GroupAdmin-named identity without the isOwner/isSuperAdmin flags does NOT gain owner-tier "all" access', () => {
     expect(resolveSessionCompanyId(groupAdmin(), 'all')).not.toBe('all');
   });
 });
@@ -119,16 +135,12 @@ describe('Phase 8 — resolveSessionCompanyId: NON-GroupAdmin roles are byte-for
 describe('Phase 8 — the product write path no longer leaks the group-view sentinel as companyId', () => {
   it("useSaveProduct resolves companyId via resolveWriteCompanyId(), not a raw `activeCompanyId || …`", () => {
     const src = readFileSync(resolve(process.cwd(), 'src/features/inventory/hooks/useInventory.ts'), 'utf8');
-    // The raw pattern that stamped the literal 'group' sentinel into the
-    // createProductWithSkuLock() transaction is gone.
     expect(src).not.toContain("String(activeCompanyId || resolveWriteCompanyId() || '')");
-    // The create path now uses the canonical resolver (which maps
-    // 'group'/'all'/'default' -> the real target company).
     expect(src).toMatch(/const companyId = resolveWriteCompanyId\(\);/);
   });
 });
 
-describe('Phase 8 — companyScopedQuery: a GroupAdmin issues a groupId-scoped read for tenant collections regardless of the focused company', () => {
+describe('Phase 8 — companyScopedQuery: the home / sibling / group split (administrative scope)', () => {
   beforeEach(() => {
     useAppStore.setState({
       user: { id: 'ga-1', name: 'GA', email: 'ga@test.erp', role: 'GroupAdmin', companyId: HOME, groupId: GROUP },
@@ -138,38 +150,50 @@ describe('Phase 8 — companyScopedQuery: a GroupAdmin issues a groupId-scoped r
     } as never);
   });
 
+  // Every ordinary tenant collection (NOT companies, NOT roles).
   const TENANT_COLLECTIONS = [
     COLLECTIONS.PRODUCTS, COLLECTIONS.LEADS, COLLECTIONS.CUSTOMERS, COLLECTIONS.ORDERS,
     COLLECTIONS.QUOTATIONS, COLLECTIONS.VENDORS, COLLECTIONS.STOCK, COLLECTIONS.ATTENDANCE,
-    COLLECTIONS.USERS, COLLECTIONS.COMPANIES,
+    COLLECTIONS.USERS,
   ];
 
   for (const col of TENANT_COLLECTIONS) {
-    it(`${col}: groupId equality when focused on the HOME company`, () => {
+    it(`${col}: focused on the HOME company -> plain companyId scope (pre-Phase-8, always provable, zero groupId dependency)`, () => {
       useAppStore.setState({ activeCompanyId: HOME } as never);
       const c = companyScopedQuery(col);
       expect(c).toHaveLength(1);
-      expect(constraintJson(c[0])).toContain('groupId');
-      expect(constraintJson(c[0])).not.toContain('companyId');
+      expect(constraintJson(c[0])).toContain('companyId');
+      expect(constraintJson(c[0])).toContain(HOME);
+      expect(constraintJson(c[0])).not.toContain('"groupId"');
     });
 
-    it(`${col}: groupId equality when focused on an IN-GROUP SIBLING (the query is provable; applyAccessFilters narrows the display)`, () => {
+    it(`${col}: focused on an IN-GROUP SIBLING -> groupId scope (the only shape groupAdminCanRead can prove there)`, () => {
       useAppStore.setState({ activeCompanyId: SIBLING } as never);
       const c = companyScopedQuery(col);
       expect(c).toHaveLength(1);
       expect(constraintJson(c[0])).toContain('groupId');
-      expect(constraintJson(c[0])).not.toContain('companyId');
+      expect(constraintJson(c[0])).toContain(GROUP);
+      expect(constraintJson(c[0])).not.toContain('"companyId"');
     });
 
-    it(`${col}: groupId equality in the 'group' aggregate view`, () => {
+    it(`${col}: the 'group' aggregate view -> groupId scope`, () => {
       useAppStore.setState({ activeCompanyId: 'group' } as never);
       const c = companyScopedQuery(col);
       expect(c).toHaveLength(1);
       expect(constraintJson(c[0])).toContain('groupId');
+      expect(constraintJson(c[0])).toContain(GROUP);
     });
   }
 
-  it("roles: the SOLE exception — companyId-scoped to the FOCUSED company (role docs carry no groupId; groupAdminCanReadRole keys on companies/{id}.groupId)", () => {
+  it('companies: ALWAYS group-scoped for a GroupAdmin (even focused on home) so the switcher lists the whole group', () => {
+    useAppStore.setState({ activeCompanyId: HOME } as never);
+    const c = companyScopedQuery(COLLECTIONS.COMPANIES);
+    expect(c).toHaveLength(1);
+    expect(constraintJson(c[0])).toContain('groupId');
+    expect(constraintJson(c[0])).toContain(GROUP);
+  });
+
+  it('roles: NEVER group-scoped — companyId of the FOCUSED company (role docs carry no groupId; groupAdminCanReadRole keys on companies/{id}.groupId)', () => {
     useAppStore.setState({ activeCompanyId: SIBLING } as never);
     const c = companyScopedQuery(COLLECTIONS.ROLES);
     expect(c).toHaveLength(1);
@@ -184,7 +208,7 @@ describe('Phase 8 — companyScopedQuery: a GroupAdmin issues a groupId-scoped r
     expect(constraintJson(c[0])).toContain(HOME);
   });
 
-  it("a GroupAdmin with NO authoritative groupId, focused on a real company, falls through to the ordinary company-scoped path (home) — fail closed to LESS access, not an error", () => {
+  it('a GroupAdmin whose group cannot be resolved, focused on their HOME company, still gets a working companyId-scoped read (the core session never breaks on incomplete linkage)', () => {
     useAppStore.setState({
       user: { id: 'ga-x', name: 'GA', email: 'ga@test.erp', role: 'GroupAdmin', companyId: HOME, groupId: '' },
       activeCompanyId: HOME, companyGroupIds: {},
@@ -192,6 +216,26 @@ describe('Phase 8 — companyScopedQuery: a GroupAdmin issues a groupId-scoped r
     const c = companyScopedQuery(COLLECTIONS.PRODUCTS);
     expect(constraintJson(c[0])).toContain('companyId');
     expect(constraintJson(c[0])).toContain(HOME);
+  });
+
+  it('a GroupAdmin whose group cannot be resolved, focused on a SIBLING, degrades to companyId scope (fail closed to LESS access — the rules deny the sibling, home still works)', () => {
+    useAppStore.setState({
+      user: { id: 'ga-x2', name: 'GA', email: 'ga@test.erp', role: 'GroupAdmin', companyId: HOME, groupId: '' },
+      activeCompanyId: SIBLING, companyGroupIds: {},
+    } as never);
+    const c = companyScopedQuery(COLLECTIONS.PRODUCTS);
+    expect(constraintJson(c[0])).toContain('companyId');
+    expect(constraintJson(c[0])).toContain(SIBLING);
+  });
+
+  it("the §3.2 fallback: a GroupAdmin with NO identity groupId but a linked home company derives the group from companyGroupIds[home]", () => {
+    useAppStore.setState({
+      user: { id: 'ga-z', name: 'GA', email: 'ga@test.erp', role: 'GroupAdmin', companyId: HOME, groupId: '' },
+      activeCompanyId: SIBLING, companyGroupIds: { [HOME]: GROUP, [SIBLING]: GROUP },
+    } as never);
+    const c = companyScopedQuery(COLLECTIONS.PRODUCTS);
+    expect(constraintJson(c[0])).toContain('groupId');
+    expect(constraintJson(c[0])).toContain(GROUP);
   });
 
   it("the explicit 'group' aggregate view with NO resolvable groupId is a hard error (unchanged)", () => {
@@ -236,16 +280,18 @@ describe('Phase 8 — companyScopedQuery: NON-GroupAdmin actors are byte-for-byt
  * emulator + app-`db`-to-emulator wiring). This is the closest deterministic
  * assembly: it drives the REAL client tenant helpers a GroupAdmin's Product
  * flow uses and proves the write shape and the read/list shape are MUTUALLY
- * CONSISTENT — i.e. a product created by useSaveProduct WOULD be returned by
+ * CONSISTENT — a product created by useSaveProduct WOULD be returned by
  * getAll(PRODUCTS) and WOULD survive applyAccessFilters().
  *
  * COVERED here: resolveWriteCompanyId / resolveWriteGroupId (what
  * useSaveProduct -> createProductWithSkuLock stamp), companyScopedQuery
  * (what getAll queries), applyAccessFilters (the in-memory narrowing).
- * COVERED elsewhere (emulator, groupAdminFullGroupAccess / multiTenant
- * Security / customersOwnershipScope — 80/80): firestore.rules ACCEPT a
- * {companyId, groupId} create and a where('groupId','==') list for a
- * GroupAdmin. NOT covered by any automated test: a live DOM render.
+ * COVERED elsewhere (emulator — groupAdminFullGroupAccess / multiTenant
+ * Security / customersOwnershipScope): firestore.rules ACCEPT a
+ * {companyId, groupId} create and the corresponding list query for a
+ * GroupAdmin. NOT covered by any automated test: a live DOM render against
+ * the production project with a real GroupAdmin account whose identity
+ * groupId is actually backfilled.
  */
 describe('Phase 8 — GroupAdmin Product CRUD: write shape ⟷ list shape are mutually consistent (assembled-path proof)', () => {
   const setGA = (activeCompanyId: string) => useAppStore.setState({
@@ -256,10 +302,10 @@ describe('Phase 8 — GroupAdmin Product CRUD: write shape ⟷ list shape are mu
     companyGroupIds: { [HOME]: GROUP, [SIBLING]: GROUP },
   } as never);
 
-  for (const [label, active, expectVisibleCompany] of [
-    ['focused on the HOME company', HOME, HOME],
-    ['focused on an in-group SIBLING', SIBLING, SIBLING],
-    ["in the 'group' aggregate view", 'group', HOME],
+  for (const [label, active, expectScopeField, expectScopeValue] of [
+    ['focused on the HOME company', HOME, 'companyId', HOME],
+    ['focused on an in-group SIBLING', SIBLING, 'groupId', GROUP],
+    ["in the 'group' aggregate view", 'group', 'groupId', GROUP],
   ] as const) {
     it(`${label}: the created product's tenant fields satisfy the list query AND survive applyAccessFilters`, () => {
       setGA(active);
@@ -267,42 +313,38 @@ describe('Phase 8 — GroupAdmin Product CRUD: write shape ⟷ list shape are mu
       // 1. What useSaveProduct -> createProductWithSkuLock would stamp:
       const writeCompanyId = resolveWriteCompanyId();
       const writeGroupId = resolveWriteGroupId(writeCompanyId);
-      expect(writeCompanyId).not.toBe('group');           // never the sentinel (increment 1 fix)
+      expect(writeCompanyId).not.toBe('group');
       expect(writeCompanyId).not.toBe('all');
-      expect(writeGroupId).toBe(GROUP);                    // authoritative group, always resolvable here
+      expect(writeGroupId).toBe(GROUP);
       const createdProduct: any = { id: 'PRD-new', companyId: writeCompanyId, groupId: writeGroupId, name: 'New Product', isDeleted: false };
 
       // 2. What getAll(PRODUCTS) queries:
       const constraints = companyScopedQuery(COLLECTIONS.PRODUCTS);
       const c = constraintJson(constraints[0]);
-      expect(c).toContain('groupId');                      // GroupAdmin group-scoped (increment 2 fix)
-      expect(c).toContain(GROUP);
-      expect(c).not.toContain('companyId');
+      expect(c).toContain(expectScopeField);
+      expect(c).toContain(expectScopeValue);
 
-      // 3. The created product would be RETURNED by that query (its groupId matches):
-      expect(createdProduct.groupId).toBe(GROUP);
+      // 3. The created product would be RETURNED by that query:
+      if (expectScopeField === 'companyId') expect(createdProduct.companyId).toBe(expectScopeValue);
+      else expect(createdProduct.groupId).toBe(expectScopeValue);
 
       // 4. ...and would SURVIVE the in-memory narrowing:
       const visible = applyAccessFilters(COLLECTIONS.PRODUCTS, [createdProduct] as never, null);
       expect(visible.map((d: any) => d.id)).toEqual(['PRD-new']);
-      if (active !== 'group') expect(createdProduct.companyId).toBe(expectVisibleCompany);
     });
   }
 
   it('a product in ANOTHER group is NOT returned by the query and IS filtered out (isolation preserved)', () => {
     setGA(HOME);
     const foreign: any = { id: 'PRD-foreign', companyId: 'CO-OTHER', groupId: 'GRP-OTHER', name: 'Foreign', isDeleted: false };
-    // The where('groupId','==', GROUP) query would never return it; and even if
-    // it somehow did, applyAccessFilters drops it.
     const visible = applyAccessFilters(COLLECTIONS.PRODUCTS, [foreign] as never, null);
     expect(visible).toHaveLength(0);
   });
 
-  it('EDIT / DELETE reach the same record: canAccessApiResource-equivalent client filter keeps an in-group product editable, an out-of-group one not', () => {
+  it('EDIT / DELETE reach the same record: an in-group product stays editable, an out-of-group one is filtered out', () => {
     setGA(SIBLING);
     const inGroup: any = { id: 'PRD-1', companyId: SIBLING, groupId: GROUP, isDeleted: false };
     const outGroup: any = { id: 'PRD-2', companyId: 'CO-OTHER', groupId: 'GRP-OTHER', isDeleted: false };
-    // Focused on the sibling: only the sibling's in-group product is shown for edit/delete.
     expect(applyAccessFilters(COLLECTIONS.PRODUCTS, [inGroup, outGroup] as never, null).map((d: any) => d.id)).toEqual(['PRD-1']);
   });
 });

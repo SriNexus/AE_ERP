@@ -60,19 +60,29 @@ export function resolveSessionCompanyId(
   if (!canonicalCompanyId || identity?.isOwner || identity?.isSuperAdmin) return requestedCompanyId;
 
   if (isGroupAdmin(identity) && hasRealGroupId(identity)) {
-    // Neutral pre-boot placeholder: let the companies effect resolve it
-    // (to the home company for a GroupAdmin) — exactly as it already does.
-    if (!requestedCompanyId || requestedCompanyId === 'default') return requestedCompanyId;
+    // Neutral pre-boot placeholder ('' / 'default'): land the session on the
+    // GroupAdmin's OWN home company, not on whatever the companies effect's
+    // `companies.find(isDefault) || companies[0]` happens to pick first.
+    // Since Phase 8 made the boot `companies` list groupId-scoped for a
+    // GroupAdmin, companies[0] can now be an arbitrary in-group SIBLING — and
+    // starting a fresh session pointed at a sibling is what made every write
+    // (Product creation included) resolve its companyId to that sibling and
+    // then fail the rules' groupAdminCanCreate/canCreateCompanyScoped check.
+    // The home company is always the safe, always-provable default; the user
+    // can still switch to any in-group company or the 'group' view.
+    if (!requestedCompanyId || requestedCompanyId === 'default') return canonicalCompanyId;
     // The platform-wide sentinel is owner/super-admin only — a GroupAdmin's
     // equivalent is the 'group' view.
     if (requestedCompanyId === 'all') return 'group';
     // The 'group' aggregate view and ANY real company id (the home company
     // OR an in-group sibling) are all valid, fully query-supported contexts:
-    // companyScopedQuery() now issues a groupId-scoped read for a GroupAdmin
-    // regardless of which specific company is focused, and firestore.rules'
-    // actorGroupId() is the real boundary (a selection outside the group
-    // simply resolves to empty screens — the CompanySwitcher only ever
-    // offers in-group companies). Never snapped back to home.
+    // companyScopedQuery() issues a plain companyId-scoped read when a
+    // GroupAdmin is focused on their home company (pre-Phase-8 behaviour,
+    // always provable) and a groupId-scoped read for a sibling / the 'group'
+    // view, and firestore.rules' actorGroupId() is the real boundary (a
+    // selection outside the group simply resolves to empty screens — the
+    // CompanySwitcher only ever offers in-group companies). Never snapped
+    // back to home.
     return requestedCompanyId;
   }
 

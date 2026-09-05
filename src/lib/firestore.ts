@@ -269,6 +269,42 @@ export function resolveReadCompanyId(): string {
 }
 
 /**
+ * RBAC Master Plan Phase 8 — the authoritative Group id for the CURRENT
+ * signed-in actor (used to build a GroupAdmin's group-scoped read queries).
+ *
+ * Order (all already-loaded state — no Firestore read):
+ *  1. the canonical profile groupId (`users/{id}.groupId`, mirrored onto the
+ *     app user by userProfile.ts) — the same value firestore.rules'
+ *     `actorGroupId()` reads from `user_auth_maps/{authUid}.groupId`.
+ *  2. §3.2 fallback: the actor's HOME company's own owning group, via the
+ *     boot-loaded companyGroupIds map / company config (reuses
+ *     resolveWriteGroupId()'s exact lookup) — covers a GroupAdmin whose
+ *     identity groupId predates the Phase 1 backfill but whose home company
+ *     IS linked to its group.
+ *  3. '' — unresolvable. Callers fail closed (throw in the 'group' view;
+ *     fall back to home-company companyId scope on a focused sibling).
+ */
+function resolveActorGroupId(): string {
+  const profileGroupId = useAppStore.getState().user?.groupId;
+  if (isRealGroupId(profileGroupId) && profileGroupId !== 'group') return profileGroupId;
+  const homeCompanyId = useAppStore.getState().user?.companyId;
+  return isRealCompanyId(homeCompanyId) ? resolveWriteGroupId(homeCompanyId) : '';
+}
+
+// Deduplicated dev-console signal for a resolvable-but-incomplete tenant
+// linkage (a GroupAdmin whose group cannot be derived). Kept local to this
+// module — permissions.ts has its own private `diagnostic()`; there is no
+// shared surface and this must not pull permissions.ts into firestore.ts's
+// import graph.
+const emittedFirestoreDiagnostics = new Set<string>();
+function diagnostic(key: string, detail: string): void {
+  if (emittedFirestoreDiagnostics.has(key)) return;
+  emittedFirestoreDiagnostics.add(key);
+  // eslint-disable-next-line no-console
+  console.warn(`[firestore:${key}] ${detail}`);
+}
+
+/**
  * Builds architecture-level constraints for every query.
  * Handles Multi-Company isolation, Soft Deletes, and Role-Based scopes.
  *
@@ -297,54 +333,81 @@ export function companyScopedQuery(colName: string): QueryConstraint[] {
 
   // RBAC Master Plan Phase 8 — GroupAdmin group-scoped read shape.
   //
-  // A GroupAdmin's rules-layer access is groupId-based for EVERY
-  // tenant-scoped collection: firestore.rules' groupAdminCanRead() (and the
-  // Phase-7 leads/customers blocks' own groupAdminCanRead() OR-branch) all
-  // resolve via `data.groupId == actorGroupId()`. So every list query a
-  // GroupAdmin issues MUST carry the groupId equality to be provable against
-  // those rules — whether the GroupAdmin is in the 'group' aggregate view OR
-  // focused on a single company inside their group. applyAccessFilters()
-  // then narrows the DISPLAYED rows to resolveReadCompanyId() (the whole
-  // group in 'group' view, or the one focused company). This ONE branch
-  // replaces the former activeCompanyId==='group'-only branch AND the former
-  // attendance-only GroupAdmin special case — there are no per-collection
-  // GroupAdmin query exceptions. Non-GroupAdmin actors never enter it (the
-  // boot flow never sets 'group' for them, and the role check excludes
-  // them), so their query shape is byte-identical to before this change.
+  // A GroupAdmin's rules-layer access is companyId-based for their OWN home
+  // company (canReadCompanyScoped / the Phase-7 blocks' catch-all — exactly
+  // like a plain Admin, with ZERO dependency on actorGroupId() or on the
+  // document carrying a groupId), and groupId-based ONLY for the rest of the
+  // group: firestore.rules' groupAdminCanRead() (and the Phase-7 leads/
+  // customers blocks' own OR-branch) recognize a GroupAdmin on a SIBLING
+  // company / in the 'group' aggregate view solely via
+  // `data.groupId == actorGroupId()`.
   //
-  // `roles` is the SOLE exception: role documents never carry a groupId
-  // (§3.2 excludes them from the groupId denormalization); the roles rule's
-  // groupAdminCanReadRole() keys on companies/{data.companyId}.groupId
-  // instead, which IS statically provable from a where('companyId','==',X)
-  // list query. `roles` therefore falls through to the companyId branch
-  // below, scoped to the FOCUSED company — which is exactly what makes
-  // per-company role/permission management work for a GroupAdmin.
-  // (`roles` is still groupId-scoped in the explicit 'group' aggregate view
-  // — where it deliberately resolves to zero rows and roles_global's own
-  // queryFn does the real home-company fetch — but for a GroupAdmin FOCUSED
-  // on a specific company it drops to the companyId branch below.)
-  const actorIsScopedGroupAdmin = user?.role === 'GroupAdmin' && !user?.isOwner && !user?.isSuperAdmin;
+  // So the split is:
+  //  - focused on the HOME company  -> companyId scope (fall through below).
+  //    This is the pre-Phase-8 behaviour, always provable, and is what keeps
+  //    a GroupAdmin's core session (list + create + edit on their own
+  //    company, incl. legacy records that predate the groupId backfill) fully
+  //    working even when the group linkage on their identity is incomplete.
+  //  - focused on a SIBLING company, or the 'group' aggregate view
+  //    -> groupId scope (resolveActorGroupId(): the profile groupId, else —
+  //    §3.2 — the home company's own group). applyAccessFilters() narrows the
+  //    displayed rows to resolveReadCompanyId().
+  //
+  // Non-GroupAdmin actors never enter this branch (role check + the boot flow
+  // never sets 'group' for them) — their query shape is byte-identical.
+  //
+  // `roles` is excluded from the groupId branch for a GroupAdmin focused on a
+  // specific company (role docs carry no groupId; the roles rule keys on
+  // companies/{companyId}.groupId, provable from a companyId query) — it stays
+  // companyId-scoped to the focused company, which is what makes per-company
+  // role management work. In the 'group' aggregate view `roles` keeps its
+  // former zero-row behaviour (roles_global's own queryFn does the real
+  // home-company fetch there).
+  const GROUP_UNRESOLVED_MSG =
+    'Group context is not resolved: the Group Admin identity has no authoritative groupId, ' +
+    'and none could be derived from the home company. An administrator must backfill ' +
+    'users/{id}.groupId (Master Plan §3.2).';
+
+  const actorIsGroupAdmin = user?.role === 'GroupAdmin' && !user?.isOwner && !user?.isSuperAdmin;
+  const homeCompanyId = isRealCompanyId(user?.companyId) ? user!.companyId! : '';
+  const focusedOnHome = isRealCompanyId(activeCompanyId) && activeCompanyId === homeCompanyId;
   const inGroupAggregateView = activeCompanyId === 'group';
-  if ((inGroupAggregateView || actorIsScopedGroupAdmin) && (inGroupAggregateView || colName !== COLLECTIONS.ROLES)) {
-    const focusedCompanyId = isRealCompanyId(activeCompanyId) ? activeCompanyId : user?.companyId;
-    const resolvedGroupId = isRealGroupId(user?.groupId) && user?.groupId !== 'group'
-      ? user!.groupId!
-      : resolveWriteGroupId(focusedCompanyId);
-    if (isRealGroupId(resolvedGroupId) && resolvedGroupId !== 'group') {
-      return [where('groupId', '==', resolvedGroupId)];
+
+  // The explicit 'group' aggregate view — groupId scope for every collection,
+  // exactly as the pre-Phase-8 branch did (roles deliberately resolves to
+  // zero rows here; roles_global's own queryFn does the real home-company
+  // fetch).
+  if (inGroupAggregateView) {
+    const groupId = resolveActorGroupId();
+    if (isRealGroupId(groupId) && groupId !== 'group') return [where('groupId', '==', groupId)];
+    throw new Error(GROUP_UNRESOLVED_MSG);
+  }
+
+  // A GroupAdmin whose active focus is NOT their home company — the rules
+  // recognize them on a sibling only via `data.groupId == actorGroupId()`, so
+  // the list query must carry the groupId equality. `companies` is always
+  // group-scoped for a GroupAdmin (even when focused on home) so the company
+  // switcher lists the whole authorized group. `roles` is never group-scoped
+  // (role docs carry no groupId; groupAdminCanReadRole keys on
+  // companies/{companyId}.groupId — provable from a plain companyId query to
+  // the focused company). A GroupAdmin focused on their HOME company for any
+  // other collection falls through to the ordinary companyId path below —
+  // pre-Phase-8 behaviour, always provable, zero groupId dependency, so their
+  // core session keeps working even when the group linkage on their identity
+  // is incomplete (legacy records included).
+  const groupScopeThisQuery =
+    actorIsGroupAdmin &&
+    colName !== COLLECTIONS.ROLES &&
+    (!focusedOnHome || colName === COLLECTIONS.COMPANIES);
+  if (groupScopeThisQuery) {
+    const groupId = resolveActorGroupId();
+    if (isRealGroupId(groupId) && groupId !== 'group') {
+      return [where('groupId', '==', groupId)];
     }
-    // The explicit 'group' aggregate view with NO resolvable group is a hard
-    // error — the user asked for group scope and the identity cannot supply
-    // it. A GroupAdmin who merely has a broken/missing groupId while focused
-    // on a real company falls through to the ordinary company-scoped path
-    // below (their home company) — fail closed to LESS access, never an
-    // unexplained error screen.
-    if (activeCompanyId === 'group') {
-      throw new Error(
-        'Group context is not resolved: the Group Admin identity has no authoritative groupId. ' +
-        'Contact an administrator to repair the user profile.'
-      );
-    }
+    // No resolvable group — fall through to company scope. The rules deny it
+    // if a sibling is genuinely out of reach (fail closed); the GroupAdmin's
+    // home-company session keeps working regardless.
+    diagnostic('groupadmin-group-unresolved', `focusedCompany=${String(activeCompanyId)}; falling back to company scope`);
   }
 
   // F-01 (Phase 0): `companies` was previously returned with NO constraint by
