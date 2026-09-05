@@ -715,6 +715,84 @@ service cloud.firestore {
         );
     }
 
+    // ── RBAC Master Plan Phase 7 (AUTH-C1) — ownership-scoped read ─────────
+    // Turns the existing client-side self/team visibility (roleBootstrap.ts's
+    // seeded Partner=self / Manager=team on the `leads`/`customers` modules —
+    // BD-1/BD-2, RBAC Master Plan §15, both RESOLVED) into REAL Firestore
+    // enforcement. Every OTHER role's access is deliberately UNCHANGED by
+    // this — `customers`/`leads` had no dedicated match block before Phase 7
+    // (they fell through to the generic company-scoped fallback at the
+    // bottom of this file), so for any 'all'-visibility role these helpers
+    // grant exactly what the fallback always granted, just from a dedicated,
+    // role-aware block (required so the collection can be excluded from the
+    // fallback via isSpecialCollection() — see that function's own comment
+    // on why a dedicated block alone does not suppress the fallback).
+    //
+    // Read-only, matching the established canReadProjectScoped() precedent
+    // above: create/update stay on the plain company-scoped gate
+    // (canCreateCompanyScoped()/canUpdateCompanyScoped()) — the existing
+    // client model never restricted WHO may create/edit a record by
+    // team/self, only who may list/view one they don't own.
+    //
+    // Raw role-name checks, not canDo()/the roles permission document — the
+    // same Bucket A reasoning as canReadProjectScoped()/AUTH-D10: a
+    // company's own customizable role-permission document must never be
+    // what a security-relevant rules decision trusts. BD-1/BD-2 already
+    // confirmed only Manager/TL (team) and Partner (self) are narrower than
+    // 'all' on these modules today.
+    // Mirrors useGlobalBoot.ts's own team computation exactly (one-level,
+    // direct managerId match) — re-derived server-side from the record
+    // owner's OWN users doc, never trusted from a client-supplied team list.
+    // Single get() (map.get(key,default) — the same budget-cheap idiom
+    // isSuperAdmin() already uses for a possibly-absent field, avoiding a
+    // second keys().hasAny() pass over the same doc).
+    function isTeamMemberOf(actorUserId, recordOwnerUserId) {
+      return recordOwnerUserId is string && recordOwnerUserId != ''
+        && exists(/databases/$(database)/documents/users/$(recordOwnerUserId))
+        && get(/databases/$(database)/documents/users/$(recordOwnerUserId)).data.get('managerId', '') == actorUserId;
+    }
+
+    // AUTH-C1 (customers): the ownership-field audit (Phase 5) confirmed
+    // `createdBy` is always auto-stamped and `assignedToId` is set on both
+    // creation paths (direct create + Lead->Customer conversion) — still
+    // guarded with hasOrgField() per this file's fail-closed idiom for any
+    // record written outside the normal app flow. `partnerId` is only ever
+    // set when the customer originated from a partner-owned lead.
+    //
+    // A single self-contained function, not a chain of small nested-call
+    // helpers — the actor's identity (auth map + users doc) is read ONCE via
+    // `let` and every role/partner-link check reuses that plain value.
+    // §13's documented multiplier class (repeated helper re-invocation each
+    // independently re-walking the same auth-map -> users-doc chain — e.g.
+    // an isManagerOrTLRole()-style helper called several times across an OR
+    // chain) blew the 1000-expression budget in this function's first draft
+    // (live-bisected against the emulator before this version was
+    // committed, exactly the risk this phase's design notes flagged).
+    // Mirrors biometricCreateAllowed()'s let-once-reuse-everywhere shape.
+    function canReadCustomerScoped(data) {
+      let authMap = get(authMapPath()).data;
+      let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
+      let actorUserId = authMap.userId;
+      let isTeamScoped = actor.role == 'Manager' || actor.role == 'TL';
+      let isSelfScoped = actor.role == 'Partner';
+      let ownedByMe = data.createdBy == actorUserId
+        || (hasOrgField(data, 'assignedToId') && data.assignedToId == actorUserId);
+      let ownedByMyPartner = isSelfScoped && hasOrgField(data, 'partnerId') && data.partnerId != null
+        && actor.get('channelPartnerId', '') == data.partnerId;
+      let teamOwned = isTeamScoped && (
+        isTeamMemberOf(actorUserId, data.createdBy)
+        || (hasOrgField(data, 'assignedToId') && isTeamMemberOf(actorUserId, data.assignedToId))
+      );
+      return sameCompany(data)
+        && (
+          isAdmin()
+          || !(isTeamScoped || isSelfScoped)
+          || ownedByMe
+          || ownedByMyPartner
+          || teamOwned
+        );
+    }
+
     // ── Phase 6 (Channel Partner — Vendor Lock / Scheme Registration) ──────
     // Team scope: a channel_partners doc's managerId is the TL/Manager's ERP
     // user id (assignPartnerManager). Manager access to a partner's records
@@ -806,7 +884,11 @@ service cloud.firestore {
       // their own dedicated blocks below and MUST be excluded here, or the
       // generic fallback would additively grant any same-company active user
       // create/update access.
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'product_sku_locks', 'customer_returns', 'dispatch_serials', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references'];
+      // RBAC Master Plan Phase 7 (AUTH-C1): 'customers' added — it now has
+      // its own ownership-scoped match block below and MUST be excluded
+      // here, or the fallback's plain canReadCompanyScoped() would
+      // additively grant company-wide read regardless of the new predicate.
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'product_sku_locks', 'customer_returns', 'dispatch_serials', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references', 'customers'];
     }
 
     match /companies/{companyId} {
@@ -2876,6 +2958,24 @@ service cloud.firestore {
       // DELETE: always denied (§9's retention policy: soft-revoke via
       // `status`, never hard-delete — consistent with this file's house
       // soft-delete convention for every other sensitive collection).
+      allow delete: if false;
+    }
+
+    // RBAC Master Plan Phase 7 (AUTH-C1), collection 1 of 8. Previously had
+    // no dedicated match block at all — fell through to the generic
+    // company-scoped fallback below (canReadCompanyScoped(), no ownership
+    // narrowing whatsoever). Read is now genuinely ownership-scoped for the
+    // 2 roles seeded narrower than 'all' on this module (Manager/TL=team,
+    // Partner=self, per BD-1/BD-2 — RESOLVED); every other role's read
+    // access, and create/update/delete for every role, are unchanged from
+    // what the fallback always granted. Added to isSpecialCollection()'s
+    // exclusion list below so the fallback does not ALSO additively grant
+    // company-wide read (see that function's own comment for why a
+    // dedicated block alone never suppresses it).
+    match /customers/{customerId} {
+      allow read: if actorIsActive() && (canReadCustomerScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
 
