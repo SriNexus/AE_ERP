@@ -19,7 +19,18 @@ export type Module =
   | 'inventory' | 'stock' | 'products' | 'payments' | 'invoices' | 'employees'
   | 'users' | 'roles' | 'reports' | 'categories' | 'warehouses' | 'attendance'
   | 'payroll' | 'companies' | 'settings'
-  | 'partners' | 'tax_invoices' | 'vendors' | 'purchase_orders';
+  | 'partners' | 'tax_invoices' | 'vendors' | 'purchase_orders'
+  // RBAC Phase 1 (AUTH-D6): these 5 keys exist on the client Module type
+  // (src/lib/permissions.ts) but were missing here, so a server-side
+  // canDo()/requirePermission() call against any of them always failed
+  // isModule() and returned false regardless of role. No ENTITY_REGISTRY
+  // entry exposes them over the REST API yet, so this is purely additive —
+  // it changes no current request's outcome.
+  | 'cases'
+  | 'loan_applications'
+  | 'banks'
+  | 'payouts'
+  | 'scheme_registration';
 
 // ── Role cache (in-memory, refreshed per request) ─────────────
 
@@ -37,6 +48,8 @@ const ALL_MODULES: Module[] = [
   'users', 'roles', 'reports', 'categories', 'warehouses', 'attendance',
   'payroll', 'companies', 'settings',
   'partners', 'tax_invoices', 'vendors', 'purchase_orders',
+  // AUTH-D6 — see the Module type above for why these were added.
+  'cases', 'loan_applications', 'banks', 'payouts', 'scheme_registration',
 ];
 
 function isModule(value: string): value is Module {
@@ -75,6 +88,21 @@ async function getRoleDocument(roleName: string): Promise<RoleDocument | null> {
 
 const EXACT_ROLE_COMPATIBILITY: Record<string, string> = {
   admin: 'Admin',
+  // RBAC Phase 1 (AUTH-D4): GroupAdmin was missing from this table entirely,
+  // so resolveCompatibleRole('GroupAdmin') returned null and every /api/*
+  // request from a GroupAdmin 403'd regardless of module/action — a false
+  // DENY, not an intentional restriction (the client's EXACT_ROLE_COMPATIBILITY
+  // in src/lib/permissions.ts has always mapped it to 'Admin': GroupAdmin is a
+  // SCOPE extension, not a distinct permission set — its grants are the target
+  // company's own Admin role document). Mirroring that single mapping here
+  // does not grant anything new: it only lets the SAME per-company Admin
+  // template GroupAdmin already receives everywhere else (UI, Firestore
+  // rules) also resolve on this server-side path. It does not touch company
+  // or group scoping — the API's tenant boundary (resolveApiCompanyScope /
+  // canAccessApiResource in api/_lib/registry.ts, and the .where('companyId',
+  // ...) query in api/[entity].ts) is untouched by this file and still
+  // confines every request — GroupAdmin included — to its own companyId.
+  groupadmin: 'Admin',
   director: 'Director',
   sales: 'Sales',
   accounts: 'Accounts',
@@ -83,11 +111,20 @@ const EXACT_ROLE_COMPATIBILITY: Record<string, string> = {
   operations: 'Operations',
   partner: 'Partner',
   manager: 'Manager',
+  // RBAC Phase 1 (AUTH-D4): 'TL' is the legacy alias for the Manager/TL layer
+  // on the client (src/lib/permissions.ts) — added here for the same reason
+  // as groupadmin above: a stored role of exactly 'TL' otherwise resolves to
+  // nothing server-side and 403s on every API call.
+  tl: 'Manager',
   management: 'Admin',
   'sales executive': 'Sales',
   bdm: 'Sales',
   bde: 'Sales',
   acc: 'Acc',
+  // RBAC Phase 1 (AUTH-D4): demo-environment aliases, present on the client
+  // table but missing here — same false-DENY pattern as groupadmin/tl.
+  'demo operator': 'Admin',
+  'demo admin': 'Admin',
 };
 
 /**

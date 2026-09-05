@@ -319,7 +319,7 @@ GroupAdmin is a **scope extension**, not a fifth distinct permission tier: its e
 | Manage users per company, incl. cross-company transfer within the group | ALLOW — the one deliberate `companyId`-mutability exception in the whole rules file | `usersUpdateAllowed()` branch C |
 | Promote a second GroupAdmin | ALLOW, narrowly — target must already hold a `group_members` record, cannot be self | `firestore.rules` §7.9 exception |
 | `/group/*` routes (Group dashboard, Companies/Warehouses/Users/Teams/Roles/Settings) | **DENY** — these are `SuperAdminRoute`-gated (owner-email), not reachable by this role at all | ROUTE |
-| REST API access | **DENY on every call** | missing from `api/_lib/permissions.ts`'s alias table |
+| REST API access | **RESOLVED in Phase 1** (see §18 Phase 1 completion record for the commit hash) — `groupadmin`/`tl`/`demo operator`/`demo admin` added to `api/_lib/permissions.ts`'s alias table, mirroring the client's table exactly; `/api/integrations` also now admits the literal `GroupAdmin` role. `AUTH-D1` (the underlying role-document lookup bug) is separate and still open, deferred to Phase 6. | `api/_lib/permissions.ts`, `api/integrations.ts` |
 | Cross-group reach | DENY | FIRESTORE |
 | Company-scoped users granted GroupAdmin/SuperAdmin capability | must remain DENY | — |
 
@@ -362,8 +362,8 @@ Carried forward and re-verified against the current tree (commit `4663494`); IDs
 | AUTH-C4 | RBAC-004 | High | `canReadProjectScoped()` allows any non-project-scoped role to direct-read any same-company project regardless of assignment | Phase 5/7 |
 | CP-1 | CP-1 | High | `validatePartnerCanAct`/`validatePartnerCanCreateLead` fully implemented, zero call sites — suspended/unverified partners act freely | Phase 4 |
 | AUTH-C2 | RBAC-005 | Medium | Sales/Operations seeded at company-wide visibility; the seed's own comments say this should be narrower | Phase 2/7 — **BUSINESS DECISION REQUIRED, §15** |
-| AUTH-D4 | RBAC-006 | Medium | `GroupAdmin` missing from server `EXACT_ROLE_COMPATIBILITY` — 403 on every `/api/*` call | Phase 2/6 |
-| AUTH-D5 | RBAC-007 | Medium | `/api/integrations` does a raw `role==='Admin'` string check, alias-blind to GroupAdmin | Phase 6 |
+| AUTH-D4 | RBAC-006 | Medium | `GroupAdmin` missing from server `EXACT_ROLE_COMPATIBILITY` — 403 on every `/api/*` call | **CLOSED — Phase 1** |
+| AUTH-D5 | RBAC-007 | Medium | `/api/integrations` does a raw `role==='Admin'` string check, alias-blind to GroupAdmin | **CLOSED — Phase 1** |
 | AUTH-C6 | S-4 | Medium | `roleNotSystemProtected()` only inspects the client-controlled `isSystem` field, never checks `name` for a reserved/colliding value | Phase 2 |
 | AUTH-P1 | RBAC-008 | Low | No role template grants `cases` except Admin — likely an oversight for Director | Phase 4 — **BUSINESS DECISION REQUIRED, §15** |
 | AUTH-P2 | RBAC-009 | Low | Manager has no approve grant on orders/dispatch — plausibly intentional separation of duties | none — **confirm intent only, §15** |
@@ -373,7 +373,7 @@ Carried forward and re-verified against the current tree (commit `4663494`); IDs
 | AUTH-S5 | S-5 | Low | `/group/*` route naming implies GroupAdmin access it doesn't have | Phase 4 (rename or re-route) |
 | AUTH-C7 | S-6 | Low | `getModuleVisibility()` and `resolveVisibility()` default an unresolved role in opposite directions | Phase 2 |
 | AUTH-D2 | DBT-2 | Low | 7 routes borrow another module's guard key instead of having their own | Phase 4 |
-| AUTH-D6 | (new) | Low | Server `Module` type missing 6 keys the client has; server alias table missing `groupadmin`/`tl`/demo aliases | Phase 6 |
+| AUTH-D6 | (new) | Low | Server `Module` type missing keys the client has (5, not 6 as originally estimated — corrected on Phase 1 verification: `cases, loan_applications, banks, payouts, scheme_registration`); server alias table missing `groupadmin`/`tl`/demo aliases | **CLOSED — Phase 1** |
 | BANK-1 | BANK-1 | Low | No rules block for `banks/{id}/branches` — subcollection is fully unreachable (dead feature, not an exposure) | Out of scope — feature decision, not RBAC |
 
 ---
@@ -543,6 +543,16 @@ Ten phases, in the dependency order derived in §14. Each phase below carries al
 14. **Rollback/safety:** Trivial — single-file, additive changes; revert commit if any regression surfaces.
 15. **Required verification before commit:** `npx tsc --noEmit`, `npm run build`, full `api` vitest config run, the new GroupAdmin-API test.
 16. **Commit boundary:** One commit: `fix(rbac): close GroupAdmin API false-denies (AUTH-D4/D5/D6)`.
+
+**PHASE 1 COMPLETION RECORD**
+
+- **Status:** COMPLETE (local commit only — not pushed to `origin/main` per explicit instruction; production untouched).
+- **Verified against current code before implementing** (per this phase's own discipline): `api/_lib/permissions.ts`'s `EXACT_ROLE_COMPATIBILITY` was confirmed still missing `groupadmin`/`tl`/`demo operator`/`demo admin`; `api/integrations.ts` was confirmed still doing the raw `auth.role !== 'Admin'` check; the server `Module` type was confirmed missing keys the client has. **One discrepancy found and corrected on verification:** the plan's §12 register originally said "6" missing module keys — direct inspection found exactly **5** (`cases, loan_applications, banks, payouts, scheme_registration`); corrected in place above, does not change the fix's nature or risk.
+- **Findings closed:** AUTH-D4, AUTH-D5, AUTH-D6 (register updated above).
+- **Files changed:** `api/_lib/permissions.ts` (alias table + Module type, additive), `api/integrations.ts` (one literal-string addition to the authorization check), plus two new test files (`api/_lib/__tests__/groupAdminApiAccess.test.ts`, `api/__tests__/apiIntegrationsAuthorization.test.ts`).
+- **Tests:** 21 new tests, all passing (positive: GroupAdmin/TL/demo aliases now resolve and behave exactly as their canonical role; negative: ordinary roles unaffected, unknown/malformed roles still fail closed, Super Admin bypass unaffected, company-scoping via `canAccessApiResource` unaffected, `/api/integrations` still denies Sales/Manager/HR/Warehouse/Operations/Partner/Director/arbitrary custom roles **and** deliberately does not widen to Management/demo aliases). Full API suite: 14 files / 327 tests pass (was 12 files / 306 before this phase — the delta is exactly the 2 new files / 21 new tests, zero regressions). `npx tsc --noEmit`: clean. `npm run build`: clean. Full `npx vitest run`: 29 failed files / 65 failed tests — the documented pre-existing baseline, unchanged.
+- **Deviations from the plan's original Phase 1 text:** none in the fix itself. The AUTH-D5 fix used an explicit literal `auth.role !== 'GroupAdmin'` addition rather than routing through the shared alias table, specifically to avoid also admitting `Management`/`demo operator`/`demo admin` (which alias to `Admin` elsewhere) — a narrower implementation than "use the alias table" might have suggested, chosen because the finding as documented named GroupAdmin specifically and the task's own instructions warned against incidentally widening this endpoint.
+- **Deferred finding surfaced during Phase 1 verification (NOT fixed):** **AUTH-D7** — the server `Permission` type (`api/_lib/permissions.ts`) is missing `'disburse'`, which the client `Permission` type has (used for Accounts' payout-disbursement grant). Not fixed here because it was not named in AUTH-D6's scope (module keys only) and is currently inert: no `ENTITY_REGISTRY` entry exposes the `payouts` module over the REST API, so no live code path can call `canDo(user, 'disburse', 'payouts')` today. Belongs with Phase 6 (API/backend authorization), alongside the rest of the server-side type/alias sync work.
 
 ### PHASE 2 — Role / Alias Normalization
 
@@ -814,7 +824,7 @@ Before declaring the roadmap complete (end of Phase 10):
 | Phase | Status | Commit(s) | Date |
 |---|---|---|---|
 | Planning (this document) | Complete | (docs commit, this file) | 2026-09-05 |
-| Phase 1 | Not started | — | — |
+| Phase 1 | **Complete (local commit only, not pushed)** | see commit hash in the git history of the local `main` branch — deliberately not pushed to `origin/main` pending an explicit release milestone | 2026-09-05 |
 | Phase 2 | Not started | — | — |
 | Phase 3 | Not started | — | — |
 | Phase 4 | Not started | — | — |

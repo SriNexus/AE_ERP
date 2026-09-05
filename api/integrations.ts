@@ -46,7 +46,16 @@ export async function handleIntegrationsRequest(req: VercelRequest, res: VercelR
     return sendError(res, 500, 'BOOTSTRAP_FAILED', 'Authentication failed unexpectedly.');
   }
 
-  if (!auth.isSuperAdmin && auth.role !== 'Admin') {
+  // RBAC Phase 1 (AUTH-D5): this was a raw `auth.role !== 'Admin'` check —
+  // alias-blind, so a GroupAdmin (an Admin-equivalent scope extension
+  // everywhere else in the app, see api/_lib/permissions.ts's
+  // EXACT_ROLE_COMPATIBILITY) 403'd here specifically. Fixed with an explicit
+  // literal addition rather than routing through the shared alias table, so
+  // this stays exactly as narrow as before plus GroupAdmin — it deliberately
+  // does NOT newly admit 'Management'/'demo operator'/'demo admin' or any
+  // other role that happens to alias to Admin elsewhere; those are a
+  // separate, not-yet-approved widening this phase does not make.
+  if (!auth.isSuperAdmin && auth.role !== 'Admin' && auth.role !== 'GroupAdmin') {
     return sendError(res, 403, 'FORBIDDEN', 'Only Admin users can manage integration secrets.');
   }
 
