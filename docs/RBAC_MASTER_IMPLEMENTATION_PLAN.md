@@ -378,6 +378,9 @@ Carried forward and re-verified against the current tree (commit `4663494`); IDs
 | AUTH-D6 | (new) | Low | Server `Module` type missing keys the client has (5, not 6 as originally estimated — corrected on Phase 1 verification: `cases, loan_applications, banks, payouts, scheme_registration`); server alias table missing `groupadmin`/`tl`/demo aliases | **CLOSED — Phase 1** |
 | BANK-1 | BANK-1 | Low | No rules block for `banks/{id}/branches` — subcollection is fully unreachable (dead feature, not an exposure) | Out of scope — feature decision, not RBAC |
 | AUTH-D9 | (new) | Low | `MobileInstallationsWorkspace.tsx` hardcodes `isAdmin = role==='Admin'\|\|role==='Director'` to gate 7 edit/schedule/checklist controls, with no `canDo()` involved. Desktop's `InstallationWorkspace.tsx` correctly uses `perms.canEdit('installations')`. Since Director is seeded view-only on every module, this mobile-only hardcoded check currently grants Director an edit capability on mobile that Director has nowhere else. | **Discovered — Phase 4, deliberately not fixed** (fixing it narrows Director's current mobile access; needs explicit confirmation this over-grant is unintentional before touching, not a mechanical sweep item). Candidate for Phase 4's continuation or Phase 9's full regression pass. |
+| AUTH-C1a | (new) | Medium | CSV-imported Leads (`Leads.tsx`'s CSV import path) are persisted with `assignedToId: ''` — no assignee at all, unlike every other lead-creation path (which round-robin-assigns via `getNextAssignee()`). Under a future 'self'/'team' ownership rule these leads become invisible to everyone except an `'all'`-visibility role. | **Discovered — Phase 5, not fixed** (Phase 5 is audit-only). Phase 7 must decide — with an explicit answer, not a guess — whether unassigned records default company-wide-visible or need a pre-deployment backfill. |
+| AUTH-C1b | (new) | Low | `loan_applications`'s exact `assignedToId` coverage was not conclusively confirmed — `loanApplicationWorkflow.ts` serves more than one registration-type collection and this pass could not isolate the field's reliability specifically for `loan_applications`. | **Discovered — Phase 5, incomplete evidence, not asserted either way.** Needs a dedicated, narrower read before Phase 7 touches this collection. |
+| AUTH-C4a | (new) | Medium | Narrowing `canReadProjectScoped()` beyond the 5 already-enforced project-scoped field roles has no corresponding BD-1..BD-8 entry — nobody has posed or approved the business question of whether Manager/Partner/Sales/Accounts/etc. should be limited to assigned-only project reads. | **BUSINESS DECISION REQUIRED — new, tracked as BD-9 in §15.** Not decided; not guessed. |
 
 ---
 
@@ -469,6 +472,7 @@ No phase after 2 may proceed if Phase 2's alias-table unification isn't complete
 | BD-6 | Should Accounts gain a `partners` module grant (even view-only), given it currently has none? | No grant at all | (a) Add view-only; (b) leave as-is (Accounts may legitimately have no reason to see partner relationship data, only commission/payout amounts which it already has via Payouts) | None — this is a scope-breadth question, not a security gap | Accounts | **(b)**, preserve as-is, unless the business identifies a concrete need |
 | BD-7 | Is Manager's lack of an approve grant on Orders/Dispatch intentional separation of duties, or a gap? | DENY | (a) Leave denied (Accounts/Warehouse approve, by design); (b) grant Manager approve too | None either way — purely a workflow-design question | Manager | **(a)**, preserve as-is; separation-of-duties patterns are usually deliberate and this one is internally consistent with the Accounts/Warehouse payout-approve-vs-disburse split already in the seed |
 | BD-8 | Should the 7 "borrowed-module" routes (§6/AUTH-D2) get their own dedicated module keys, or is sharing acceptable? | Shared keys today (e.g., `/stock-transfers` uses `stock`) | (a) Give each its own module (finer-grained, more Roles & Permissions checkboxes to manage); (b) formally document the sharing as intentional and leave it | Low either way — the shared grant is at least consistent, not contradictory | Whoever holds the parent module's grant today | **(b)** for low-traffic borrowed routes, **(a)** is worth it only for `/stock-transfers` specifically since stock viewing and stock transferring are meaningfully different risk levels; needs a decision per-route, not a blanket one |
+| BD-9 | Should `canReadProjectScoped()` be narrowed beyond the 5 already-enforced project-scoped field roles (Surveyor/Engineer/InstallationLead/ServiceTechnician/ComplianceOfficer) — i.e., should Manager/Partner/Sales/Accounts/Director/etc. be limited to assigned-only Project reads instead of any same-company Project? | ALLOW — any non-field-role actor reads any same-company Project directly (AUTH-C4/AUTH-C4a, discovered in Phase 5) | (a) Leave as-is (Managers/Sales/Accounts coordinating a project plausibly need to look up any company project by id, not just their own); (b) narrow to assigned-only for some or all of these roles | If (a) is the genuine intent, this is a scope-breadth choice, not a hole; if not, it's a real over-exposure of customer/project detail across teams | Manager, Partner, Sales, Accounts, Director, and any other non-field-role | **Do not guess** — this is a brand-new question this Master Plan never posed before Phase 5's audit found it; needs an explicit answer before Phase 7 (or any later phase) touches `canReadProjectScoped()` |
 
 ---
 
@@ -700,6 +704,77 @@ function isOwnedRecord(data) {
 // for this module keeps the existing sameCompany()-only grant, unchanged.
 ```
 
+**PHASE 5 COMPLETION RECORD**
+
+- **Status:** COMPLETE for its actual defined scope (audit + rules-pattern design). **Zero `firestore.rules` changes were made** — this is not a partial result, it is the correct outcome: this phase's own text above says "Security impact: none yet," "Regression risks: none (read-only audit...)," and "Rollback/safety: N/A — no production change in this phase." Deploying the actual predicate is Phase 7's job, and Phase 7 explicitly depends on BD-1/BD-2 being answered (§14's dependency graph) — both remain open. Local commit only; `origin/main` untouched at `33fc782`.
+- **Confirmed unchanged since the original audit:** none of the 8 collections (`leads`, `customers`, `quotations`, `orders`, `products`, `vendors`, `cases`, `loan_applications`) have a dedicated `firestore.rules` match block — re-verified by grepping every `match /{collection}/` line in the current file. `commission_records`/`settlements` (AUTH-C3) and the `projects` `canReadProjectScoped()` gate (AUTH-C4) are also unchanged.
+
+**Per-collection ownership-field audit** (traced from actual write-path code, not assumed):
+
+| Collection | `companyId`/`groupId` | `createdBy` | `assignedToId` | `partnerId` | Notes |
+|---|---|---|---|---|---|
+| `leads` | Auto-stamped by `createDocWithId`/`createDoc` (universal) | Auto-stamped | **Set on standard creation** — `useLeads.ts`'s create hook auto-assigns via `getNextAssignee()` round-robin when not explicit, so a lead created through the normal UI is never unassigned | Set when a Channel Partner creates the lead | **Finding AUTH-C1a:** `Leads.tsx`'s CSV import path (`handleCsvImport`) explicitly sets `assignedToId: ''` — a CSV-imported lead has NO assignee at all. Under a future 'self'/'team' ownership rule, these leads would be invisible to everyone except a company-wide ('all') role, until manually re-assigned. This is a real, historical-data risk Phase 7 must account for (a backfill or an explicit "unassigned leads default to company-wide read" clause), not an invented one. |
+| `customers` | Auto-stamped | Auto-stamped (`createCustomerProjectionInTransaction`'s `...payload` spread + explicit `createdBy`) | Set at Lead→Customer conversion (`leadWorkflow.ts`, carries the lead's resolved assignee forward) and at direct creation (`CustomersWorkspace.tsx`'s `assignedToId`/`assignedToName` fields) | Set when linked to a partner-owned lead | No equivalent CSV-import gap found for Customers (no bulk-import path exists for this collection). |
+| `quotations` | Auto-stamped | Auto-stamped (`Quotations.tsx` sets `createdBy: user.id` explicitly, redundant with but consistent with the auto-stamp) | **Not set anywhere** — `Quotations.tsx`'s creation payload has no `assignedToId` field at all | Not applicable (no partner-facing quotation creation flow found) | A future ownership predicate here can only ever match on `createdBy` (self) — see the corrected rules-pattern design below for why this specifically breaks a naive "team" implementation. |
+| `orders` | Auto-stamped | Auto-stamped (`Orders.tsx` sets `createdBy:user.id` explicitly) | **Not set anywhere** — same gap as quotations; `assignedToId` appears only in the list page's *filter* UI (`o.assignedToId===assignedF`), never in the create payload | Not applicable | Same consequence as quotations. |
+| `products` | Auto-stamped | Auto-stamped only (no explicit field in `Products.tsx`) | Not applicable — products are not personally owned | Not applicable | `products` has no role seeded with anything narrower than `'all'` visibility today (confirmed — no `self`/`team` grant exists for this module in any of the 15 system roles), so an ownership predicate would currently be a pure no-op for every real role even if deployed. |
+| `vendors` | Auto-stamped | Auto-stamped only | Not applicable | Not applicable | Same as products — no role is seeded `self`/`team` on `vendors`; Procurement (the only role with meaningful vendor CRUD) is seeded `'all'`. |
+| `cases` | Auto-stamped | Auto-stamped (`CaseEngine.ts` sets `createdBy: userId`) | Not applicable | Not applicable | Moot until BD-4 is answered — only Admin holds any grant on `cases` at all today, so no other role's scope is even reachable yet. |
+| `loan_applications` | Auto-stamped | Auto-stamped (`loanApplicationWorkflow.ts` maps its `createdById` parameter onto the persisted `createdBy` field — verified NOT a schema drift, just a differently-named function argument) | Present in the same workflow file for a related registration flow in the same module; not confirmed as populated specifically for every `loan_applications` create path in this pass | Not applicable | Needs a closer, dedicated read before Phase 7 touches this collection specifically — flagged as **incomplete evidence**, not asserted either way. |
+
+**Corrected rules-pattern design** (this phase's required deliverable) — the plan's original draft (top of this section, still shown above for history) had a real design gap this audit caught before it could reach Phase 7 as a broken rule: it only matched `assignedToId in callerTeamMemberIds()` for "team" scope. Since **5 of the 8 collections have no `assignedToId` field at all** (quotations, orders, products, vendors, and — pending the one open item above — possibly loan_applications), a rule built only that way would make "team" visibility permanently empty for a Manager on those collections, even though the client's own `applyAccessFilters`/`ownershipVisibility.ts` already correctly checks **`createdBy` for team membership too** (`OWNERSHIP_FIELDS = ['assignedToId', 'createdBy', 'partnerId']`, each checked against the same `[self, ...teamMemberIds]` set). The corrected pattern, verified against the client's actual, working logic:
+
+```
+function isTeamMemberRecord(recordOwnerUserId) {
+  // Mirrors useGlobalBoot.ts's own team computation EXACTLY:
+  // `teamMemberIds = users.filter(u => u.managerId === user.id).map(u => u.id)`
+  // — a one-level, direct managerId match, nothing more. This get() is
+  // the same class of single-document lookup already used elsewhere in
+  // this file (warehouse/company FK checks) — technically safe, but it
+  // is an EXTRA get() per evaluation on top of everything else already
+  // in these clauses, and this file has repeated, documented history of
+  // hitting the 1000-expression budget on far simpler rules (stock,
+  // attendance, users, roles). Any Phase 7 use of this function MUST be
+  // paired with a live expression-budget check on that specific
+  // collection's write path, not assumed safe by analogy.
+  return recordOwnerUserId is string && recordOwnerUserId != ''
+    && exists(/databases/$(database)/documents/users/$(recordOwnerUserId))
+    && get(/databases/$(database)/documents/users/$(recordOwnerUserId)).data.managerId == currentUserId();
+}
+
+function isOwnedRecord(data) {
+  return isSignedInActor() &&
+    (
+      data.createdBy == currentUserId()
+      || (data.keys().hasAny(['assignedToId']) && data.assignedToId == currentUserId())
+      || (data.keys().hasAny(['partnerId']) && data.partnerId != null && data.partnerId == callerPartnerDocId())
+      || isTeamMemberRecord(data.createdBy)
+      || (data.keys().hasAny(['assignedToId']) && isTeamMemberRecord(data.assignedToId))
+    );
+}
+// Applied only for roles whose seeded visibility is 'self' or 'team' for
+// this module — a role seeded 'all' keeps the existing sameCompany()-only
+// grant, completely unchanged. THIS is the exact reason Phase 7 cannot
+// deploy yet: for these 8 collections, that "which roles are self/team"
+// question is Sales (BD-1, on leads/customers/quotations) and Manager
+// (BD-2, on quotations/orders/products/vendors/loan_applications) — both
+// still open. Partner's self-scope (leads/customers) and Manager's
+// team-scope (leads/customers, NOT the BD-2 modules) are the only parts of
+// this predicate that are already non-controversial today.
+```
+
+- **AUTH-C1 status per collection:** groundwork complete for all 8; the enforcing rule itself remains correctly un-deployed, blocked on **BD-1** (leads/customers/quotations — Sales scope) and **BD-2** (quotations/orders/products/vendors/loan_applications — Manager scope). `products`/`vendors`/`cases` have no BD blocking them specifically — they simply have no role seeded narrower than `'all'` today, so there is nothing for Phase 7 to enforce on them unless a future business decision changes that.
+- **AUTH-C3 (`commission_records`/`settlements`) status:** re-verified unchanged. Notably, the current rules file's own comment already documents this as a **deliberate, prior trade-off** ("does NOT replicate Manager's team-scope or Partner's self-scope narrowing... to avoid the extra get() calls a per-record ownership check would require") — not an oversight this audit is the first to notice. The corrected `isOwnedRecord`/`isTeamMemberRecord` pattern above is directly applicable here too if a future decision reverses that trade-off; no schema blocker exists (both collections carry `partnerId` reliably per `channelPartnerCommissionEngine.ts`). Deferred to Phase 7, gated on an explicit decision to accept the extra `get()` cost this file's own history treats as non-trivial.
+- **AUTH-C4 (`projects` / `canReadProjectScoped()`) status:** re-verified unchanged — `!isProjectScopedRole()` unconditionally passes any non-field-role actor. Real owner fields are `assignedSurveyor`, `assignedInstaller`, `salesOwner`, `designerId` (not `assignedToId` — Projects use their own, already-established field names, confirmed via the existing rule text). No schema blocker; narrowing this is a scope-policy question (should Manager/Partner/Sales/Accounts/etc. really be limited to assigned-only project reads?) that was never posed as one of BD-1 through BD-8 and is **not decided here** — flagged as a new, explicit item for §15.
+- **Query compatibility:** traced the actual `getAll()`/`buildOwnershipVisibilityQueryPlan()` code path (`src/lib/firestore.ts`, `src/lib/ownershipVisibility.ts`) — it already issues company-scoped, `assignedToId`/`createdBy`/`partnerId`-`in`-chunked queries for any collection whose resolved visibility isn't `'all'`, and already narrows the query itself (not just an in-memory filter) for exactly these 8 collections today. **No query changes are required for Phase 7** — the client already queries in a shape a matching rules predicate would accept; the gap is entirely on the rules side, not the query side.
+- **New finding, deferred:** **AUTH-C1a** — CSV-imported Leads persist with `assignedToId: ''`, meaning they'd be invisible under a 'self'/'team' rule until reassigned. Phase 7 must decide (with a business answer, not a guess) whether unassigned records default to company-wide-visible or require a backfill pass before the rule goes live — modeled on this project's own established dry-run-first backfill script pattern.
+- **New finding, deferred:** **AUTH-C1b** — `loan_applications`'s exact `assignedToId` coverage was not conclusively confirmed in this pass (the workflow file serves more than one registration-type collection); needs a dedicated, narrower read before Phase 7 touches this specific collection.
+- **New finding, deferred:** **AUTH-C4a** — Project ownership narrowing (beyond the 5 already-enforced field roles) has no corresponding BD-1..BD-8 entry; if Phase 7 is ever asked to tighten `canReadProjectScoped()` further, that needs its own named business decision first, not an assumption that "matching AUTH-C1's pattern" is authorization enough.
+- **Files changed:** `docs/RBAC_MASTER_IMPLEMENTATION_PLAN.md` only, plus one new evidence-pinning test file (source-verification style, matching this repo's established convention) that captures the concrete, re-checkable facts this audit found (which collections have `assignedToId`, the CSV-import gap, the `teamMemberIds` computation this design mirrors) so a future phase can re-run it rather than re-deriving the same evidence by hand.
+- **Tests:** the new evidence test passes; no `firestore.rules` change means no emulator suite needed to be re-run for a behavioral change (none occurred) — the existing emulator baseline was re-run anyway as a pure regression sanity check (see below) and is unaffected. `npx tsc --noEmit`: clean. `npm run build`: clean. Full `npx vitest run`: 29 failed files / 65 failed tests — the documented pre-existing baseline, unchanged.
+- **Business decisions:** **BD-1 and BD-2 remain the explicit blockers for Phase 7's actual deployment on 6 of the 8 collections** (leads/customers/quotations/orders/products*/vendors*/loan_applications — *products/vendors have no seeded role to apply the predicate to regardless of the BD answer). Neither was guessed or resolved here. No other BD was touched.
+- **Deviation from the plan's original Phase 5 text:** none in outcome — the plan's own definition already scoped this phase to audit + design with zero enforcing change; this record documents that scope was honored, plus the corrected rules-pattern design and the 3 new deferred findings (AUTH-C1a, AUTH-C1b, AUTH-C4a) the audit surfaced that the original plan text couldn't have known about in advance.
+
 ### PHASE 6 — API / Backend Authorization
 
 1. **Name:** Fix the REST API Permission Lookup + Sync Server Alias Table
@@ -881,7 +956,7 @@ Before declaring the roadmap complete (end of Phase 10):
 | Phase 2 | **Complete for its mechanical/investigative scope; BD-5 (`Management`) remains explicitly open (local commit only, not pushed)** | see commit hash in the git history of the local `main` branch | 2026-09-05 |
 | Phase 3 | **Complete — structural deliverables found pre-existing; verification/propagation-measurement delivered (local commit only, not pushed)** | see commit hash in the git history of the local `main` branch | 2026-09-05 |
 | Phase 4 | **Complete for non-BD-gated work; BD-3/BD-4/BD-8 remain explicitly open (local commit only, not pushed)** | see commit hash in the git history of the local `main` branch | 2026-09-05 |
-| Phase 5 | Not started | — | — |
+| Phase 5 | **Complete (audit + design, zero rules changes by design — the correct outcome per this phase's own scope); Phase 7 blocked on BD-1/BD-2/BD-9 (local commit only, not pushed)** | see commit hash in the git history of the local `main` branch | 2026-09-05 |
 | Phase 6 | Not started | — | — |
 | Phase 7 | Not started | — | — |
 | Phase 8 | Not started | — | — |
