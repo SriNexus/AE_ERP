@@ -95,6 +95,8 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
     monthlyBillAmount: '',
     sanctionLoad: '',
     roofType: '',
+    // Optional — the electricity connection consumer number. Never required.
+    consumerNumber: '',
   });
   // Electricity bill upload
   const billFileRef = useRef<HTMLInputElement>(null);
@@ -169,6 +171,7 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
             assignedToName,
             roofType: b2cForm.roofType,
             sanctionLoad: b2cForm.sanctionLoad,
+            consumerNumber: b2cForm.consumerNumber,
             electricityBillFileName: billFile?.name || '',
           };
 
@@ -350,6 +353,11 @@ export default function LeadWorkspaceConversionFlow({ lead, nextLeadId }: Props)
                       {ROOF_TYPES.map(r => <option key={r} value={r}>{r}</option>)}
                     </select>
                   </div>
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-text-muted)] mb-1">Consumer Number</p>
+                  <input type="text" value={b2cForm.consumerNumber} onChange={e => hB2c('consumerNumber', e.target.value)} placeholder="Electricity connection consumer number (optional)"
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-primary)] transition-colors" />
                 </div>
                 {/* Electricity Bill Upload */}
                 <div>

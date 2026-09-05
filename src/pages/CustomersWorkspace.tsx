@@ -59,6 +59,10 @@ const B2C_FORM0 = {
   fullName: '', mobile: '', altMobile: '', email: '',
   address: '', state: '', city: '', aadhaar: '',
   monthlyBillAmount: '', roofType: '', sanctionLoad: '',
+  // Optional B2C-only field — the electricity connection consumer number.
+  // Never required; flows through to the created Customer doc via the
+  // `{...d, ...}` spread in createB2C's createdCustomer object below.
+  consumerNumber: '',
   propertyType: '', projectType: '', assignedToId: '', assignedToName: '', notes: '',
   electricityBillFile: null as File | null,
   electricityBillPreview: '' as string,

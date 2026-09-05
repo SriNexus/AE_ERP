@@ -75,6 +75,9 @@ export async function convertLeadToCustomer(lead: any, customerType: 'B2B' | 'B2
       company: text(lead.company) || (customerType === 'B2B' ? text(lead.name) : ''),
       city: text(lead.city),
       gst: text(lead.gst),
+      // Optional B2C-only field — never required for either type; a B2B
+      // conversion simply never sets it in the conversion form's `extra`.
+      consumerNumber: text(lead.consumerNumber),
       type: customerType,
       sourceLeadId: lead.id,
       // Phase 3 (§9.2 rule 2): partner ownership survives conversion.
@@ -139,6 +142,9 @@ export async function convertLeadToCustomer(lead: any, customerType: 'B2B' | 'B2
       company: text(currentLead.company) || lead.company || (customerType === 'B2B' ? text(currentLead.name) || lead.name : ''),
       city: text(currentLead.city) || lead.city || '',
       gst: text(currentLead.gst) || lead.gst || '',
+      // Optional B2C-only field — never required for either type; a B2B
+      // conversion simply never sets it in the conversion form's `extra`.
+      consumerNumber: text(currentLead.consumerNumber) || lead.consumerNumber || '',
       type: customerType,
       sourceLeadId: lead.id,
       // Phase 3 (§9.2 rule 2): partner ownership survives conversion.

@@ -423,8 +423,13 @@ export function ProjectOverview({
                           }
                         />
                         <MetaRow label="App. Date" value={fmtDate(app.createdAt || app.applicationDate)} />
-                        {id === 'net-metering' && app.consumerNumber && (
-                          <MetaRow label="Consumer No." value={app.consumerNumber} />
+                        {/* Falls back to the linked B2C Customer's own Consumer
+                            Number (set at Lead conversion or Customer edit) when
+                            the net-metering application hasn't recorded its own
+                            yet — so the value entered earlier in the
+                            Lead -> Customer flow is never lost from view here. */}
+                        {id === 'net-metering' && (app.consumerNumber || customerValue(customer, ['consumerNumber'])) && (
+                          <MetaRow label="Consumer No." value={app.consumerNumber || customerValue(customer, ['consumerNumber'])} />
                         )}
                         {id === 'subsidy' && app.schemeType && (
                           <MetaRow label="Scheme Type" value={app.schemeType} />

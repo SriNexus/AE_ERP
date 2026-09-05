@@ -161,4 +161,61 @@ describe('convertLeadToCustomer', () => {
       'comp-1'
     );
   });
+
+  // Product change — optional B2C Consumer Number.
+  describe('consumerNumber (optional B2C field)', () => {
+    it('carries an entered Consumer Number from the lead through to the created Customer on a B2C conversion', async () => {
+      const lead = {
+        id: 'lead-2',
+        name: 'Residential Lead',
+        phone: '9888888888',
+        assignedToId: 'rep-9',
+        consumerNumber: 'CN-123456',
+      };
+
+      await expect(convertLeadToCustomer(lead, 'B2C')).resolves.toBe('CUS-001');
+
+      expect(mocks.createDocWithId).toHaveBeenCalledWith(
+        'customers',
+        'CUS-001',
+        expect.objectContaining({ consumerNumber: 'CN-123456', type: 'B2C' })
+      );
+    });
+
+    it('a B2C conversion with no Consumer Number entered still succeeds — the field is genuinely optional, never required', async () => {
+      const lead = {
+        id: 'lead-3',
+        name: 'Residential Lead 2',
+        phone: '9777777777',
+        assignedToId: 'rep-9',
+        // consumerNumber intentionally omitted
+      };
+
+      await expect(convertLeadToCustomer(lead, 'B2C')).resolves.toBe('CUS-001');
+
+      expect(mocks.createDocWithId).toHaveBeenCalledWith(
+        'customers',
+        'CUS-001',
+        expect.objectContaining({ consumerNumber: '', type: 'B2C' })
+      );
+    });
+
+    it('a B2B conversion is completely unaffected — consumerNumber is simply empty, B2B flow otherwise identical', async () => {
+      const lead = {
+        id: 'lead-4',
+        name: 'Business Lead',
+        phone: '9666666666',
+        company: 'Biz Co',
+        assignedToId: 'rep-9',
+      };
+
+      await expect(convertLeadToCustomer(lead, 'B2B')).resolves.toBe('CUS-001');
+
+      expect(mocks.createDocWithId).toHaveBeenCalledWith(
+        'customers',
+        'CUS-001',
+        expect.objectContaining({ consumerNumber: '', type: 'B2B', company: 'Biz Co' })
+      );
+    });
+  });
 });

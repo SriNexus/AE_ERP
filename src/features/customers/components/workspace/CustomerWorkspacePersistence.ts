@@ -45,6 +45,13 @@ export const CUSTOMER_DRAFT_FIELDS = [
   'address', 'city', 'state', 'pincode',
   'creditLimit', 'paymentTerms', 'notes',
   'assignedToId', 'assignedToName',
+  // Optional B2C-only field (Consumer Number — the electricity connection
+  // consumer number). Plain string field, same additive delta/validation
+  // every other field here already uses — not a new storage structure.
+  // Never required for B2B or B2C; CustomerWorkspaceEditor.tsx only renders
+  // its input under the B2C branch, but leaving it in this shared list
+  // (rather than a B2C-only sub-list) matches every other field here.
+  'consumerNumber',
 ] as const;
 
 export type CustomerDraftField = typeof CUSTOMER_DRAFT_FIELDS[number];
@@ -126,6 +133,7 @@ const FIELD_LABELS: Record<CustomerDraftField, string> = {
   address: 'Address', city: 'City', state: 'State', pincode: 'Pincode',
   creditLimit: 'Credit Limit', paymentTerms: 'Payment Terms', notes: 'Notes',
   assignedToId: 'Assigned Salesperson', assignedToName: 'Assigned Salesperson',
+  consumerNumber: 'Consumer Number',
 };
 
 /**

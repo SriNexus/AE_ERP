@@ -139,6 +139,7 @@ export function CustomerWorkspaceDialogs({ ctx }: CustomerWorkspaceDialogsProps)
               <Input label="Monthly Bill Amount (₹)" type="number" value={b2cForm.monthlyBillAmount} onChange={e => setB2cForm((f: any) => ({ ...f, monthlyBillAmount: e.target.value }))} placeholder="e.g. 2500" />
               <Input label="Sanction Load (kW)" type="number" value={b2cForm.sanctionLoad} onChange={e => setB2cForm((f: any) => ({ ...f, sanctionLoad: e.target.value }))} placeholder="e.g. 5" />
             </FormRow>
+            <Input label="Consumer Number (Optional)" value={b2cForm.consumerNumber} onChange={e => setB2cForm((f: any) => ({ ...f, consumerNumber: e.target.value }))} placeholder="Electricity connection consumer number" />
             <Select label="Roof Type" value={b2cForm.roofType} onChange={e => setB2cForm((f: any) => ({ ...f, roofType: e.target.value }))}                    options={[{ label: 'Select Roof Type', value: '' }, ...ROOF_TYPES.map((r: string) => ({ label: r, value: r }))]} />
             <div>
               <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-1.5 uppercase tracking-wide">Electricity Bill Upload</label>
