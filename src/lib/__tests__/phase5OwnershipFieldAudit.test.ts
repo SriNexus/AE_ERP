@@ -32,9 +32,23 @@ const dispatchDetailPageSrc = readFileSync(resolve(__dirname, '../../pages/Dispa
 
 const AUTH_C1_COLLECTIONS = ['leads', 'customers', 'quotations', 'orders', 'products', 'vendors', 'cases', 'loan_applications'];
 
-describe('AUTH-C1 — none of the 8 collections have a dedicated firestore.rules match block (still true, re-verified)', () => {
-  for (const collection of AUTH_C1_COLLECTIONS) {
-    it(`no dedicated "match /${collection}/" block exists`, () => {
+// Phase 7 deployed dedicated ownership-scoped match blocks for the only two
+// AUTH-C1 collections that actually have a role seeded narrower than 'all'
+// (Manager/TL=team, Partner=self) — see leadsOwnershipScope /
+// customersOwnershipScope emulator suites. The other six remain on the
+// generic company-scoped fallback (no role is seeded self/team on them, so
+// a dedicated block would be a pure no-op — BD-1/BD-2/BD-9, RESOLVED).
+const AUTH_C1_ENFORCED = ['customers', 'leads'];
+const AUTH_C1_STILL_ON_FALLBACK = AUTH_C1_COLLECTIONS.filter((c) => !AUTH_C1_ENFORCED.includes(c));
+
+describe('AUTH-C1 — Phase 7 status per collection (re-verified against firestore.rules)', () => {
+  for (const collection of AUTH_C1_ENFORCED) {
+    it(`${collection}: HAS a dedicated ownership-scoped match block (Phase 7)`, () => {
+      expect(firestoreRulesSrc).toMatch(new RegExp(`match /${collection}/\\{`));
+    });
+  }
+  for (const collection of AUTH_C1_STILL_ON_FALLBACK) {
+    it(`${collection}: still has NO dedicated match block — no role seeded narrower than 'all', a block would be a no-op`, () => {
       expect(firestoreRulesSrc).not.toMatch(new RegExp(`match /${collection}/\\{`));
     });
   }
