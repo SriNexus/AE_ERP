@@ -129,9 +129,21 @@ async function main() {
   console.log('[2/5] Seed complete.');
 
   console.log('[3/5] Starting app in emulator mode...');
+  // Vite's loadEnv() gives process.env priority over .env.* files, so any
+  // ambient VITE_* variables in the shell (e.g. a dev machine whose global
+  // profile exports the PRODUCTION VITE_FIREBASE_* values) would silently
+  // override .env.emulator.local and point the app at the REAL Firebase
+  // project instead of the local emulators. Strip every VITE_* variable so
+  // `--mode emulator` + .env.emulator.local alone decide the config.
+  const appEnv = { ...process.env };
+  for (const key of Object.keys(appEnv)) {
+    if (key.startsWith('VITE_')) delete appEnv[key];
+  }
+  appEnv.FIRESTORE_EMULATOR_HOST = seedEnv.FIRESTORE_EMULATOR_HOST;
+  appEnv.FIREBASE_AUTH_EMULATOR_HOST = seedEnv.FIREBASE_AUTH_EMULATOR_HOST;
   const app = spawnTracked('npx', ['vite', '--mode', 'emulator', '--port', String(APP_PORT), '--strictPort'], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, FIRESTORE_EMULATOR_HOST: seedEnv.FIRESTORE_EMULATOR_HOST, FIREBASE_AUTH_EMULATOR_HOST: seedEnv.FIREBASE_AUTH_EMULATOR_HOST },
+    env: appEnv,
   });
   app.stdout.on('data', (d) => process.stdout.write(`[app] ${d}`));
   app.stderr.on('data', (d) => process.stderr.write(`[app] ${d}`));
@@ -139,8 +151,13 @@ async function main() {
   console.log('[3/5] App up.');
 
   console.log('[4/5] Running Playwright...');
+  // Optional CLI passthrough, e.g. `node run-emulator-tests.mjs --grep "GroupAdmin Products"`
+  // to run ONE focused spec instead of the whole platform-e2e dir (the full
+  // platformGroupFlow.spec.ts is an ~8-minute flow with documented sandbox
+  // connectivity sensitivity).
+  const playwrightArgs = process.argv.slice(2);
   const pwExit = await new Promise((resolve) => {
-    const pw = spawn('npx', ['playwright', 'test', '--config', 'playwright.platform.config.ts'], {
+    const pw = spawn('npx', ['playwright', 'test', '--config', 'playwright.platform.config.ts', ...playwrightArgs], {
       stdio: 'inherit', shell: true,
       env: {
         ...process.env,
