@@ -884,11 +884,11 @@ service cloud.firestore {
       // their own dedicated blocks below and MUST be excluded here, or the
       // generic fallback would additively grant any same-company active user
       // create/update access.
-      // RBAC Master Plan Phase 7 (AUTH-C1): 'customers' added — it now has
-      // its own ownership-scoped match block below and MUST be excluded
-      // here, or the fallback's plain canReadCompanyScoped() would
+      // RBAC Master Plan Phase 7 (AUTH-C1): 'customers'/'leads' added — each
+      // now has its own ownership-scoped match block below and MUST be
+      // excluded here, or the fallback's plain canReadCompanyScoped() would
       // additively grant company-wide read regardless of the new predicate.
-      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'product_sku_locks', 'customer_returns', 'dispatch_serials', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references', 'customers'];
+      return collectionId in ['users', 'user_auth_maps', 'companies', 'roles', 'settings', 'audit_logs', 'dispatch', 'stock', 'stock_ledger', 'stock_reservations', 'stock_transfers', 'product_sku_locks', 'customer_returns', 'dispatch_serials', 'notifications', 'tasks', 'error_logs', 'customer_phone_locks', 'channel_partners', 'partner_wallet_transactions', 'commission_rules', 'tax_invoices', 'goods_receipts', 'document_counters', 'demo_operations', 'scheme_registrations', 'projects', 'surveys', 'engineering_designs', 'purchase_orders', 'installations', 'product_categories', 'service_tickets', 'qc_checks', 'commissioning_records', 'net_metering_applications', 'subsidy_applications', 'project_handovers', 'amc_contracts', 'generation_readings', 'security_logs', 'device_tokens', 'backup_metadata', 'groups', 'group_members', 'warehouses', 'platform_settings', 'attendance', 'employees', 'payroll', 'payments', 'banks', 'commission_records', 'settlements', 'biometric_face_references', 'customers', 'leads'];
     }
 
     match /companies/{companyId} {
@@ -2972,8 +2972,72 @@ service cloud.firestore {
     // exclusion list below so the fallback does not ALSO additively grant
     // company-wide read (see that function's own comment for why a
     // dedicated block alone never suppresses it).
+    //
+    // Read ORDER matters: groupAdminCanRead() FIRST (cheap, and — for a
+    // Group-scoped `where('groupId','==',...)` LIST query, the exact shape
+    // the app issues for a GroupAdmin — statically provable straight from
+    // the query constraint), THEN canReadCustomerScoped() (which carries a
+    // per-record get() for team-membership). Reversed, a GroupAdmin's
+    // Group-wide list query re-proved the expensive predicate for every
+    // candidate document and hit the 1000-expression LIST budget
+    // (live-bisected: multiTenantSecurity's GroupAdmin list-query battery).
+    // Matches this file's own "cheap-first ordering" principle elsewhere.
     match /customers/{customerId} {
-      allow read: if actorIsActive() && (canReadCustomerScoped(resource.data) || groupAdminCanRead(resource.data));
+      allow read: if actorIsActive() && (groupAdminCanRead(resource.data) || canReadCustomerScoped(resource.data));
+      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
+      allow delete: if false;
+    }
+
+    // RBAC Master Plan Phase 7 (AUTH-C1), collection 2 of 8. Same shape as
+    // customers immediately above — no dedicated block before Phase 7, fell
+    // through to the generic fallback. Read is now genuinely ownership-scoped
+    // for the 2 roles seeded narrower than 'all' on this module (Manager/
+    // TL=team, Partner=self, per BD-1/BD-2 — RESOLVED); every other role's
+    // read access, and create/update/delete for every role, are unchanged.
+    // Added to isSpecialCollection()'s exclusion list below.
+    //
+    // AUTH-C1a (known, unchanged by this commit): CSV-imported leads persist
+    // with assignedToId:'' (Leads.tsx's handleCsvImport). This predicate
+    // does not special-case that — it mirrors ownershipVisibility.ts's
+    // OWNERSHIP_FIELDS exactly, the SAME fields the client already
+    // query-scopes by today (buildOwnershipVisibilityQueryPlan()), so a
+    // still-unassigned CSV lead is exactly as visible/invisible to a
+    // team/self-scoped actor under this rule as it already is in the current
+    // app — this is turning an existing, already-live client-side
+    // restriction into a real Firestore boundary, not introducing a new
+    // restriction. Whether to ALSO add a mitigation (a company-wide-visible
+    // grace period, or a dry-run backfill assigning orphaned leads) remains
+    // an explicit, separate, not-yet-decided follow-up — not invented here.
+    function canReadLeadScoped(data) {
+      let authMap = get(authMapPath()).data;
+      let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
+      let actorUserId = authMap.userId;
+      let isTeamScoped = actor.role == 'Manager' || actor.role == 'TL';
+      let isSelfScoped = actor.role == 'Partner';
+      let ownedByMe = data.createdBy == actorUserId
+        || (hasOrgField(data, 'assignedToId') && data.assignedToId == actorUserId);
+      let ownedByMyPartner = isSelfScoped && hasOrgField(data, 'partnerId') && data.partnerId != null
+        && actor.get('channelPartnerId', '') == data.partnerId;
+      let teamOwned = isTeamScoped && (
+        isTeamMemberOf(actorUserId, data.createdBy)
+        || (hasOrgField(data, 'assignedToId') && isTeamMemberOf(actorUserId, data.assignedToId))
+      );
+      return sameCompany(data)
+        && (
+          isAdmin()
+          || !(isTeamScoped || isSelfScoped)
+          || ownedByMe
+          || ownedByMyPartner
+          || teamOwned
+        );
+    }
+
+    // Read ORDER: groupAdminCanRead() FIRST — see the customers block above
+    // for why (the GroupAdmin Group-wide list query hit the 1000-expression
+    // LIST budget when the per-record team-membership predicate ran first).
+    match /leads/{leadId} {
+      allow read: if actorIsActive() && (groupAdminCanRead(resource.data) || canReadLeadScoped(resource.data));
       allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
       allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
