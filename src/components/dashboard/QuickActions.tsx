@@ -66,18 +66,41 @@ const ROLE_MODULES: Record<UserRole, Module[]> = {
   [UserRole.Partner]:    ['leads', 'customers', 'partners', 'dashboard'],
 };
 
-function normalizeRole(role?: string): UserRole {
+// RBAC Phase 4 (hardcoded-check sweep): this used to fall through to
+// `return UserRole.Sales` for ANY role it didn't explicitly recognize —
+// silently mis-bucketing Manager, GroupAdmin, Procurement, TL, and the 5
+// project-scoped field roles (Surveyor/Engineer/InstallationLead/
+// ServiceTechnician/ComplianceOfficer) as "Sales" for this widget's
+// candidate-action pre-filter, restricting them to Sales' 5-module shortcut
+// list regardless of their own real, much broader canDo() grants (a false
+// DENY on the shortcut widget only — the underlying pages were always
+// correctly reachable via canDo()-gated routes/nav, this only affected which
+// shortcuts appeared here). `null` now means "no bucket pre-filter — let the
+// existing canDo() check below decide over the full action list," which can
+// only SURFACE actions a role's real permissions already grant; it cannot
+// over-grant anything, since canDo() remains the same, unchanged, final
+// gate it already was. The 8 explicitly-named roles' own ROLE_MODULES
+// bucket LISTS are UNCHANGED (possibly individually stale — out of scope for
+// this fix). One disclosed side effect: 'Partner' previously had no explicit
+// case either and silently hit the same Sales fallback as every other
+// unhandled role — it now correctly resolves to its own bucket. Verified
+// inert in production: routes.tsx's ProtectedLayout redirects any
+// isPartnerOnlyIdentity() session to /partner before this internal Dashboard
+// widget can ever render for them, so no live Partner session is affected.
+function normalizeRole(role?: string): UserRole | null {
   if (role === UserRole.Admin || role === 'Management') return UserRole.Admin;
   if (role === UserRole.Director) return UserRole.Director;
+  if (role === UserRole.Sales) return UserRole.Sales;
   if (role === UserRole.Accounts || role === 'Account Head' || role === 'Accounts Executive') return UserRole.Accounts;
   if (role === UserRole.Warehouse || role === 'Warehouse Executive') return UserRole.Warehouse;
   if (role === UserRole.Operations || role === 'Operations Head') return UserRole.Operations;
   if (role === UserRole.HR) return UserRole.HR;
-  return UserRole.Sales;
+  if (role === UserRole.Partner) return UserRole.Partner;
+  return null;
 }
 
-export function quickActionsForRole(role: UserRole): QuickAction[] {
-  const allowedModules = ROLE_MODULES[role] ?? [];
+export function quickActionsForRole(role: UserRole | null): QuickAction[] {
+  const allowedModules = role ? (ROLE_MODULES[role] ?? []) : ALL_ACTIONS.map((action) => action.module);
   return ALL_ACTIONS.filter(action =>
     allowedModules.includes(action.module) && canDo(action.module, action.permission)
   );
