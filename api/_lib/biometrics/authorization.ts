@@ -11,10 +11,24 @@
  * its own `requirePermission()` check rather than rules). Keeping this
  * module's decisions in lockstep with Phase 3's rules is deliberate, not
  * incidental — see this phase's completion record for the specific scope
- * boundary (self + same-company Admin/HR only; GroupAdmin cross-company
- * on-behalf-of enrollment is explicitly deferred, matching this phase's own
- * "avoid broad refactors" instruction — Phase 3's rules already support it
- * for a future extension of this module, nothing here forecloses it).
+ * boundary (self + same-company Admin/HR/GroupAdmin only; GroupAdmin
+ * cross-company, same-group on-behalf-of enrollment — the `sameGrp` branch
+ * `firestore.rules`' own `biometricCreateAllowed`/`biometricReadAllowed`
+ * already grant — remains explicitly deferred (RBAC Master Plan AUTH-D10
+ * completion record): `AuthenticatedUser` carries no `groupId` today, so
+ * there is no safe, existing way to verify a cross-company group match from
+ * this module without broadening that shared type — a change bigger than
+ * this fix's isolated scope. Nothing here forecloses that future extension).
+ *
+ * RBAC Master Plan AUTH-D10: the on-behalf-of role gate below used to check
+ * only `role !== 'Admin' && role !== 'HR'`, hardcoded without any GroupAdmin
+ * case — since GroupAdmin is a canonical alias of Admin everywhere else in
+ * this codebase (client `canDo()`, server `canDo()`, and this same rules
+ * file's own biometric functions), that was a false DENY, not an
+ * intentional restriction. Fixed by adding an explicit `role === 'GroupAdmin'`
+ * branch, mirroring `firestore.rules`' own raw-role-name style for this
+ * exact check (not a `canDo()`/permission-document lookup — see the
+ * completion record for why this is classified Bucket A, not Bucket B).
  *
  * Every function derives identity from `AuthenticatedUser` (already
  * resolved server-side by `api/_lib/auth.ts`'s `resolveAuthenticatedUser`,
@@ -64,13 +78,30 @@ export async function resolveEnrollmentTarget(
     return { targetUserId, targetCompanyId: auth.companyId };
   }
 
-  // On-behalf-of enrollment (Master Plan §11): Admin/HR, same company only,
-  // in this phase's scope. Owner/Super Admin bypass the role check but are
-  // still subject to the same-company anchor below unless explicitly
-  // platform-tier (isSuperAdmin already carries that intent elsewhere in
-  // this codebase's api/_lib modules).
-  if (auth.role !== 'Admin' && auth.role !== 'HR' && !auth.isSuperAdmin) {
-    throw notAuthorized('Only Admin or HR may enroll another employee\'s face.');
+  // On-behalf-of enrollment (Master Plan §11): Admin/HR/GroupAdmin, same
+  // company only, in this phase's scope. Owner/Super Admin bypass the role
+  // check but are still subject to the same-company anchor below unless
+  // explicitly platform-tier (isSuperAdmin already carries that intent
+  // elsewhere in this codebase's api/_lib modules).
+  //
+  // AUTH-D10: GroupAdmin added — it is a scope-extension alias of Admin
+  // everywhere else this codebase makes this exact distinction (client and
+  // server canDo(), and firestore.rules' own biometricCreateAllowed/
+  // biometricReadAllowed, which grant a same-company GroupAdmin actor via
+  // their `sameCo` branch identically to Admin/HR — GroupAdmin is not
+  // limited to the separate, ADDITIONAL `sameGrp` cross-company branch
+  // there). Deliberately a raw role-name check, not a canDo('edit',
+  // 'employees')-style permission lookup: firestore.rules enforces this
+  // exact boundary the same hardcoded way, independent of any company's
+  // customizable role-permission documents, because biometric embedding
+  // data is a materially more sensitive category than an ordinary module
+  // permission (see biometricReadAllowed's own comment) — routing it
+  // through a customizable permission would let a company's unrelated
+  // Employees-module role edit (e.g. granting Manager `employees:edit`)
+  // silently also grant biometric-enrollment authority, which is a new
+  // privilege escalation this fix must not introduce.
+  if (auth.role !== 'Admin' && auth.role !== 'HR' && auth.role !== 'GroupAdmin' && !auth.isSuperAdmin) {
+    throw notAuthorized('Only Admin, HR, or GroupAdmin may enroll another employee\'s face.');
   }
 
   const targetProfile = await deps.readUser(targetUserId);
