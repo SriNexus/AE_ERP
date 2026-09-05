@@ -27,6 +27,8 @@ const ordersPageSrc = readFileSync(resolve(__dirname, '../../pages/Orders.tsx'),
 const useGlobalBootSrc = readFileSync(resolve(__dirname, '../useGlobalBoot.ts'), 'utf-8');
 const ownershipVisibilitySrc = readFileSync(resolve(__dirname, '../ownershipVisibility.ts'), 'utf-8');
 const caseEngineSrc = readFileSync(resolve(__dirname, '../../engines/CaseEngine.ts'), 'utf-8');
+const projectVisibilitySrc = readFileSync(resolve(__dirname, '../projectVisibility.ts'), 'utf-8');
+const dispatchDetailPageSrc = readFileSync(resolve(__dirname, '../../pages/DispatchDetail.tsx'), 'utf-8');
 
 const AUTH_C1_COLLECTIONS = ['leads', 'customers', 'quotations', 'orders', 'products', 'vendors', 'cases', 'loan_applications'];
 
@@ -102,5 +104,20 @@ describe('AUTH-C4 — canReadProjectScoped() still unconditionally admits any no
     expect(match![0]).toContain('data.assignedInstaller == currentUserId()');
     expect(match![0]).toContain('data.salesOwner == currentUserId()');
     expect(match![0]).toContain('data.designerId == currentUserId()');
+  });
+});
+
+describe('BD-9 / AUTH-C4a — RESOLVED: the !isProjectScopedRole() default is intentional, not a gap (evidence pinned so a future phase does not "fix" a shipped feature)', () => {
+  it("the client's own dedicated project-visibility engine (projectVisibility.ts) independently falls back to 'all' for any role name not in its own field-role set — the SAME default firestore.rules' !isProjectScopedRole() grants, confirming the two were deliberately kept in lockstep, not accidentally aligned", () => {
+    expect(projectVisibilitySrc).toContain("const PROJECT_SCOPED_ROLE_NAMES = new Set([");
+    expect(projectVisibilitySrc).toContain("return PROJECT_SCOPED_ROLE_NAMES.has(normalizedKey(roleName)) ? 'self' : 'all';");
+  });
+
+  it('DispatchDetail.tsx — a real, currently-shipped page opened by Warehouse/Operations/Accounts/Sales alike — unconditionally fetches the full company projects list with no permission gate, to resolve and link a dispatch\'s parent project; this is the concrete feature that depends on the "all" default above and would break if it were narrowed', () => {
+    expect(dispatchDetailPageSrc).toContain('getAll(COLLECTIONS.PROJECTS)');
+    // No canDo/permission gate wraps this query — every role that can open
+    // a Dispatch Detail page reaches it, including roles with zero explicit
+    // `projects` module grant (Warehouse, Operations, Accounts, Sales).
+    expect(dispatchDetailPageSrc).not.toMatch(/canDo\([^)]*'projects'\)[\s\S]{0,80}getAll\(COLLECTIONS\.PROJECTS\)/);
   });
 });

@@ -104,6 +104,32 @@ describe('project visibility helpers', () => {
     expect(plan.queries).toHaveLength(10);
   });
 
+  it('BD-9/AUTH-C4a (RESOLVED — intentional): a role with no `projects` grant in its own LEGACY_SYSTEM_ROLES definition still resolves to an explicit, seeded "all" visibility, not "self" — matching firestore.rules\' !isProjectScopedRole() catch-all by design, not by accident', () => {
+    // Warehouse, Accounts, HR, Operations, and Sales define no `projects` key
+    // at all in their LEGACY_SYSTEM_ROLES source (unlike Partner/Manager,
+    // which explicitly opt into 'self'/'team', or the 5 field roles, named
+    // directly in PROJECT_SCOPED_ROLE_NAMES). legacyModulePermissions()
+    // normalizes every undeclared module to view:false/etc. but STILL
+    // stamps an explicit visibility:'all' on it (the same normalization
+    // BD-1/BD-2 already confirmed for Sales' leads/customers/quotations) —
+    // so the persisted role document itself, not just a role-name fallback,
+    // already says 'all' here. This is the SAME default firestore.rules'
+    // canReadProjectScoped() grants via !isProjectScopedRole(), and it is
+    // deliberately relied on today by DispatchDetail.tsx, which fetches the
+    // full company projects list (getAll(COLLECTIONS.PROJECTS), no
+    // permission gate) to resolve and link a dispatch's parent project —
+    // for Warehouse/Operations/Accounts/Sales alike, none of which hold a
+    // real `projects` grant. Narrowing this default would break that
+    // shipped feature for zero security gain.
+    for (const roleName of ['Warehouse', 'Accounts', 'HR', 'Operations', 'Sales']) {
+      const roleDoc = roleDocs.find((role) => role.name === roleName);
+      expect(roleDoc?.permissions.projects?.view).toBe(false);
+      expect(roleDoc?.permissions.projects?.visibility).toBe('all');
+      expect(getProjectVisibilityMode(roleName, roleDoc)).toBe('all');
+      expect(canAccessProjectRecord({ assignedSurveyor: 'SOMEONE-ELSE' }, 'USR-1', roleName, roleDoc)).toBe(true);
+    }
+  });
+
   it('optionally applies project row visibility through canDo', () => {
     useAppStore.setState({
       user: { id: 'USR-1', name: 'Surveyor', email: 'surveyor@example.com', role: 'Surveyor', companyId: 'COMP-1' },
