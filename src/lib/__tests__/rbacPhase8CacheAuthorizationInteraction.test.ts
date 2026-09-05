@@ -34,6 +34,7 @@ const ADMIN_A_FULL = {
   permissions: {
     roles: { view: true, create: true, edit: true, delete: true },
     customers: { view: true, create: true, edit: true },
+    products: { view: true, create: true, edit: true, delete: true },
     payouts: { view: true, disburse: true },
     scheme_registration: { view: true, import: true },
     dispatch: { view: true, view_pricing: true },
@@ -216,6 +217,90 @@ describe('Phase 7 regression anchor (§16): the two load-bearing legacy checks P
       } as never,
     });
     expect(canDo('edit', 'installations')).toBe(false);
+  });
+});
+
+describe('GroupAdmin — canDo resolves through the FOCUSED company\'s Admin template, and a permission edit propagates (Phase 8 runtime closure)', () => {
+  // GroupAdmin_A: home CO-A, group GROUP-A. resolveCompatibleRole('GroupAdmin')
+  // -> 'Admin' (EXACT_ROLE_COMPATIBILITY), so canDo() reads whichever company's
+  // Admin doc is currently in permissionCache — and useGlobalBoot's
+  // roles_global query is keyed by resolveRolesGlobalCacheCompanyId(activeCompanyId,…),
+  // so switching the focused company refetches and rebuilds the cache with THAT
+  // company's Admin permissions. This is the "administrative scope" model:
+  // a GroupAdmin acting on an in-group company gets that company's own Admin
+  // customizations, never a blanket bypass.
+  beforeEach(() => {
+    useAppStore.setState({
+      user: { id: 'ga-1', name: 'GA A', email: 'ga@test.erp', role: 'GroupAdmin', companyId: 'CO-A', groupId: 'GROUP-A', isSuperAdmin: false, isOwner: false },
+      activeCompanyId: 'CO-A',
+      isAuthenticated: true,
+      permissionCache: { ready: true, roles: { admin: ADMIN_A_FULL }, permissions: {} } as never,
+      roleData: null,
+    });
+  });
+
+  it('focused on their HOME company: Product create/edit/delete/view all resolve TRUE via the home Admin template', () => {
+    expect(canDo('products', 'create')).toBe(true);
+    expect(canDo('products', 'edit')).toBe(true);
+    expect(canDo('products', 'delete')).toBe(true);
+    expect(canDo('products', 'view')).toBe(true);
+  });
+
+  it('focused on an IN-GROUP SIBLING whose Admin template is more restricted: canDo reflects the SIBLING\'s permissions, not the home company\'s', () => {
+    // The bootstrap effect swaps permissionCache wholesale on a company switch
+    // (roles_global re-keys to 'CO-B' and refetches CO-B's Admin doc).
+    useAppStore.setState({
+      activeCompanyId: 'CO-B',
+      permissionCache: { ready: true, roles: { admin: ADMIN_B_RESTRICTED }, permissions: {} } as never,
+    });
+    // ADMIN_B_RESTRICTED grants customers.view only (no create/edit) and has
+    // no products key at all -> fails closed for the missing module.
+    expect(canDo('customers', 'view')).toBe(true);
+    expect(canDo('customers', 'create')).toBe(false);
+    expect(canDo('products', 'create')).toBe(false); // missing-module -> denied, not defaulted true
+  });
+
+  it("the roles_global cache key follows the GroupAdmin's focused company (home -> sibling -> home), never colliding", () => {
+    expect(resolveRolesGlobalCacheCompanyId('CO-A', 'CO-A')).toBe('CO-A');
+    expect(resolveRolesGlobalCacheCompanyId('CO-B', 'CO-A')).toBe('CO-B'); // sibling focus -> sibling-keyed cache
+    expect(resolveRolesGlobalCacheCompanyId('group', 'CO-A')).toBe('group');
+    expect(resolveRolesGlobalCacheCompanyId('CO-A', 'CO-A')).toBe('CO-A');
+  });
+
+  it("in the 'group' aggregate view: roles create/edit/delete are denied (Phase 4 context rule), but other modules resolve against the home Admin template (groupViewPermissionCollapseFix — roles_global fetches home roles in 'group' view)", () => {
+    useAppStore.setState({ activeCompanyId: 'group' });
+    expect(canDo('roles', 'edit')).toBe(false);
+    expect(canDo('roles', 'create')).toBe(false);
+    // Non-roles modules keep working off the home Admin doc still in cache.
+    expect(canDo('products', 'view')).toBe(true);
+    expect(canDo('customers', 'edit')).toBe(true);
+  });
+
+  it('a permission EDIT to the focused company\'s Admin doc propagates to the GroupAdmin\'s own canDo after the same invalidation pair Roles.tsx issues', async () => {
+    const qc = new QueryClient();
+    const key = ['roles_global', resolveRolesGlobalCacheCompanyId('CO-A', 'CO-A')];
+    // Pre-edit: home Admin has products.create true.
+    expect(canDo('products', 'create')).toBe(true);
+
+    qc.setQueryData(key, [ADMIN_A_FULL]);
+    await qc.invalidateQueries({ queryKey: ['roles'] });
+    await qc.invalidateQueries({ queryKey: ['roles_global'] }); // prefix-matches ['roles_global','CO-A']
+    expect(qc.getQueryState(key)?.isInvalidated).toBe(true);
+
+    // The refetch lands the edited doc (products.create revoked) and the
+    // bootstrap effect replaces permissionCache wholesale.
+    const edited = { ...ADMIN_A_FULL, permissions: { ...ADMIN_A_FULL.permissions, products: { view: true, create: false, edit: true, delete: false } } };
+    useAppStore.setState({ permissionCache: { ready: true, roles: { admin: edited }, permissions: {} } as never });
+    expect(canDo('products', 'create')).toBe(false); // stale TRUE did not survive
+    expect(canDo('products', 'edit')).toBe(true);
+  });
+
+  it('GroupAdmin never gets the SuperAdmin short-circuit (isSuperAdmin is false) — every decision goes through the focused company\'s role doc', () => {
+    useAppStore.setState({
+      permissionCache: { ready: true, roles: { admin: { id: 'CO-A_Admin', name: 'Admin', companyId: 'CO-A', schemaVersion: 1, permissions: { products: { view: true } } } }, permissions: {} } as never,
+    });
+    expect(canDo('products', 'view')).toBe(true);
+    expect(canDo('products', 'delete')).toBe(false); // not granted -> denied (no bypass)
   });
 });
 
