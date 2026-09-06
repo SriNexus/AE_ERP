@@ -57,6 +57,12 @@ function normalise(src) {
     .trim();
 }
 
+/** collapse ALL whitespace (incl. newlines) to single spaces — for marker checks
+ *  that must not care whether an expression is wrapped across lines. */
+function flatten(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1').replace(/\s+/g, ' ');
+}
+
 async function main() {
   const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/firebase'] });
   const client = await auth.getClient();
@@ -78,8 +84,9 @@ async function main() {
 
   let ok = true;
 
-  // 1. required markers present in the DEPLOYED text
-  const missing = REQUIRED_MARKERS.filter((m) => !deployed.includes(m));
+  // 1. required markers present in the DEPLOYED text (whitespace/newline-insensitive)
+  const deployedFlat = flatten(deployed);
+  const missing = REQUIRED_MARKERS.filter((m) => !deployedFlat.includes(flatten(m).trim()));
   if (missing.length) {
     ok = false;
     console.error('\n✗ DEPLOYED rules are MISSING required Phase-8 markers:');
