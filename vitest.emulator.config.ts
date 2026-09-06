@@ -16,6 +16,7 @@ export default defineConfig({
       'src/lib/__tests__/groupAdminFullGroupAccess.emulator.test.ts',
       'src/lib/__tests__/groupAdminProductCrud.emulator.test.ts',
       'src/lib/__tests__/settingsPersonalOwnershipBackfillFix.emulator.test.ts',
+      'src/lib/__tests__/settingsBudgetFirstLoginMigration.emulator.test.ts',
       'src/lib/__tests__/rolesSystemRolePermissionEditFix.emulator.test.ts',
       'src/lib/__tests__/missingIsSuperAdminFieldFix.emulator.test.ts',
       'src/lib/__tests__/phase8GroupPerformance.emulator.test.ts',

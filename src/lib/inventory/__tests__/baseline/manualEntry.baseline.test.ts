@@ -39,6 +39,7 @@ vi.mock('../../../firestore', () => ({
   deleteDocById: vi.fn(),
   fmtDate: (v: unknown) => String(v ?? ''),
   resolveWriteGroupId: () => 'grp-1',
+  resolveWriteCompanyId: () => 'comp-1',
   genId: { generic: (p = 'GEN') => `${p}-${++mocks.idCounter}` },
 }));
 vi.mock('../../../workflow', () => ({

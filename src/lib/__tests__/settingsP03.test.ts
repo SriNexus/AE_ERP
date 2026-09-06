@@ -57,6 +57,14 @@ describe('P03 Appearance settings', () => {
     const rules = readFileSync('firestore.rules', 'utf8');
     expect(rules).toContain('function settingsCreateAllowed(data)');
     expect(rules).toContain("data.section in ['appearance', 'notifications']");
-    expect(rules).toContain("actor.role == 'Admin' || isSuperAdminFlag(actor)) && dataSameCompany");
+    // Phase 8 (F-13 re-engineering, second pass): the composite dataSameCompany/
+    // dataSameGroup lets were inlined lazily per branch (live-reproduced budget
+    // exhaustion on useTheme()'s first-login personal-settings migration when
+    // the client dispatches before its group identity hydrates). The guarantees
+    // this assertion protects are UNCHANGED: the admin branch still requires
+    // Admin/owner/super AND same-active-company (hasCompanyId + map.companyId
+    // equality + companyGroupIsActive), just expressed inline.
+    expect(rules).toContain("isOwnerIdentity() || actor.role == 'Admin' || isSuperAdminFlag(actor)");
+    expect(rules).toContain('hasCompanyId(data) && data.companyId == authMap.companyId && companyGroupIsActive(data)');
   });
 });

@@ -203,7 +203,15 @@ export function useSavePayment(onSuccess: (payment?: any) => void) {
       let orderCreatorId = '';
       if (amount <= 0) throw new Error('Payment amount must be greater than zero');
 
-      const groupId = resolveWriteGroupId(activeCompanyId);
+      // Canonical write-time tenant — never the raw activeCompanyId. In the
+      // GroupAdmin 'group' aggregate view the sentinel would otherwise be
+      // persisted as the payment's companyId (the same leak class useSaveProduct
+      // had before Phase 8), and the rules' groupAdminCanCreate() would deny
+      // the write. resolveWriteCompanyId() resolves the sentinel to the
+      // focused real company (sibling included) exactly like every
+      // createDocWithId-based writer.
+      const writeCompanyId = resolveWriteCompanyId();
+      const groupId = resolveWriteGroupId(writeCompanyId);
 
       await runTransaction(db, async (transaction) => {
         const paymentRef = doc(db, COLLECTIONS.PAYMENTS, id);
@@ -220,7 +228,7 @@ export function useSavePayment(onSuccess: (payment?: any) => void) {
         if (data.orderId && !order) {
           throw new Error(`Order ${data.orderId} not found`);
         }
-        if (order && order.companyId !== activeCompanyId) {
+        if (order && order.companyId !== writeCompanyId) {
           throw new Error(`Order ${data.orderId} does not belong to the active company`);
         }
 
@@ -234,7 +242,7 @@ export function useSavePayment(onSuccess: (payment?: any) => void) {
           ...(order ? paymentLinkageFromOrder(order) : {}),
           id,
           amount,
-          companyId: activeCompanyId,
+          companyId: writeCompanyId,
           // Same "Group Admin cannot add stock" bug class: a raw Firestore
           // transaction bypasses createDocWithId()'s automatic groupId
           // stamping (Master Plan §3.4), and firestore.rules'
@@ -264,7 +272,7 @@ export function useSavePayment(onSuccess: (payment?: any) => void) {
         piSnaps.forEach((piSnap) => {
           if (!piSnap.exists() || remaining <= 0) return;
           const pi = piSnap.data() as any;
-          if (pi.companyId !== activeCompanyId) {
+          if (pi.companyId !== writeCompanyId) {
             throw new Error(`PI ${piSnap.id} does not belong to the active company`);
           }
           const piTotal = Number(pi.total) || 0;

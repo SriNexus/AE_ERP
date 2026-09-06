@@ -388,6 +388,16 @@ export function useSaveStockEntry(onSuccess: () => void) {
       const reference = String(data.reference || '').trim();
       const reasonCode = reference || String(data.notes || '').trim() || `Manual stock ${String(data.type).toLowerCase()}`;
 
+      // Canonical write-time tenant — never the raw activeCompanyId. In the
+      // GroupAdmin 'group' aggregate view the sentinel would otherwise be
+      // stamped as the stock summary's companyId (the same leak class
+      // useSaveProduct had before Phase 8) and the rules' warehouseActorCan
+      // Create/groupAdminCanCreate would deny the movement.
+      // resolveWriteCompanyId() resolves the sentinel to the focused real
+      // company (sibling included), and applyStockMovement re-derives the
+      // authoritative groupId from it.
+      const writeCompanyId = resolveWriteCompanyId();
+
       const result = await applyStockMovement({
         movementType,
         productId: data.productId,
@@ -397,7 +407,7 @@ export function useSaveStockEntry(onSuccess: () => void) {
         sourceType: 'manual',
         sourceId: reference || genId.generic('STK'),
         idempotencyKey: `${movementType}:manual:${genId.generic('STK')}`,
-        companyId: activeCompanyId,
+        companyId: writeCompanyId,
         actorId: user.id,
         reasonCode,
         notes: data.notes,

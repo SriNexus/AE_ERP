@@ -50,7 +50,15 @@ export function notifyUsers(
 
 export function resolveWorkflowCompanyId() {
   const state = useAppStore.getState();
-  const companyId = state.activeCompanyId && state.activeCompanyId !== 'all'
+  // Tenant sentinels ('all' — owner platform view; 'group' — GroupAdmin group
+  // aggregate view) are never real write targets. In the group view the old
+  // check let 'group' through as a "real" companyId, so a GroupAdmin's
+  // workflow writes (opening stock, damage write-offs, GRN, transfers, ...)
+  // stamped the sentinel as the tenant and the rules' groupAdminCanCreate()
+  // denied them — the same leak class useSaveProduct had before Phase 8.
+  // Fall through to the focused company context (the sibling the GroupAdmin
+  // is acting on), mirroring resolveWriteCompanyId()'s resolution order.
+  const companyId = state.activeCompanyId && state.activeCompanyId !== 'all' && state.activeCompanyId !== 'group'
     ? state.activeCompanyId
     : state.company?.id || state.user?.companyId || '';
   if (!companyId) throw new Error('Active company is required');

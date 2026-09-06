@@ -214,10 +214,16 @@ export async function saveSettings(
 
   const scope = getSectionScope(section);
   // Canonical tenant resolution — never the neutral 'default' placeholder.
-  const companyId = resolveWriteCompanyId();
-  if (scope === 'company' && !companyId) {
+  const focusCompanyId = resolveWriteCompanyId();
+  if (scope === 'company' && !focusCompanyId) {
     throw new Error('Tenant context is not resolved: cannot save company settings without a valid companyId.');
   }
+  // USER-scoped sections (appearance/notifications/my-profile/…) are owned by
+  // the USER's home company — mirroring resetSettings() below. Stamping the
+  // FOCUS company (e.g. a same-group sibling during company switching) onto a
+  // personal doc makes sameCompany unprovable for every later save of that
+  // doc and silently breaks personal settings for the rest of the session.
+  const companyId = scope === 'company' ? focusCompanyId : (state.user?.companyId || focusCompanyId);
   const docId = resolveDocId(scope, section);
 
   const payload = sanitizePayload({
