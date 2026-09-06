@@ -64,6 +64,16 @@ function fullAdminPermissions() {
 
 async function login(page: Page, email: string, password: string) {
   await page.goto('/login');
+  // The login route is a lazy chunk behind SafePage's Suspense; on a cold /
+  // busy dev server the first paint can stall on an empty shell (observed
+  // intermittently). Retry the navigation until the form is really there —
+  // same proven recovery as groupAdminModules.spec.ts.
+  await expect(async () => {
+    if (!(await page.locator('#login-email:visible').isVisible().catch(() => false))) {
+      await page.goto('/login');
+    }
+    await expect(page.locator('#login-email:visible')).toBeVisible({ timeout: 5_000 });
+  }).toPass({ timeout: 60_000 });
   await page.locator('#login-email:visible').fill(email);
   await page.locator('#login-password:visible').fill(password);
   await page.locator('button[type="submit"]:visible').click();
