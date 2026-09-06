@@ -64,6 +64,29 @@ export function isRulesPermissionDenied(err: unknown): boolean {
 }
 
 /**
+ * One-time-per-session, LOUD signal that the Product create/edit path had to
+ * abandon its atomic transaction and use the read-free `writeBatch` fallback.
+ * This ONLY happens when the Firebase project's DEPLOYED Firestore ruleset is
+ * older than this repo's `firestore.rules` (no `resource == null` guard on the
+ * `products` / `product_sku_locks` read path). It is a COMPATIBILITY BRIDGE,
+ * not the intended architecture: while it runs, SKU-uniqueness is best-effort
+ * rather than strictly atomic. Deploying `firestore.rules` removes the need
+ * for it entirely (the transaction then succeeds and this never fires).
+ */
+let staleRulesBridgeWarned = false;
+function warnProductStaleRulesBridge(): void {
+  if (staleRulesBridgeWarned) return;
+  staleRulesBridgeWarned = true;
+  // eslint-disable-next-line no-console
+  console.error(
+    '[inventory] Product write used the stale-ruleset writeBatch fallback: the ' +
+    'deployed Firestore rules predate the products/product_sku_locks `resource == null` ' +
+    'guard, so the atomic transaction was denied. SKU uniqueness is best-effort until ' +
+    'firestore.rules is deployed. This is a compatibility bridge, not the target state.',
+  );
+}
+
+/**
  * INVENTORY-09 (§7) — acquire the SKU lock for a NEW product atomically with
  * the product doc itself. A blank SKU is never locked.
  *
@@ -141,6 +164,7 @@ export async function createProductWithSkuLock(
     if (err instanceof SkuLockConflictError) throw err;
     if ((err as { message?: string })?.message === idCollisionMessage) throw err;
     if (!isRulesPermissionDenied(err)) throw err;
+    warnProductStaleRulesBridge();
     // fall through to the read-free FALLBACK path (see the doc comment).
   }
 
@@ -232,6 +256,7 @@ export async function updateProductWithSkuLock(
   } catch (err) {
     if (err instanceof SkuLockConflictError) throw err;
     if (!isRulesPermissionDenied(err)) throw err;
+    warnProductStaleRulesBridge();
     // FALLBACK (see createProductWithSkuLock): the deployed ruleset denies the
     // transaction's get() of the not-yet-created new-SKU lock. Best-effort
     // uniqueness check + a read-free atomic writeBatch.

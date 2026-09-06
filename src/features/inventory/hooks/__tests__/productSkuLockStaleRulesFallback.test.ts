@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * INVENTORY-09 follow-up — Product create/edit must succeed against a DEPLOYED
@@ -13,13 +13,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * against the real rules; this covers the client-side fallback logic.
  */
 
+type Snap = { exists: () => boolean; data: () => any };
+
 const fsMocks = vi.hoisted(() => {
   const batch = { set: vi.fn(), commit: vi.fn(async () => undefined) };
   return {
     batch,
     runTransaction: vi.fn(),
     writeBatch: vi.fn(() => batch),
-    getDoc: vi.fn(async () => ({ exists: () => false, data: () => undefined })),
+    getDoc: vi.fn((): Promise<{ exists: () => boolean; data: () => any }> =>
+      Promise.resolve({ exists: () => false, data: () => undefined })),
     counter: 0,
   };
 });
@@ -65,6 +68,8 @@ import { SkuLockConflictError } from '../../../../lib/inventory/skuLock';
 const PERMISSION_DENIED = Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' });
 const OPTS = { companyId: 'CO-1', groupId: 'GRP-1', actorId: 'U-1' };
 
+let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
 beforeEach(() => {
   for (const k of Object.keys(firestoreStore)) delete firestoreStore[k];
   fsMocks.counter = 0;
@@ -74,6 +79,11 @@ beforeEach(() => {
   fsMocks.runTransaction.mockReset();
   fsMocks.getDoc.mockReset();
   fsMocks.getDoc.mockResolvedValue({ exists: () => false, data: () => undefined });
+  consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  consoleErrorSpy.mockRestore();
 });
 
 describe('createProductWithSkuLock — stale-ruleset fallback', () => {
@@ -85,6 +95,9 @@ describe('createProductWithSkuLock — stale-ruleset fallback', () => {
     ).resolves.toBeUndefined();
 
     expect(fsMocks.writeBatch).toHaveBeenCalledTimes(1);
+    // the fallback is LOUD — it emits a one-time-per-session console.error so a
+    // stale-ruleset deployment is visible, never silently accepted as normal.
+    expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('stale-ruleset writeBatch fallback'));
     const targets = fsMocks.batch.set.mock.calls.map((c) => (c[0] as any).__col);
     expect(targets).toEqual(expect.arrayContaining(['products', 'product_sku_locks']));
     // the product doc carries the resolved tenant, never a UI sentinel
@@ -112,9 +125,11 @@ describe('createProductWithSkuLock — stale-ruleset fallback', () => {
 
   it('a real SKU conflict thrown INSIDE the transaction is surfaced, never retried as a fallback', async () => {
     fsMocks.runTransaction.mockImplementation(async (_db: unknown, fn: any) => {
-      const get = vi.fn()
-        .mockResolvedValueOnce({ exists: () => false, data: () => undefined })                       // productRef — no collision
-        .mockResolvedValueOnce({ exists: () => true, data: () => ({ productId: 'OTHER', isDeleted: false }) }); // lockRef — held by another
+      const snaps: Snap[] = [
+        { exists: () => false, data: () => undefined },                       // productRef — no collision
+        { exists: () => true, data: () => ({ productId: 'OTHER', isDeleted: false }) }, // lockRef — held by another
+      ];
+      const get = vi.fn(() => Promise.resolve(snaps.shift() as Snap));
       return fn({ get, set: vi.fn() });
     });
     await expect(

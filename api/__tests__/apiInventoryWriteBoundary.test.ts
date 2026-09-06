@@ -21,7 +21,8 @@ const writeSpy = vi.hoisted(() => ({
   create: vi.fn(async () => undefined),
   set: vi.fn(async () => undefined),
   add: vi.fn(async () => ({ id: 'generated-id' })),
-  get: vi.fn(async () => ({ exists: false, data: () => null })),
+  get: vi.fn((): Promise<{ exists: boolean; id?: string; data: () => any }> =>
+    Promise.resolve({ exists: false, data: () => null })),
 }));
 
 vi.mock('../_lib/firebase', () => ({
