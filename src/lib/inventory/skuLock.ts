@@ -42,3 +42,18 @@ export interface ProductSkuLockDoc {
 export function lockHeldByAnotherProduct(lock: Partial<ProductSkuLockDoc> | null | undefined, productId: string): boolean {
   return !!lock && lock.isDeleted !== true && lock.productId !== productId;
 }
+
+/**
+ * A genuine SKU-uniqueness conflict (this SKU is already held by another
+ * product in the same company) — as opposed to any other failure the
+ * create/edit path may hit (a rules PERMISSION_DENIED, a network error, …).
+ * A dedicated class so the caller's fallback path can tell "the user must
+ * pick a different SKU" apart from "retry with a different mechanism".
+ */
+export class SkuLockConflictError extends Error {
+  readonly code = 'sku-conflict';
+  constructor(sku: unknown) {
+    super(`SKU "${String(sku ?? '')}" is already used by another product in this company`);
+    this.name = 'SkuLockConflictError';
+  }
+}

@@ -9,7 +9,7 @@ import { sanitizeFirestoreData } from '../../../lib/sanitizer';
 // INVENTORY-05a: single canonical stock-summary identity — the local copy was
 // a byte-identical duplicate of this one; deleted so there is ONE source.
 import { stockSummaryId } from '../../../lib/workflow';
-import { normalizeSku, productSkuLockId, lockHeldByAnotherProduct, type ProductSkuLockDoc } from '../../../lib/inventory/skuLock';
+import { normalizeSku, productSkuLockId, lockHeldByAnotherProduct, SkuLockConflictError, type ProductSkuLockDoc } from '../../../lib/inventory/skuLock';
 import { checkProductDeleteGuard } from '../../../lib/inventory/masterDataGuards';
 import { useCurrentUser, useAppStore } from '../../../store/useAppStore';
 import { queryKeys } from '../../../lib/queryKeys';
@@ -46,13 +46,44 @@ export async function assertMasterDataIdAvailable(collection: string, id: string
 }
 
 /**
+ * A Firestore rules PERMISSION_DENIED — as opposed to an application-level
+ * throw (a real SKU conflict, a validation error) or a transient network
+ * fault. Used to decide whether the Product create/edit path should fall
+ * back from its transaction (which reads not-yet-created docs) to a
+ * read-free write path on a project whose deployed ruleset predates the
+ * `resource == null` guard that firestore.rules in this repo carries.
+ */
+export function isRulesPermissionDenied(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === 'permission-denied' || code === 'PERMISSION_DENIED') return true;
+  const message = String((err as { message?: unknown } | null)?.message ?? err ?? '').toLowerCase();
+  return message.includes('permission-denied')
+    || message.includes('permission_denied')
+    || message.includes('missing or insufficient permissions')
+    || message.includes('insufficient permissions');
+}
+
+/**
  * INVENTORY-09 (§7) — acquire the SKU lock for a NEW product atomically with
- * the product doc itself (one transaction; mirrors
- * `createCustomerProjectionInTransaction`). A blank SKU is never locked.
- * CONFIGURED branch: a real Firestore transaction — two concurrent creates of
- * the same (company, SKU) can never both win (INV: at most one active lock
- * per normalized SKU per company). DEMO branch: sequential best-effort
- * (same risk class as every other demo-mode write in this codebase).
+ * the product doc itself. A blank SKU is never locked.
+ *
+ * CONFIGURED branch — two tiers:
+ *  1. PREFERRED: one Firestore transaction (mirrors
+ *     `createCustomerProjectionInTransaction`) — the strict guarantee that
+ *     two concurrent creates of the same (company, SKU) can never both win.
+ *  2. FALLBACK (only when tier 1 is denied by a rules PERMISSION_DENIED):
+ *     a best-effort uniqueness check + an atomic write-only `writeBatch`
+ *     (no reads at all). This runs on a project whose DEPLOYED ruleset
+ *     predates the `resource == null` guard that this repo's
+ *     `firestore.rules` carries — that guard is what lets a transaction
+ *     `get()` a not-yet-created `products/{id}` / `product_sku_locks/{id}`
+ *     without the whole transaction being hard-denied. The fallback's
+ *     guarantee class is identical to the DEMO branch and to
+ *     customer-phone-lock creation on a pre-guard project. It does NOT mask
+ *     a genuine cross-tenant / foreign-group denial — the batch's create is
+ *     rejected by the very same rule and still throws.
+ *
+ * DEMO branch: sequential best-effort (unchanged).
  */
 export async function createProductWithSkuLock(
   id: string,
@@ -67,7 +98,7 @@ export async function createProductWithSkuLock(
       const lockId = productSkuLockId(opts.companyId, normalizedSku);
       const existingLock = await getOne<ProductSkuLockDoc>(COLLECTIONS.PRODUCT_SKU_LOCKS, lockId).catch(() => null);
       if (lockHeldByAnotherProduct(existingLock, id)) {
-        throw new Error(`SKU "${payload.sku}" is already used by another product in this company`);
+        throw new SkuLockConflictError(payload.sku);
       }
       await createDocWithId(COLLECTIONS.PRODUCT_SKU_LOCKS, lockId, {
         id: lockId, companyId: opts.companyId, sku: normalizedSku, productId: id, isDeleted: false,
@@ -77,34 +108,55 @@ export async function createProductWithSkuLock(
     return;
   }
 
-  const { doc, runTransaction, serverTimestamp } = await import('firebase/firestore');
+  const { doc, runTransaction, writeBatch, getDoc, serverTimestamp } = await import('firebase/firestore');
   const productRef = doc(db, COLLECTIONS.PRODUCTS, id);
   const lockRef = normalizedSku ? doc(db, COLLECTIONS.PRODUCT_SKU_LOCKS, productSkuLockId(opts.companyId, normalizedSku)) : null;
-
-  await runTransaction(db, async (transaction) => {
-    const productSnap = await transaction.get(productRef);
-    if (productSnap.exists()) {
-      throw new Error(`Product id collision detected (${id}) — refusing to overwrite an existing record. Please retry.`);
-    }
-    if (lockRef) {
-      const lockSnap = await transaction.get(lockRef);
-      if (lockHeldByAnotherProduct(lockSnap.exists() ? lockSnap.data() as ProductSkuLockDoc : null, id)) {
-        throw new Error(`SKU "${payload.sku}" is already used by another product in this company`);
-      }
-    }
-    transaction.set(productRef, sanitizeFirestoreData({
-      ...payload, id, companyId: opts.companyId, ...(opts.groupId ? { groupId: opts.groupId } : {}),
-      createdBy: opts.actorId, updatedBy: opts.actorId,
-      createdAt: serverTimestamp(), updatedAt: serverTimestamp(), isDeleted: false,
-    }));
-    if (lockRef) {
-      transaction.set(lockRef, sanitizeFirestoreData({
-        id: lockRef.id, companyId: opts.companyId, ...(opts.groupId ? { groupId: opts.groupId } : {}),
-        sku: normalizedSku, productId: id, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-        updatedBy: opts.actorId, isDeleted: false,
-      }));
-    }
+  const idCollisionMessage = `Product id collision detected (${id}) — refusing to overwrite an existing record. Please retry.`;
+  const productDoc = () => sanitizeFirestoreData({
+    ...payload, id, companyId: opts.companyId, ...(opts.groupId ? { groupId: opts.groupId } : {}),
+    createdBy: opts.actorId, updatedBy: opts.actorId,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), isDeleted: false,
   });
+  const lockDoc = () => sanitizeFirestoreData({
+    id: lockRef!.id, companyId: opts.companyId, ...(opts.groupId ? { groupId: opts.groupId } : {}),
+    sku: normalizedSku, productId: id, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    updatedBy: opts.actorId, isDeleted: false,
+  });
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      const productSnap = await transaction.get(productRef);
+      if (productSnap.exists()) throw new Error(idCollisionMessage);
+      if (lockRef) {
+        const lockSnap = await transaction.get(lockRef);
+        if (lockHeldByAnotherProduct(lockSnap.exists() ? lockSnap.data() as ProductSkuLockDoc : null, id)) {
+          throw new SkuLockConflictError(payload.sku);
+        }
+      }
+      transaction.set(productRef, productDoc());
+      if (lockRef) transaction.set(lockRef, lockDoc());
+    });
+    return;
+  } catch (err) {
+    if (err instanceof SkuLockConflictError) throw err;
+    if ((err as { message?: string })?.message === idCollisionMessage) throw err;
+    if (!isRulesPermissionDenied(err)) throw err;
+    // fall through to the read-free FALLBACK path (see the doc comment).
+  }
+
+  if (lockRef) {
+    const existingLock = await getDoc(lockRef).catch(() => null);
+    if (existingLock?.exists() && lockHeldByAnotherProduct(existingLock.data() as ProductSkuLockDoc, id)) {
+      throw new SkuLockConflictError(payload.sku);
+    }
+  }
+  const collisionSnap = await getDoc(productRef).catch(() => null);
+  if (collisionSnap?.exists()) throw new Error(idCollisionMessage);
+
+  const batch = writeBatch(db);
+  batch.set(productRef, productDoc());
+  if (lockRef) batch.set(lockRef, lockDoc());
+  await batch.commit();
 }
 
 /**
@@ -134,7 +186,7 @@ export async function updateProductWithSkuLock(
       const lockId = productSkuLockId(opts.companyId, newSku);
       const existingLock = await getOne<ProductSkuLockDoc>(COLLECTIONS.PRODUCT_SKU_LOCKS, lockId).catch(() => null);
       if (lockHeldByAnotherProduct(existingLock, id)) {
-        throw new Error(`SKU "${payload.sku}" is already used by another product in this company`);
+        throw new SkuLockConflictError(payload.sku);
       }
       await createDocWithId(COLLECTIONS.PRODUCT_SKU_LOCKS, lockId, { id: lockId, companyId: opts.companyId, sku: newSku, productId: id, isDeleted: false });
     }
@@ -149,30 +201,54 @@ export async function updateProductWithSkuLock(
     return;
   }
 
-  const { doc, runTransaction, serverTimestamp } = await import('firebase/firestore');
+  const { doc, runTransaction, writeBatch, getDoc, serverTimestamp } = await import('firebase/firestore');
   const nextLockRef = newSku ? doc(db, COLLECTIONS.PRODUCT_SKU_LOCKS, productSkuLockId(opts.companyId, newSku)) : null;
   const oldLockRef = oldSku ? doc(db, COLLECTIONS.PRODUCT_SKU_LOCKS, productSkuLockId(opts.companyId, oldSku)) : null;
-
-  await runTransaction(db, async (transaction) => {
-    const nextLockSnap = nextLockRef ? await transaction.get(nextLockRef) : null;
-    if (nextLockSnap && lockHeldByAnotherProduct(nextLockSnap.exists() ? nextLockSnap.data() as ProductSkuLockDoc : null, id)) {
-      throw new Error(`SKU "${payload.sku}" is already used by another product in this company`);
-    }
-    const oldLockSnap = oldLockRef ? await transaction.get(oldLockRef) : null;
-
-    if (nextLockRef) {
-      transaction.set(nextLockRef, sanitizeFirestoreData({
-        id: nextLockRef.id, companyId: opts.companyId, sku: newSku, productId: id,
-        createdAt: nextLockSnap?.exists() ? nextLockSnap.data()!.createdAt : serverTimestamp(),
-        updatedAt: serverTimestamp(), updatedBy: opts.actorId, isDeleted: false,
-      }), { merge: true });
-    }
-    if (oldLockRef && oldLockSnap?.exists() && (oldLockSnap.data() as ProductSkuLockDoc).productId === id) {
-      transaction.set(oldLockRef, sanitizeFirestoreData({
-        isDeleted: true, releasedAt: serverTimestamp(), updatedAt: serverTimestamp(), updatedBy: opts.actorId,
-      }), { merge: true });
-    }
+  const claimNextLock = (createdAt: unknown) => sanitizeFirestoreData({
+    id: nextLockRef!.id, companyId: opts.companyId, sku: newSku, productId: id,
+    createdAt: createdAt ?? serverTimestamp(),
+    updatedAt: serverTimestamp(), updatedBy: opts.actorId, isDeleted: false,
   });
+  const releaseOldLock = () => sanitizeFirestoreData({
+    isDeleted: true, releasedAt: serverTimestamp(), updatedAt: serverTimestamp(), updatedBy: opts.actorId,
+  });
+  const oldLockOwnedBySelf = (snap: { exists: () => boolean; data: () => unknown } | null | undefined) =>
+    !!snap?.exists() && (snap.data() as ProductSkuLockDoc).productId === id;
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      const nextLockSnap = nextLockRef ? await transaction.get(nextLockRef) : null;
+      if (nextLockSnap && lockHeldByAnotherProduct(nextLockSnap.exists() ? nextLockSnap.data() as ProductSkuLockDoc : null, id)) {
+        throw new SkuLockConflictError(payload.sku);
+      }
+      const oldLockSnap = oldLockRef ? await transaction.get(oldLockRef) : null;
+      if (nextLockRef) {
+        transaction.set(nextLockRef, claimNextLock(nextLockSnap?.exists() ? nextLockSnap.data()!.createdAt : undefined), { merge: true });
+      }
+      if (oldLockRef && oldLockOwnedBySelf(oldLockSnap)) {
+        transaction.set(oldLockRef, releaseOldLock(), { merge: true });
+      }
+    });
+  } catch (err) {
+    if (err instanceof SkuLockConflictError) throw err;
+    if (!isRulesPermissionDenied(err)) throw err;
+    // FALLBACK (see createProductWithSkuLock): the deployed ruleset denies the
+    // transaction's get() of the not-yet-created new-SKU lock. Best-effort
+    // uniqueness check + a read-free atomic writeBatch.
+    const nextExisting = nextLockRef ? await getDoc(nextLockRef).catch(() => null) : null;
+    if (nextExisting?.exists() && lockHeldByAnotherProduct(nextExisting.data() as ProductSkuLockDoc, id)) {
+      throw new SkuLockConflictError(payload.sku);
+    }
+    const oldExisting = oldLockRef ? await getDoc(oldLockRef).catch(() => null) : null;
+    const batch = writeBatch(db);
+    if (nextLockRef) {
+      batch.set(nextLockRef, claimNextLock(nextExisting?.exists() ? nextExisting.data()!.createdAt : undefined), { merge: true });
+    }
+    if (oldLockRef && oldLockOwnedBySelf(oldExisting)) {
+      batch.set(oldLockRef, releaseOldLock(), { merge: true });
+    }
+    await batch.commit();
+  }
 
   await updateDocById(COLLECTIONS.PRODUCTS, id, payload);
 }
