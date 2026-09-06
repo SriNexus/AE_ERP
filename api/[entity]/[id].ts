@@ -11,7 +11,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getAdminDb } from '../_lib/firebase';
 import { verifyAuthToken } from '../_lib/auth';
 import { requirePermission } from '../_lib/permissions';
-import { ENTITY_REGISTRY, isRestWriteBlocked, canAccessApiResource } from '../_lib/registry';
+import { ENTITY_REGISTRY, isRestWriteBlocked, canAccessApiResource, isGlobalCollection } from '../_lib/registry';
 import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
 import { isHiddenOwnerRecord } from '../../src/lib/ownerAccess';
 import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, sendMethodNotAllowed, buildWritableUpdatePayload } from '../_lib/response';
@@ -112,8 +112,6 @@ export async function handleGetById(
   resourceId: string,
   user: any,
 ) {
-  await requirePermission(user, 'view', config.module as any);
-
   const db = getAdminDb();
   const docSnap = await db.collection(config.collection).doc(resourceId).get();
 
@@ -133,6 +131,17 @@ export async function handleGetById(
   if (!canAccessApiResource(user, config.collection, data)) {
     return sendNotFound(res, 'Resource not found.');
   }
+  // RBAC Master Plan §5.2 — permission check AFTER the tenant check so a
+  // GroupAdmin acting on a legitimate same-group sibling document is gated by
+  // THAT company's Admin role template (canAccessApiResource above already
+  // proved the doc is in the GroupAdmin's group). Global collections (roles)
+  // are not tenant-scoped — keep the caller's own template there.
+  await requirePermission(
+    user,
+    'view',
+    config.module as any,
+    isGlobalCollection(config.collection) ? undefined : (data?.companyId as string | undefined),
+  );
   if (data?.isDeleted) {
     return sendNotFound(res, `Resource has been deleted.`);
   }
@@ -151,7 +160,6 @@ export async function handleUpdate(
   if (config?.readOnly === true) {
     return sendMethodNotAllowed(res, READ_ONLY_ENTITY_MESSAGE);
   }
-  await requirePermission(user, 'edit', config.module as any);
 
   const db = getAdminDb();
   const body = req.body;
@@ -172,6 +180,14 @@ export async function handleUpdate(
   if (!canAccessApiResource(user, config.collection, existingSnap.data())) {
     return sendNotFound(res, 'Resource not found.');
   }
+  // RBAC Master Plan §5.2 — see handleGetById: gate by the TARGET document's
+  // company template for a GroupAdmin acting on a same-group sibling.
+  await requirePermission(
+    user,
+    'edit',
+    config.module as any,
+    isGlobalCollection(config.collection) ? undefined : (existingSnap.data()?.companyId as string | undefined),
+  );
   if (existingSnap.data()?.isDeleted) {
     return sendNotFound(res, `Resource has been deleted.`);
   }
@@ -212,7 +228,6 @@ async function handleDelete(
   if (config?.readOnly === true) {
     return sendMethodNotAllowed(res, READ_ONLY_ENTITY_MESSAGE);
   }
-  await requirePermission(user, 'delete', config.module as any);
 
   const db = getAdminDb();
 
@@ -227,6 +242,14 @@ async function handleDelete(
   if (!canAccessApiResource(user, config.collection, existingSnap.data())) {
     return sendNotFound(res, 'Resource not found.');
   }
+  // RBAC Master Plan §5.2 — see handleGetById: gate by the TARGET document's
+  // company template for a GroupAdmin acting on a same-group sibling.
+  await requirePermission(
+    user,
+    'delete',
+    config.module as any,
+    isGlobalCollection(config.collection) ? undefined : (existingSnap.data()?.companyId as string | undefined),
+  );
   if (existingSnap.data()?.isDeleted) {
     return sendNotFound(res, `Resource has already been deleted.`);
   }

@@ -205,3 +205,50 @@ describe('AUTH-D1 — deterministic, company-scoped role-document lookup', () =>
     // test passing IS the proof.
   });
 });
+
+describe('§5.2 — a GroupAdmin acting on a same-group sibling company is gated by THAT company’s Admin template', () => {
+  beforeEach(() => {
+    // company-a (home) Admin: NO products grant at all.
+    roleDocsById['company-a_Admin'] = {
+      name: 'Admin', schemaVersion: 1,
+      permissions: { projects: { view: true }, roles: { view: true } },
+    };
+    // company-b (same group, sibling) Admin: full products grant.
+    roleDocsById['company-b_Admin'] = {
+      name: 'Admin', schemaVersion: 1,
+      permissions: { products: { view: true, create: true, edit: true, delete: true } },
+    };
+    // company-c (foreign group) Admin: also grants products — must NEVER be
+    // consulted for a group-A GroupAdmin.
+    roleDocsById['company-c_Admin'] = {
+      name: 'Admin', schemaVersion: 1,
+      permissions: { products: { view: true, create: true, edit: true, delete: true } },
+    };
+  });
+
+  it('POSITIVE: GroupAdmin (home company-a, group-A) creating in same-group sibling company-b resolves company-b’s Admin template', async () => {
+    const ga = mockUser({ role: 'GroupAdmin', companyId: 'company-a', groupId: 'group-A' });
+    // Home template has no products grant...
+    await expect(canDo(ga, 'create', 'products')).resolves.toBe(false);
+    // ...but the sibling's template does — and the request targets the sibling.
+    await expect(canDo(ga, 'create', 'products', 'company-b')).resolves.toBe(true);
+    await expect(canDo(ga, 'delete', 'products', 'company-b')).resolves.toBe(true);
+  });
+
+  it('NEGATIVE: an ordinary Admin (no groupId) never shifts template — a stray target companyId is ignored, home template governs', async () => {
+    const admin = mockUser({ role: 'Admin', companyId: 'company-a' });
+    // Even if a caller somehow passes company-b, a non-GroupAdmin stays on home.
+    await expect(canDo(admin, 'create', 'products', 'company-b')).resolves.toBe(false);
+  });
+
+  it('NEGATIVE: a GroupAdmin with no authoritative groupId cannot shift template', async () => {
+    const ga = mockUser({ role: 'GroupAdmin', companyId: 'company-a' }); // no groupId
+    await expect(canDo(ga, 'create', 'products', 'company-b')).resolves.toBe(false);
+  });
+
+  it('targetCompanyId === home is a no-op (byte-identical to the 3-arg call)', async () => {
+    const ga = mockUser({ role: 'GroupAdmin', companyId: 'company-a', groupId: 'group-A' });
+    await expect(canDo(ga, 'view', 'projects', 'company-a')).resolves.toBe(true);
+    await expect(canDo(ga, 'create', 'products', 'company-a')).resolves.toBe(false);
+  });
+});

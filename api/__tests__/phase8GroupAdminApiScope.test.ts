@@ -160,10 +160,16 @@ function fakeEntityDb(doc: Record<string, unknown> | null) {
     name: 'Admin', schemaVersion: 1,
     permissions: { projects: { view: true, create: true, edit: true, delete: true } },
   };
+  // RBAC Master Plan §5.2: a GroupAdmin acting on a same-group sibling company
+  // is now gated by THAT company's Admin role document — so both CO_HOME's and
+  // CO_SIBLING's Admin templates must resolve (every real company is seeded
+  // with the system role docs). CO_OTHER (foreign group) is never reached: the
+  // tenant check (canAccessApiResource) 404s it before the permission check.
+  const seededAdminRoleIds = new Set([`${CO_HOME}_Admin`, `${CO_SIBLING}_Admin`]);
   return {
     collection: (name: string) => {
       if (name === 'roles') {
-        return { doc: (id: string) => ({ get: async () => ({ exists: id === `${CO_HOME}_Admin`, data: () => adminRoleDoc }) }) };
+        return { doc: (id: string) => ({ get: async () => ({ exists: seededAdminRoleIds.has(id), data: () => adminRoleDoc }) }) };
       }
       return { doc: () => ({ get: async () => ({ exists: doc !== null, id: 'doc-1', data: () => doc }) }) };
     },

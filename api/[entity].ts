@@ -107,6 +107,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 // ── Handlers ─────────────────────────────────────────────────
 
 async function handleList(req: VercelRequest, res: VercelResponse, config: typeof ENTITY_REGISTRY[string], user: any) {
+  // 'view' is gated by the caller's own company template. A GroupAdmin's list
+  // is always hard-scoped by `where('groupId','==', actorGroup)` below (an
+  // optional ?companyId= only narrows WITHIN that group), so this never
+  // over-exposes another company's rows; a per-company 'view' template is not
+  // resolved here because the `?companyId=` value is not itself group-vetted
+  // and 'view' is not a per-company-customized grant in practice. The
+  // per-target-company template DOES apply to the mutating paths
+  // (create/edit/delete) — see handleCreate + api/[entity]/[id].ts.
   await requirePermission(user, 'view', config.module as any);
 
   const db = getAdminDb();
@@ -248,7 +256,6 @@ async function handleCreate(req: VercelRequest, res: VercelResponse, config: typ
   if (config?.readOnly === true) {
     return sendMethodNotAllowed(res, READ_ONLY_ENTITY_MESSAGE);
   }
-  await requirePermission(user, 'create', config.module as any);
 
   const db = getAdminDb();
   const body = req.body;
@@ -275,6 +282,13 @@ async function handleCreate(req: VercelRequest, res: VercelResponse, config: typ
     throw error;
   }
   if (!companyId) return sendBadRequest(res, 'Authenticated identity has no company scope.');
+
+  // RBAC Master Plan §5.2: the permission check runs AFTER tenant resolution
+  // so a GroupAdmin creating in a legitimate same-group sibling company is
+  // gated by THAT company's Admin role template, not their home company's
+  // (resolveApiCreateTenant already rejected an out-of-group target with a
+  // 403). Non-GroupAdmin actors always resolve to their own `companyId` here.
+  await requirePermission(user, 'create', config.module as any, companyId);
 
   // Phase 15: this used to ALSO enforce a hard per-entity cap (max 5
   // non-deleted records for the demo company) here. Removed — it directly

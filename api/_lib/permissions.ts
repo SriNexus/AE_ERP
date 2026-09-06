@@ -8,6 +8,7 @@
 import { getAdminDb } from './firebase';
 import type { AuthenticatedUser } from './auth';
 import { roleDocumentId } from '../../src/lib/roleBootstrap';
+import { isApiGroupAdmin } from './registry';
 
 // ── Permission types (mirrors client-side) ────────────────────
 
@@ -156,6 +157,35 @@ function resolveCompatibleRole(rawRole: string): string | null {
 }
 
 /**
+ * RBAC Master Plan §5.2 — which company's role document authorizes THIS
+ * request. A GroupAdmin is a SCOPE extension whose grants are the TARGET
+ * company's own Admin role document, not their home company's — so a
+ * GroupAdmin creating/editing/deleting in a legitimate same-group sibling
+ * company must be gated by that sibling's role template, exactly as the
+ * client already does (companyScopedQuery re-fetches the focused company's
+ * role docs, resolveActiveRoleDocument picks from those).
+ *
+ * The handlers group-vet the effective target BEFORE calling canDo()/
+ * requirePermission():
+ *   - api/[entity].ts handleCreate -> resolveApiCreateTenant() (throws
+ *     ApiTenantScopeError for an out-of-group company; returns an in-group
+ *     companyId otherwise),
+ *   - api/[entity]/[id].ts handlers -> canAccessApiResource() on the fetched
+ *     document (true only for own-company OR a doc whose groupId == the
+ *     GroupAdmin's group).
+ * So a non-home `targetCompanyId` reaching here for a GroupAdmin is already
+ * proven in-group. For every other role the only legitimate target is their
+ * own company (the scope layer 404s a cross-company id first), so a stray
+ * non-home value is ignored — never a widening.
+ */
+function permissionCompanyId(user: AuthenticatedUser, targetCompanyId?: string): string {
+  const home = String(user.companyId || '');
+  const target = String(targetCompanyId || '').trim();
+  if (!target || target === home) return home;
+  return isApiGroupAdmin(user) ? target : home;
+}
+
+/**
  * Server-side canDo check.
  *
  * Mirrors the client-side canDo() but reads role documents from
@@ -165,6 +195,7 @@ export async function canDo(
   user: AuthenticatedUser,
   action: Permission | string,
   module: Module | string,
+  targetCompanyId?: string,
 ): Promise<boolean> {
   // Super-admin bypass
   if (user.isSuperAdmin) return true;
@@ -181,7 +212,12 @@ export async function canDo(
   const resolvedRole = resolveCompatibleRole(user.role);
   if (!resolvedRole) return false;
 
-  const roleDoc = await getRoleDocument(user.companyId, resolvedRole);
+  // RBAC Master Plan §5.2: for a GroupAdmin acting on a same-group sibling
+  // company, resolve THAT company's Admin template (see permissionCompanyId).
+  const companyForRole = permissionCompanyId(user, targetCompanyId);
+  if (!companyForRole) return false;
+
+  const roleDoc = await getRoleDocument(companyForRole, resolvedRole);
   if (!roleDoc) return false;
 
   const modulePermissions = roleDoc.permissions[module];
@@ -198,8 +234,9 @@ export async function requirePermission(
   user: AuthenticatedUser,
   action: Permission | string,
   module: Module | string,
+  targetCompanyId?: string,
 ): Promise<void> {
-  const allowed = await canDo(user, action, module);
+  const allowed = await canDo(user, action, module, targetCompanyId);
   if (!allowed) {
     const err = new Error('Forbidden');
     (err as any).statusCode = 403;

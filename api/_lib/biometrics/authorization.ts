@@ -10,15 +10,14 @@
  * existing `api/[entity].ts`-style route in this codebase already relies on
  * its own `requirePermission()` check rather than rules). Keeping this
  * module's decisions in lockstep with Phase 3's rules is deliberate, not
- * incidental — see this phase's completion record for the specific scope
- * boundary (self + same-company Admin/HR/GroupAdmin only; GroupAdmin
- * cross-company, same-group on-behalf-of enrollment — the `sameGrp` branch
- * `firestore.rules`' own `biometricCreateAllowed`/`biometricReadAllowed`
- * already grant — remains explicitly deferred (RBAC Master Plan AUTH-D10
- * completion record): `AuthenticatedUser` carries no `groupId` today, so
- * there is no safe, existing way to verify a cross-company group match from
- * this module without broadening that shared type — a change bigger than
- * this fix's isolated scope. Nothing here forecloses that future extension).
+ * incidental — the scope boundary is: self + same-company Admin/HR/GroupAdmin,
+ * PLUS GroupAdmin cross-company on-behalf-of enrollment for a SAME-GROUP
+ * sibling company (the `sameGrp` branch `firestore.rules`' own
+ * `biometricCreateAllowed`/`biometricReadAllowed`/`biometricUpdateAllowed`
+ * already grant). That last case was previously deferred because
+ * `AuthenticatedUser` carried no `groupId`; RBAC Phase 8 added it (see
+ * api/_lib/auth.ts), so it is now implemented here — a foreign-group target
+ * (or a GroupAdmin with no authoritative groupId) remains denied.
  *
  * RBAC Master Plan AUTH-D10: the on-behalf-of role gate below used to check
  * only `role !== 'Admin' && role !== 'HR'`, hardcoded without any GroupAdmin
@@ -109,8 +108,31 @@ export async function resolveEnrollmentTarget(
     throw notAuthorized('The target employee could not be found.');
   }
   const targetCompanyId = typeof targetProfile.companyId === 'string' ? targetProfile.companyId : '';
-  if (!targetCompanyId || (targetCompanyId !== auth.companyId && !auth.isSuperAdmin)) {
+  if (!targetCompanyId) {
     throw crossTenantDenied();
+  }
+  if (targetCompanyId !== auth.companyId && !auth.isSuperAdmin) {
+    // RBAC Master Plan AUTH-D10 (completion): a GroupAdmin may enroll a face
+    // for an employee in a SAME-GROUP sibling company — this mirrors
+    // firestore.rules' biometricCreateAllowed/biometricReadAllowed `sameGrp`
+    // branch (actor.role == 'GroupAdmin' && data.groupId == actorGroupId).
+    // It was deferred ONLY because AuthenticatedUser carried no groupId; it
+    // does now (RBAC Phase 8). A foreign-group target — or a GroupAdmin whose
+    // own identity has no authoritative groupId — still falls through to
+    // crossTenantDenied(). (Group-suspension parity with the rules'
+    // groupIsActive() sub-check is not evaluated here: the API plane as a
+    // whole does not gate on group status, so this stays consistent with its
+    // existing same-company grant rather than adding a new dependency.)
+    const actorGroupId = typeof auth.groupId === 'string' ? auth.groupId.trim() : '';
+    const targetGroupId = typeof targetProfile.groupId === 'string' ? targetProfile.groupId.trim() : '';
+    const sameGroupAdmin =
+      auth.role === 'GroupAdmin' &&
+      actorGroupId.length > 0 &&
+      targetGroupId.length > 0 &&
+      targetGroupId === actorGroupId;
+    if (!sameGroupAdmin) {
+      throw crossTenantDenied();
+    }
   }
   const status = typeof targetProfile.status === 'string' ? targetProfile.status.toLowerCase() : '';
   if (['inactive', 'suspended', 'disabled'].includes(status) || targetProfile.isDeleted === true) {

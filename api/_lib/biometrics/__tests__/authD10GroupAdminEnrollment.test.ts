@@ -9,8 +9,10 @@
  * DENY for GroupAdmin, not an intentional restriction.
  *
  * This file pins the fixed behavior: GroupAdmin is now authorized for
- * same-company on-behalf-of enrollment exactly like Admin/HR, while every
- * pre-existing boundary this function enforces (cross-tenant denial,
+ * same-company on-behalf-of enrollment exactly like Admin/HR, AND (AUTH-D10
+ * completion, RBAC Phase 8) for a SAME-GROUP sibling company's employee —
+ * mirroring firestore.rules' biometricCreateAllowed `sameGrp` branch — while
+ * every other boundary this function enforces (foreign-group denial,
  * inactive-target denial, missing-target denial, unrelated-role denial,
  * self-enrollment always allowed) remains completely unchanged.
  *
@@ -106,27 +108,48 @@ describe('AUTH-D10 — GroupAdmin false-deny fix on biometric on-behalf-of enrol
     await expect(resolveEnrollmentTarget(auth, 'target-1', reader)).rejects.toMatchObject({ reason: 'not_authorized' });
   });
 
-  // 7. Cross-company access remains denied for GroupAdmin (this fix is
-  //    scoped to same-company only — the separate cross-company/same-group
-  //    capability firestore.rules already supports is explicitly deferred,
-  //    see authorization.ts's header comment).
-  it('NEGATIVE: GroupAdmin remains denied across companies — cross-company/same-group support is explicitly deferred, not silently added', async () => {
-    const auth = buildAuth({ role: 'GroupAdmin', companyId: 'company-1' });
+  // 7. Cross-company access is denied for a GroupAdmin when the target is NOT
+  //    in the GroupAdmin's own group (no groupId on the target, or a
+  //    different groupId) — the foreign-group boundary is intact.
+  it('NEGATIVE: GroupAdmin is denied a different-company target that carries no groupId (cannot be proven same-group)', async () => {
+    const auth = buildAuth({ role: 'GroupAdmin', companyId: 'company-1', groupId: 'group-A' });
     const reader = new FakeUserProfileReader(TARGET_OTHER_COMPANY);
     await expect(resolveEnrollmentTarget(auth, 'target-2', reader)).rejects.toMatchObject({ reason: 'cross_tenant_denied' });
   });
 
-  // 8. Cross-group access remains denied — AuthenticatedUser carries no
-  //    groupId at all, so there is no group concept this function could
-  //    even evaluate; it correctly falls back to the company boundary above,
-  //    which still denies the cross-company actor.
-  it('NEGATIVE: a GroupAdmin cannot use a same-group, different-company target to bypass the company boundary (no group-matching path exists in this module)', async () => {
-    const auth = buildAuth({ role: 'GroupAdmin', companyId: 'company-1' });
-    // Even if the target happens to belong to the same logical group in a
-    // different company, this module has no groupId to compare against —
-    // the company check alone governs, and denies it.
-    const reader = new FakeUserProfileReader({ 'target-4': { companyId: 'company-2', groupId: 'group-shared', status: 'active' } });
+  it('NEGATIVE: GroupAdmin is denied a sibling-company target that belongs to a DIFFERENT group (foreign-group boundary)', async () => {
+    const auth = buildAuth({ role: 'GroupAdmin', companyId: 'company-1', groupId: 'group-A' });
+    const reader = new FakeUserProfileReader({ 'target-fg': { companyId: 'company-B1', groupId: 'group-B', status: 'active' } });
+    await expect(resolveEnrollmentTarget(auth, 'target-fg', reader)).rejects.toMatchObject({ reason: 'cross_tenant_denied' });
+  });
+
+  it('NEGATIVE: a GroupAdmin whose OWN identity has no authoritative groupId cannot reach any other company (fail closed)', async () => {
+    const auth = buildAuth({ role: 'GroupAdmin', companyId: 'company-1' }); // no groupId
+    const reader = new FakeUserProfileReader({ 'target-4': { companyId: 'company-2', groupId: 'group-A', status: 'active' } });
     await expect(resolveEnrollmentTarget(auth, 'target-4', reader)).rejects.toMatchObject({ reason: 'cross_tenant_denied' });
+  });
+
+  // 8. AUTH-D10 completion (RBAC Phase 8): a GroupAdmin MAY enroll a face for
+  //    an employee in a SAME-GROUP sibling company — mirrors firestore.rules'
+  //    biometricCreateAllowed `sameGrp` branch. The target's real companyId
+  //    is returned (never the actor's home company).
+  it('POSITIVE: GroupAdmin enrolls an employee in a SAME-GROUP sibling company — allowed, target companyId preserved', async () => {
+    const auth = buildAuth({ role: 'GroupAdmin', companyId: 'company-1', groupId: 'group-A' });
+    const reader = new FakeUserProfileReader({ 'target-sib': { companyId: 'company-2', groupId: 'group-A', status: 'active' } });
+    const target = await resolveEnrollmentTarget(auth, 'target-sib', reader);
+    expect(target).toEqual({ targetUserId: 'target-sib', targetCompanyId: 'company-2' });
+  });
+
+  it('REGRESSION: an ordinary Admin (no groupId) still cannot reach a same-group sibling company — the sibling path is GroupAdmin-only', async () => {
+    const auth = buildAuth({ role: 'Admin', companyId: 'company-1', groupId: 'group-A' });
+    const reader = new FakeUserProfileReader({ 'target-sib': { companyId: 'company-2', groupId: 'group-A', status: 'active' } });
+    await expect(resolveEnrollmentTarget(auth, 'target-sib', reader)).rejects.toMatchObject({ reason: 'cross_tenant_denied' });
+  });
+
+  it('REGRESSION: a same-group sibling target that is inactive is still denied (target-status boundary unchanged)', async () => {
+    const auth = buildAuth({ role: 'GroupAdmin', companyId: 'company-1', groupId: 'group-A' });
+    const reader = new FakeUserProfileReader({ 'target-sib': { companyId: 'company-2', groupId: 'group-A', status: 'inactive' } });
+    await expect(resolveEnrollmentTarget(auth, 'target-sib', reader)).rejects.toMatchObject({ reason: 'not_authorized' });
   });
 
   // 9. Existing self/employee authorization boundaries remain intact.

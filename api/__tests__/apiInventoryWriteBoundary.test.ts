@@ -182,10 +182,13 @@ describe('INVENTORY-02 — /api/stock/:id endpoint', () => {
   });
 
   it('E5: GET /api/stock/:id reaches the get path (NOT 405)', async () => {
+    // An existing, same-company doc so the full get path runs (permission
+    // check now follows the existence + tenant check — see api/[entity]/[id].ts).
+    writeSpy.get.mockResolvedValue({ exists: true, id: 'SUM-1', data: () => ({ companyId: 'company-1', isDeleted: false }) });
     const res = mockRes();
     await idHandler(mockReq('GET', '/api/stock/SUM-1'), res);
     expect(res.statusCode).not.toBe(405);
-    expect(requirePermission).toHaveBeenCalledWith(expect.anything(), 'view', 'stock');
+    expect(requirePermission).toHaveBeenCalledWith(expect.anything(), 'view', 'stock', 'company-1');
   });
 });
 
@@ -228,21 +231,24 @@ describe('INVENTORY-02 — /api/stock_ledger endpoint', () => {
 
 describe('INVENTORY-02 — other entities are UNCHANGED', () => {
   it('PUT /api/orders/:id is NOT blocked by the inventory boundary (reaches handleUpdate)', async () => {
-    // orders is writable; the doc "does not exist" in the mock so it 404s —
-    // the point is it is NOT the inventory-boundary 405.
-    writeSpy.get.mockResolvedValue({ exists: false, data: () => null });
+    // orders is writable; an existing same-company doc so handleUpdate runs
+    // the full path (the permission check now follows the existence + tenant
+    // check). The point is this is NOT the inventory-boundary 405.
+    writeSpy.get.mockResolvedValue({ exists: true, id: 'ORD-1', data: () => ({ companyId: 'company-1', isDeleted: false, status: 'Draft' }) });
     const res = mockRes();
     await idHandler(mockReq('PUT', '/api/orders/ORD-1', { status: 'Confirmed' }), res);
     expect(res.statusCode).not.toBe(405);
     expect(verifyAuthToken).toHaveBeenCalled();       // auth ran => not short-circuited by the boundary
-    expect(requirePermission).toHaveBeenCalledWith(expect.anything(), 'edit', 'orders');
+    expect(requirePermission).toHaveBeenCalledWith(expect.anything(), 'edit', 'orders', 'company-1');
   });
 
   it('POST /api/quotations is NOT blocked by the inventory boundary (reaches handleCreate)', async () => {
     const res = mockRes();
     await collectionHandler(mockReq('POST', '/api/quotations', { customer: 'Acme' }), res);
     expect(res.statusCode).not.toBe(405);
-    expect(requirePermission).toHaveBeenCalledWith(expect.anything(), 'create', 'quotations');
+    // handleCreate resolves the write tenant first, then gates on that
+    // company's template (a no-op company shift for this non-GroupAdmin Admin).
+    expect(requirePermission).toHaveBeenCalledWith(expect.anything(), 'create', 'quotations', 'company-1');
   });
 
   it('DELETE /api/dispatch/:id is NOT blocked by the inventory boundary', async () => {
