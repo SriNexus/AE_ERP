@@ -78,7 +78,13 @@ async function seed() {
     // exists" negatives — an ordinary CO_A product, its lock, and its counter.
     await setDoc(doc(db, 'products', 'PRD-EXISTING'), { id: 'PRD-EXISTING', name: 'Existing', companyId: CO_A, groupId: GRP_A, isDeleted: false });
     await setDoc(doc(db, 'product_sku_locks', productSkuLockId(CO_A, 'EXISTING')), { id: productSkuLockId(CO_A, 'EXISTING'), companyId: CO_A, groupId: GRP_A, sku: 'EXISTING', productId: 'PRD-EXISTING', isDeleted: false });
-    await setDoc(doc(db, 'document_counters', `${CO_A}_quotation`), { id: `${CO_A}_quotation`, companyId: CO_A, groupId: GRP_A, docType: 'quotation', currentNumber: 7, prefix: 'QT-A', sequencePadding: 4, isDeleted: false });
+    // A counter as the §3.2 group-denormalization backfill leaves it: groupId +
+    // updatedAt + `updatedBy: 'system-backfill'` stamped onto a pre-existing
+    // doc. getNextDocumentNumber()'s set(merge:true) RETAINS updatedBy, so the
+    // post-merge shape must still be accepted (Phase 8 live-verified defect —
+    // the next order/quotation/invoice of every backfilled tenant was denied
+    // for EVERY role until validCounterShape() allowed the audit field).
+    await setDoc(doc(db, 'document_counters', `${CO_A}_quotation`), { id: `${CO_A}_quotation`, companyId: CO_A, groupId: GRP_A, docType: 'quotation', currentNumber: 7, prefix: 'QT-A', sequencePadding: 4, isDeleted: false, updatedBy: 'system-backfill' });
   });
 }
 
@@ -207,6 +213,23 @@ describe('C. document_counters — first-create then increment (documentNumberin
 
   it('a foreign-group GroupAdmin creating CO-A\u2019s counter — DENY', async () => {
     await assertFails(counterTxn(dbFor(ADMIN_B), { companyId: CO_A, groupId: GRP_A, docType: 'invoice', prefix: 'PI-A' }));
+  });
+
+  // Phase 8 live-verified regression: after scripts/backfill-group-denorm.cjs
+  // stamps `updatedBy: 'system-backfill'` on a counter, getNextDocumentNumber's
+  // set(merge:true) increment RETAINS that field. validCounterShape() must
+  // still accept the post-merge shape — otherwise the NEXT numbered document
+  // of every backfilled tenant is denied for every role (demo-tenant, 2026-09-07).
+  it('Admin: increment a backfilled counter carrying updatedBy:system-backfill — ALLOW', async () => {
+    await expect(counterTxn(dbFor(ADMIN), { companyId: CO_A, groupId: GRP_A, docType: 'quotation', prefix: 'QT-A' })).resolves.toBe(8);
+  });
+
+  it('GroupAdmin on the HOME company: increment a backfilled counter — ALLOW (the exact demo-tenant failure)', async () => {
+    await expect(counterTxn(dbFor(GROUP_ADMIN), { companyId: CO_A, groupId: GRP_A, docType: 'quotation', prefix: 'QT-A' })).resolves.toBe(8);
+  });
+
+  it('an ordinary role (Sales): increment a backfilled counter — ALLOW', async () => {
+    await expect(counterTxn(dbFor(SALES), { companyId: CO_A, groupId: GRP_A, docType: 'quotation', prefix: 'QT-A' })).resolves.toBe(8);
   });
 });
 

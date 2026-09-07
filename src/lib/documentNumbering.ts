@@ -1,6 +1,6 @@
 import { collection, doc, getDocs, query, runTransaction, serverTimestamp, where } from 'firebase/firestore';
 import { COLLECTIONS, db } from './firebase';
-import { resolveWriteCompanyId } from './firestore';
+import { resolveWriteCompanyId, resolveWriteGroupId } from './firestore';
 import { useAppStore } from '../store/useAppStore';
 import { sanitizePayload } from './sanitizer';
 import { buildDocumentCounterId, formatDocumentNumber, getDocumentPrefixField, normalizeDocumentSettings, resolveDocumentSettings, type DocumentNumberType, type ResolvedDocumentSettings } from '../features/settings/documentRuntime';
@@ -56,6 +56,12 @@ export async function getNextDocumentNumber(companyId: string, docType: Document
   const counterId = buildDocumentCounterId(resolvedCompanyId, docType);
   const counterRef = doc(db, COLLECTIONS.DOCUMENT_COUNTERS, counterId);
   const existingMax = await existingMaxSequence(resolvedCompanyId, docType, prefix);
+  // §3.2: stamp the denormalized groupId so a GroupAdmin can drive numbering in
+  // any company of their group (firestore.rules groupAdminCanCreate needs it —
+  // sameCompany() only covers the actor's HOME company). Omitted (undefined,
+  // stripped by sanitizePayload) when the group can't be resolved, preserving
+  // the pre-existing company-Admin-only behaviour for that edge.
+  const resolvedGroupId = resolveWriteGroupId(resolvedCompanyId) || undefined;
 
   const sequenceNumber = await runTransaction(db, async (transaction) => {
     const snap = await transaction.get(counterRef);
@@ -64,6 +70,7 @@ export async function getNextDocumentNumber(companyId: string, docType: Document
     transaction.set(counterRef, sanitizePayload({
       id: counterId,
       companyId: resolvedCompanyId,
+      groupId: resolvedGroupId,
       docType,
       currentNumber: nextNumber,
       prefix,

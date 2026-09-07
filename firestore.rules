@@ -2214,13 +2214,26 @@ service cloud.firestore {
       // allow-list therefore includes 'groupId'; the tenant anchor is split
       // (sameCompany for Company Admins, groupAdminCanCreate for Group
       // Admins) so a Group Admin can drive numbering in any Company of their
-      // Group. The legacy direct-transaction path (documentNumbering.ts,
-      // merge:true) writes no groupId on a brand-new counter — accepted by
-      // the same shape (field optional); such docs simply have no Group-admin
-      // reach until the next denormalization pass touches them.
+      // Group. documentNumbering.ts now stamps groupId on every counter write
+      // (resolveWriteGroupId) so a GroupAdmin can drive sibling-company
+      // numbering; an unresolvable group omits the field, still accepted here.
+      //
+      // Phase 8 (2026-09-07, live-verified in the demo tenant): the §3.2
+      // group-denormalization backfill (scripts/backfill-group-denorm.cjs)
+      // stamps `updatedBy: 'system-backfill'` alongside groupId on existing
+      // counter docs. getNextDocumentNumber()'s set(merge:true) RETAINS that
+      // field, so the post-merge request.resource.data carried `updatedBy` and
+      // failed hasOnly() → `permission-denied` on the counter Commit → the
+      // NEXT quotation/order/invoice of every backfilled tenant failed for
+      // EVERY role. `updatedBy`/`createdBy` are audit strings with no
+      // authorization meaning — allowing them here changes nothing about who
+      // may write a counter or how (sameCompany / groupAdminCanCreate, the
+      // monotonic currentNumber+1 check, and the companyId/docType/id
+      // immutability tails are all untouched); it only lets the rule accept
+      // the shape the project's own denormalization tooling produces.
       function validCounterShape() {
         return signedIn()
-          && request.resource.data.keys().hasOnly(['id', 'companyId', 'groupId', 'docType', 'currentNumber', 'prefix', 'sequencePadding', 'createdAt', 'updatedAt', 'isDeleted'])
+          && request.resource.data.keys().hasOnly(['id', 'companyId', 'groupId', 'docType', 'currentNumber', 'prefix', 'sequencePadding', 'createdAt', 'updatedAt', 'isDeleted', 'updatedBy', 'createdBy'])
           && request.resource.data.id == counterId
           && request.resource.data.companyId is string
           && request.resource.data.docType in ['invoice', 'quotation', 'order']
