@@ -44,7 +44,7 @@ export function MobileShell({ children }: MobileShellProps) {
   const fullScreen = isFullScreenRoute(pathname);
 
   return (
-    <div className={cn('mobile-shell', 'flex flex-col h-screen w-full overflow-hidden bg-[var(--color-bg)]')}>
+    <div className={cn('mobile-shell', 'flex flex-col h-dvh w-full overflow-hidden bg-[var(--color-bg)]')}>
       <ContextResolverProvider>
         {/* Top Bar — hidden on full-screen workspace routes */}
         {!fullScreen && <MobileTopBar />}

@@ -176,13 +176,36 @@ function DrawerAppLauncherContent({ onClose }: { onClose: () => void }) {
 /* ── Navigation Content ──────────────── */
 
 function DrawerNavContent({ visibleNav, onClose }: { visibleNav: NavItem[]; onClose: () => void }) {
+  const location = useLocation();
+
+  // Single-open accordion — mirrors the desktop Sidebar, where only one nav
+  // group is expanded at a time. Seed with the group owning the active route
+  // (ModuleNavDrawer unmounts when closed, so this re-initialises on each open).
+  const [openGroup, setOpenGroup] = useState<string | null>(() =>
+    visibleNav.find(
+      (it) =>
+        !it.path &&
+        it.children?.some(
+          (c) => c.path && location.pathname.startsWith(c.path) && c.path !== '/',
+        ),
+    )?.label ?? null,
+  );
+
   return (
     <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
       {visibleNav.map((item) =>
         item.path ? (
           <DrawerLeaf key={item.label} item={item} onClose={onClose} />
         ) : (
-          <DrawerGroup key={item.label} item={item} onClose={onClose} />
+          <DrawerGroup
+            key={item.label}
+            item={item}
+            onClose={onClose}
+            isOpen={openGroup === item.label}
+            onToggle={() =>
+              setOpenGroup((prev) => (prev === item.label ? null : item.label))
+            }
+          />
         )
       )}
     </nav>
@@ -212,14 +235,15 @@ function DrawerLogout() {
         onClick={handleLogout}
         aria-label="Sign out"
         className={cn(
-          'flex items-center justify-center w-full rounded-lg px-3 py-3',
+          'flex items-center gap-2.5 w-full rounded-lg px-2.5 py-2.5 text-sm font-medium',
           'text-[var(--color-danger)]',
           'hover:bg-[var(--color-danger-light)]',
           'transition-colors duration-150',
           'active:scale-[0.98]',
         )}
       >
-        <LogOut className="h-5 w-5" />
+        <LogOut className="h-5 w-5 shrink-0" />
+        <span className="truncate">Sign out</span>
       </button>
     </div>
   );
@@ -251,18 +275,28 @@ function DrawerLeaf({ item, onClose }: { item: NavItem; onClose: () => void }) {
 
 /* ── Group Item ────────────────────── */
 
-function DrawerGroup({ item, onClose }: { item: NavItem; onClose: () => void }) {
+function DrawerGroup({
+  item,
+  onClose,
+  isOpen,
+  onToggle,
+}: {
+  item: NavItem;
+  onClose: () => void;
+  isOpen: boolean;
+  onToggle: () => void;
+}) {
   const location = useLocation();
   const isChildActive = item.children?.some(
     (c) => c.path && location.pathname.startsWith(c.path) && c.path !== '/'
   );
-  const [open, setOpen] = useState(isChildActive ?? false);
+  const open = isOpen;
 
   return (
     <div>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={onToggle}
         className={cn(
           'w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-lg text-sm font-semibold',
           'transition-colors duration-150',

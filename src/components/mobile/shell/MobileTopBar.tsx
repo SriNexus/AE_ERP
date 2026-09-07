@@ -15,7 +15,7 @@
 
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Bell, ListFilter, Plus } from 'lucide-react';
+import { Bell, Search } from 'lucide-react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { cn } from '../../../utils/cn';
 import { useAppStore } from '../../../store/useAppStore';
@@ -23,7 +23,6 @@ import { useNotifications } from '../../../hooks/useNotifications';
 import { useTasks } from '../../../hooks/useTasks';
 import { b64ToSrc } from '../../../templates/documents/shared/utils';
 import { SearchModal } from '../../../features/search/components/SearchModal';
-import { GlobalCreatePopup } from '../../shared/GlobalCreatePopup';
 import { ModuleNavDrawer } from './ModuleNavDrawer';
 import { MobileNotificationSheet } from './MobileNotificationSheet';
 import { TOUCH } from '../shared/styles';
@@ -550,7 +549,6 @@ export function MobileTopBar() {
   const [navDrawerOpen, setNavDrawerOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
 
   // Navigation style for logo click behavior
   const navigationStyle = useAppStore((s) => s.navigationStyle);
@@ -641,10 +639,6 @@ export function MobileTopBar() {
     const next = new URLSearchParams(params);
     ['q', 'status', 'priority', 'assignee', 'date'].forEach((key) => next.delete(key));
     navigate(`${location.pathname === '/' ? '/' : '/app'}${next.toString() ? `?${next.toString()}` : ''}`, { replace: true });
-  }
-
-  function openCreate() {
-    setCreateOpen(true);
   }
 
   function updateModuleFilter(key: string, value: string) {
@@ -804,12 +798,12 @@ export function MobileTopBar() {
         {/* ── Center: Empty spacer ───────────────────────── */}
         <div className="flex-1 z-10 relative" />
 
-        {/* ── Right: Search + Notifications + Create ─────── */}
+        {/* ── Right: Search + Notifications ─────── */}
         <div className="flex items-center gap-1.5 z-10 relative">
           {/* Unified Search + Filter trigger */}
           <button
             type="button"
-            aria-label="Search and filter"
+            aria-label="Search"
             data-tour={tourModuleId ? `${tourModuleId}-search` : 'mobile-search'}
             onClick={() => setSearchOpen(true)}
             className={cn(
@@ -820,7 +814,7 @@ export function MobileTopBar() {
               'active:scale-95',
             )}
           >
-            <ListFilter className="h-6 w-6" strokeWidth={2} />
+            <Search className="h-6 w-6" strokeWidth={2} />
           </button>
 
           {/* Notification bell */}
@@ -843,22 +837,6 @@ export function MobileTopBar() {
                 {unreadCount > 9 ? '9+' : unreadCount}
               </span>
             )}
-          </button>
-
-          <button
-            type="button"
-            aria-label="Create"
-            data-tour={tourModuleId ? `${tourModuleId}-create` : 'mobile-create'}
-            onClick={openCreate}
-            className={cn(
-              TOUCH.MIN, 'rounded-lg p-2.5',
-              'text-[#000000] dark:text-[#FFFFFF]',
-              'hover:bg-black/5 dark:hover:bg-white/10',
-              'transition-colors duration-150',
-              'active:scale-95',
-            )}
-          >
-            <Plus className="h-6 w-6" strokeWidth={3} />
           </button>
         </div>
       </header>
@@ -885,12 +863,6 @@ export function MobileTopBar() {
       <MobileNotificationSheet
         open={notifOpen}
         onClose={() => setNotifOpen(false)}
-      />
-
-      <GlobalCreatePopup
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        variant="mobile"
       />
     </>
   );
