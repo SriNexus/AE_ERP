@@ -181,7 +181,7 @@ export const MobileBottomNav = React.memo(function MobileBottomNav() {
         aria-label="Mobile navigation"
       >
         {/* ── Five tab buttons ──────────────────────────────── */}
-        <div className="relative flex items-end justify-around h-[54px] px-2 pt-1.5 pb-1">
+        <div className="relative flex items-end justify-around h-[46px] px-2 pt-1 pb-1">
           {tabs.map((tab) => {
             const isActive = tab.id === activeTab;
 
@@ -197,7 +197,7 @@ export const MobileBottomNav = React.memo(function MobileBottomNav() {
                   // Layout: flex column with icon + label
                   'group relative flex flex-col items-center justify-end',
                   'h-full min-w-0 flex-1',
-                  'px-1 py-0.5',
+                  'px-1 py-0',
                   // Touch target minimum
                   'min-h-[44px]',
                   // Transitions
@@ -238,7 +238,7 @@ export const MobileBottomNav = React.memo(function MobileBottomNav() {
                     'text-[9px] leading-tight text-center',
                     'transition-colors duration-[250ms] ease-out',
                     'max-w-[64px] truncate',
-                    'mt-0.5',
+                    'mt-px',
                     isActive
                       ? [
                           'text-[var(--color-primary)]',
