@@ -5,7 +5,8 @@
  *
  * Design: Apple/Linear-inspired premium glassmorphism
  *   - Thick frosted glass with deep backdrop blur
- *   - Floating pill container hugging the bottom edge
+ *   - Edge-to-edge bar anchored to the true viewport bottom, its
+ *     background filling the safe-area / gesture region (no floating gap)
  *   - Clean active indicator with accent color
  *   - Smooth 250ms ease-out transitions
  *   - Proper safe-area integration
@@ -162,110 +163,101 @@ export const MobileBottomNav = React.memo(function MobileBottomNav() {
       <nav
         className={cn(
           'mobile-bottom-nav',
-          // Fixed to bottom, full width, above content
+          // Anchored to the true bottom edge, full width, above content.
+          // The `.mobile-bottom-nav` class adds `padding-bottom: var(--safe-area-bottom)`
+          // so this element's own background fills the safe-area / gesture
+          // region down to the physical viewport bottom — no floating gap.
           'fixed inset-x-0 bottom-0 z-30',
-          // Safe area padding below the pill
-          'pb-[max(env(safe-area-inset-bottom,0px),0px)]',
+          // Frosted glass surface (moved from the old floating pill onto the
+          // bar itself so the background reaches the bottom edge).
+          'bg-[var(--color-surface)]/85 dark:bg-[var(--color-surface)]/80',
+          'backdrop-blur-2xl backdrop-saturate-200',
+          // Top border + upward shadow for definition against page content.
+          'border-t border-[var(--color-border)]/60 dark:border-[var(--color-border)]/30',
+          'shadow-[0_-1px_8px_rgba(0,0,0,0.04),0_-8px_24px_rgba(0,0,0,0.06)]',
+          'dark:shadow-[0_-1px_8px_rgba(0,0,0,0.15),0_-8px_24px_rgba(0,0,0,0.2)]',
         )}
         role="tablist"
         aria-label="Mobile navigation"
       >
-        {/* ── Premium glassmorphism pill container ──────────── */}
-        <div
-          className={cn(
-            // Outer shape: floating pill hugging the bottom
-            'mx-2 mb-1.5 rounded-[22px] overflow-hidden',
-            // Glass: thick frosted backdrop with deep blur
-            'bg-[var(--color-surface)]/80 dark:bg-[var(--color-surface)]/75',
-            'backdrop-blur-2xl backdrop-saturate-200',
-            // Premium shadow stack: subtle ambient + directional
-            'shadow-[0_1px_8px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.06)]',
-            'dark:shadow-[0_1px_8px_rgba(0,0,0,0.15),0_8px_24px_rgba(0,0,0,0.2)]',
-            // Subtle border for definition
-            'border border-[var(--color-border)]/50',
-            'dark:border-[var(--color-border)]/30',
-          )}
-        >
-          {/* ── Five tab buttons ──────────────────────────── */}
-          <div className="relative flex items-end justify-around h-[60px] px-1 pt-2 pb-1.5">
-            {tabs.map((tab) => {
-              const isActive = tab.id === activeTab;
+        {/* ── Five tab buttons ──────────────────────────────── */}
+        <div className="relative flex items-end justify-around h-[54px] px-2 pt-1.5 pb-1">
+          {tabs.map((tab) => {
+            const isActive = tab.id === activeTab;
 
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  aria-label={tab.label}
-                  onClick={() => handleTabClick(tab.id)}
-                  className={cn(
-                    // Layout: flex column with icon + label
-                    'group relative flex flex-col items-center justify-end',
-                    'h-full min-w-0 flex-1',
-                    'px-1 py-0.5',
-                    // Touch target minimum
-                    'min-h-[44px]',
-                    // Transitions
-                    'transition-colors duration-[250ms] ease-out',
-                    // Cursor
-                    'select-none',
-                  )}
-                >
-                  {/* Active indicator — slim pill floating above */}
-                  {isActive && (
-                    <span
-                      className={cn(
-                        'absolute -top-px left-1/2 -translate-x-1/2',
-                        'w-[18px] h-[3px] rounded-full',
-                        'bg-[var(--color-primary)]',
-                        'transition-all duration-[250ms] ease-out',
-                      )}
-                      aria-hidden="true"
-                    />
-                  )}
-
-                  {/* Icon */}
-                  <div
-                    className={cn(
-                      'flex items-center justify-center',
-                      'transition-colors duration-[250ms] ease-out',
-                      isActive
-                        ? 'text-[var(--color-primary)]'
-                        : 'text-[var(--color-text-muted)] group-hover:text-[var(--color-text-secondary)]',
-                    )}
-                  >
-                    {tab.icon}
-                  </div>
-
-                  {/* Label */}
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                aria-label={tab.label}
+                onClick={() => handleTabClick(tab.id)}
+                className={cn(
+                  // Layout: flex column with icon + label
+                  'group relative flex flex-col items-center justify-end',
+                  'h-full min-w-0 flex-1',
+                  'px-1 py-0.5',
+                  // Touch target minimum
+                  'min-h-[44px]',
+                  // Transitions
+                  'transition-colors duration-[250ms] ease-out',
+                  // Cursor
+                  'select-none',
+                )}
+              >
+                {/* Active indicator — slim pill floating above */}
+                {isActive && (
                   <span
                     className={cn(
-                      'text-[9px] leading-tight text-center',
-                      'transition-colors duration-[250ms] ease-out',
-                      'max-w-[64px] truncate',
-                      'mt-0.5',
-                      isActive
-                        ? [
-                            'text-[var(--color-primary)]',
-                            'font-bold',
-                            'tracking-[0.01em]',
-                          ]
-                        : [
-                            'text-[var(--color-text-muted)]',
-                            'font-medium',
-                          ],
+                      'absolute -top-px left-1/2 -translate-x-1/2',
+                      'w-[18px] h-[3px] rounded-full',
+                      'bg-[var(--color-primary)]',
+                      'transition-all duration-[250ms] ease-out',
                     )}
-                  >
-                    {tab.label}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+                    aria-hidden="true"
+                  />
+                )}
+
+                {/* Icon */}
+                <div
+                  className={cn(
+                    'flex items-center justify-center',
+                    'transition-colors duration-[250ms] ease-out',
+                    isActive
+                      ? 'text-[var(--color-primary)]'
+                      : 'text-[var(--color-text-muted)] group-hover:text-[var(--color-text-secondary)]',
+                  )}
+                >
+                  {tab.icon}
+                </div>
+
+                {/* Label */}
+                <span
+                  className={cn(
+                    'text-[9px] leading-tight text-center',
+                    'transition-colors duration-[250ms] ease-out',
+                    'max-w-[64px] truncate',
+                    'mt-0.5',
+                    isActive
+                      ? [
+                          'text-[var(--color-primary)]',
+                          'font-bold',
+                          'tracking-[0.01em]',
+                        ]
+                      : [
+                          'text-[var(--color-text-muted)]',
+                          'font-medium',
+                        ],
+                  )}
+                >
+                  {tab.label}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </nav>
-
     </>
   );
 });
