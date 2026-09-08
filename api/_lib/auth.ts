@@ -30,6 +30,18 @@ export interface AuthenticatedUser {
    * `AuthenticatedUser` sets it, and every consumer reads it defensively.
    */
   groupId?: string;
+  /**
+   * RBAC Master Plan Phase 10 (N1 / AUTH-C1) — the actor's `channel_partners`
+   * document id, read from the same trusted `users/{id}` document as every
+   * other identity field (never client-supplied). Present only for a
+   * partner-linked account (`linkPartnerUser` sets `users.channelPartnerId`);
+   * empty string otherwise. Used by the REST API's self/team ownership filter
+   * for `leads`/`customers` so a `partnerId`-owned record still resolves to
+   * its partner — mirrors `src/lib/ownershipVisibility.ts`'s `partnerDocId`
+   * and `firestore.rules`' `actor.channelPartnerId == data.partnerId`.
+   * Optional on the type (backward-compatible with inline test fixtures).
+   */
+  channelPartnerId?: string;
   isSuperAdmin: boolean;
 }
 
@@ -68,6 +80,7 @@ function buildAuthenticatedUser(authUid: string, userId: string, raw: Record<str
     role: text(raw.role) || 'Employee',
     companyId: text(raw.companyId),
     groupId: text(raw.groupId),
+    channelPartnerId: text(raw.channelPartnerId),
     isSuperAdmin: raw.isSuperAdmin === true,
   };
 }
@@ -187,6 +200,7 @@ async function authenticateWithApiKey(apiKey: string, deps: AuthDependencies = d
     role: 'Admin',
     companyId,
     groupId: '',
+    channelPartnerId: '',
     isSuperAdmin: true,
   };
 }
@@ -210,6 +224,7 @@ async function authenticateWithBearerToken(authHeader: string, deps: AuthDepende
       role: 'Owner',
       companyId: process.env.OWNER_DEFAULT_COMPANY_ID || 'default',
       groupId: '',
+      channelPartnerId: '',
       isSuperAdmin: true,
     };
   }

@@ -12,6 +12,7 @@ import { getAdminDb } from '../_lib/firebase';
 import { verifyAuthToken } from '../_lib/auth';
 import { requirePermission } from '../_lib/permissions';
 import { ENTITY_REGISTRY, isRestWriteBlocked, canAccessApiResource, isGlobalCollection } from '../_lib/registry';
+import { resolveApiOwnershipScope, apiRecordIsOwned } from '../_lib/ownership';
 import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
 import { isHiddenOwnerRecord } from '../../src/lib/ownerAccess';
 import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, sendMethodNotAllowed, buildWritableUpdatePayload } from '../_lib/response';
@@ -142,6 +143,16 @@ export async function handleGetById(
     config.module as any,
     isGlobalCollection(config.collection) ? undefined : (data?.companyId as string | undefined),
   );
+  // RBAC Master Plan Phase 10 (N1 / AUTH-C1): after the tenant check, enforce
+  // the same self/team ownership scope firestore.rules enforces for
+  // leads/customers. A same-company record outside the caller's visibility
+  // scope returns the identical not-found the tenant miss above returns — the
+  // API never reveals that the record exists. `mode: 'all'` roles are
+  // unaffected. READ-only fix: handleUpdate/handleDelete are untouched.
+  const ownership = await resolveApiOwnershipScope(db, user, config.collection, config.module);
+  if (ownership.mode === 'owned' && !apiRecordIsOwned(data, ownership.allowIds)) {
+    return sendNotFound(res, 'Resource not found.');
+  }
   if (data?.isDeleted) {
     return sendNotFound(res, `Resource has been deleted.`);
   }

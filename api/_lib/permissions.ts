@@ -227,6 +227,44 @@ export async function canDo(
 }
 
 /**
+ * RBAC Master Plan Phase 10 (N1 / AUTH-C1) — resolve the caller's EFFECTIVE
+ * record-visibility for a module, from the trusted per-company role document
+ * (never a client-supplied value). Mirrors `src/lib/firestore.ts`'s
+ * `resolveVisibility()` and `src/lib/permissions.ts`'s `getModuleVisibility()`:
+ *
+ *   - Super Admin / Owner            → 'all'
+ *   - Admin / GroupAdmin (alias-resolved to 'Admin') → 'all' (§5.2:
+ *     GroupAdmin is an Admin-equivalent scope extension; the API already
+ *     hard-scopes a GroupAdmin list by `where('groupId','==',...)`)
+ *   - otherwise → the role document's `permissions[module].visibility`,
+ *     normalized so only an explicit 'self'/'team' returns non-'all'
+ *
+ * Returns 'all' on any resolution failure (unknown role, missing companyId,
+ * missing role doc, missing module) — `canDo()`/`requirePermission()` already
+ * fail closed on those, so this defensive default only ever runs after the
+ * caller has proven they may 'view' the module at all.
+ *
+ * Only the seed's `self`/`team` roles on a module produce ownership filtering:
+ * today, per BD-1/BD-2 (both RESOLVED (a)), that is Partner ('self') and
+ * Manager/TL ('team') on `leads`/`customers` only.
+ */
+export async function resolveEffectiveVisibility(
+  user: AuthenticatedUser,
+  module: Module | string,
+): Promise<Visibility> {
+  if (user.isSuperAdmin) return 'all';
+  const resolvedRole = resolveCompatibleRole(user.role);
+  if (!resolvedRole || resolvedRole === 'Admin') return 'all';
+  if (!user.companyId) return 'all';
+  const roleDoc = await getRoleDocument(user.companyId, resolvedRole);
+  const modulePermissions = roleDoc?.permissions?.[String(module)];
+  const visibility = modulePermissions && typeof modulePermissions.visibility === 'string'
+    ? modulePermissions.visibility
+    : 'all';
+  return visibility === 'self' || visibility === 'team' ? visibility : 'all';
+}
+
+/**
  * Server-side permission check for API endpoints.
  * Throws an error object that the handler can use.
  */

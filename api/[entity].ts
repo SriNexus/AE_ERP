@@ -12,6 +12,7 @@ import { getAdminDb } from './_lib/firebase';
 import { verifyAuthToken } from './_lib/auth';
 import { requirePermission } from './_lib/permissions';
 import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked, isApiGroupAdmin, resolveApiCreateTenant, ApiTenantScopeError } from './_lib/registry';
+import { resolveApiOwnershipScope, apiRecordIsOwned } from './_lib/ownership';
 import { checkRateLimit, getRateLimitKey } from './_lib/rateLimit';
 import { filterManageableUsers, isOwnerEmail } from '../src/lib/ownerAccess';
 import { createProductWithSkuLockAdmin, SkuConflictError } from './_lib/productSkuLock';
@@ -140,6 +141,48 @@ async function handleList(req: VercelRequest, res: VercelResponse, config: typeo
   const fetchLimit = perPage + 1;
   const offset = (page - 1) * perPage;
 
+  // RBAC Master Plan Phase 10 (N1 / AUTH-C1): for `leads`/`customers` and a
+  // caller whose seeded visibility on the module is 'self' (Partner) or 'team'
+  // (Manager/TL), the REST API must enforce the same ownership scope
+  // firestore.rules enforces (canReadLeadScoped / canReadCustomerScoped) — the
+  // generic company/group scope alone let a Partner/Manager list every
+  // same-company record. `mode: 'all'` (Sales/Admin/Director/GroupAdmin/Owner,
+  // and every other collection) → no change.
+  const ownership = await resolveApiOwnershipScope(db, user, config.collection, config.module);
+
+  if (ownership.mode === 'owned') {
+    // Ownership filtering only ever applies to a single-company role (Partner /
+    // Manager/TL — never GroupAdmin, which resolves to `mode: 'all'`), so the
+    // fetch is bounded by a single `where('companyId','==')` — one equality
+    // filter, served by Firestore's automatic single-field index, no composite
+    // index required. Server-side offset/limit is skipped (unsafe when the row
+    // set is filtered AFTER the query — pages under-fill); the ownership /
+    // status / search / sort / pagination all run in memory, mirroring
+    // src/lib/firestore.ts's getAll() and the index-fallback path below.
+    let ownedQuery: FirebaseFirestore.Query = db.collection(config.collection);
+    if (companyId) ownedQuery = ownedQuery.where('companyId', '==', companyId);
+    const allSnap = await ownedQuery.get();
+    let ownedDocs: any[] = allSnap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((doc: any) => !doc.isDeleted && (!companyId || doc.companyId === companyId));
+    ownedDocs = ownedDocs.filter((doc: any) => apiRecordIsOwned(doc, ownership.allowIds));
+    if (status) ownedDocs = ownedDocs.filter((doc: any) => doc.status === status);
+    if (search) {
+      const term = search.toLowerCase();
+      ownedDocs = ownedDocs.filter((doc: any) =>
+        config.searchFields.some((field) => String(doc[field] || '').toLowerCase().includes(term)),
+      );
+    }
+    ownedDocs.sort((a: any, b: any) => {
+      const sortField = sortBy || 'createdAt';
+      const aVal = a[sortField] || '';
+      const bVal = b[sortField] || '';
+      return sortOrder === 'asc' ? String(aVal).localeCompare(String(bVal)) : String(bVal).localeCompare(String(aVal));
+    });
+    const paged = ownedDocs.slice(offset, offset + perPage);
+    return sendPaginated(res, paged, ownedDocs.length, page, perPage);
+  }
+
   try {
     let query: FirebaseFirestore.Query = db.collection(config.collection);
 
@@ -224,6 +267,12 @@ async function handleList(req: VercelRequest, res: VercelResponse, config: typeo
         if (status) {
           allDocs = allDocs.filter((doc: any) => doc.status === status);
         }
+        // Phase 10 N1 (AUTH-C1): this index-fallback path is unreachable when
+        // ownership filtering applies — a `mode: 'owned'` caller (Partner /
+        // Manager on leads/customers) early-returns above via a plain
+        // full-collection get() that needs no index and never raises
+        // `failed-precondition`. Ownership enforcement therefore lives entirely
+        // in that early-return branch; nothing to add here.
         if (search) {
           const term = search.toLowerCase();
           allDocs = allDocs.filter((doc: any) =>
