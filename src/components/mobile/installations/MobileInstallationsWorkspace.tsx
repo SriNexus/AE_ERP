@@ -131,8 +131,14 @@ export default function MobileInstallationsWorkspace({ mode }: { mode: Mode }) {
   const perms = usePermissions();
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const companyKeys = queryKeys.forCompany(activeCompanyId);
-  const user = useAppStore((s) => s.user);
-  const isAdmin = user?.role === 'Admin' || user?.role === 'Director';
+  // AUTH-D9 / Phase 10 N2: authorize the installation edit/schedule/checklist
+  // controls through the same permission the desktop InstallationWorkspace
+  // uses (perms.canEdit('installations')) — NOT a hardcoded role string. The
+  // previous `role === 'Admin' || role === 'Director'` check denied
+  // InstallationLead (which is seeded installations:edit) and, where a company
+  // grants the Director role any installations access, silently promoted
+  // Director from view to edit.
+  const canEditInstallations = perms.canEdit('installations');
 
   // ── Queries ─────────────────────────────────────────────
   const { data: leads = [], isLoading, isError, refetch } = useQuery({
@@ -588,7 +594,7 @@ export default function MobileInstallationsWorkspace({ mode }: { mode: Mode }) {
                           <p className="text-xs text-[var(--color-text-muted)]">{inst.assignedEngineerPhone}</p>
                         )}
                       </div>
-                      {isAdmin && !isCompleted && (
+                      {canEditInstallations && !isCompleted && (
                         <Button size="xs" variant="outline" icon={<UserPlus className="h-3 w-3" />} onClick={() => setShowEngineerAssign(true)}>
                           {inst.assignedEngineerName ? 'Reassign' : 'Assign'}
                         </Button>
@@ -597,7 +603,7 @@ export default function MobileInstallationsWorkspace({ mode }: { mode: Mode }) {
                   </Section>
 
                   {/* Stage Change */}
-                  {isAdmin && !isCompleted && (
+                  {canEditInstallations && !isCompleted && (
                     <Section title="Change Stage">
                       <div className="flex gap-2">
                         <select
@@ -643,7 +649,7 @@ export default function MobileInstallationsWorkspace({ mode }: { mode: Mode }) {
                   )}
 
                   {/* Capture Serial */}
-                  {isAdmin && !isCompleted && (
+                  {canEditInstallations && !isCompleted && (
                     <Section title="Capture Serial">
                       <div className="flex gap-2">
                         <input
@@ -722,7 +728,7 @@ export default function MobileInstallationsWorkspace({ mode }: { mode: Mode }) {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <p className="text-xs font-bold uppercase tracking-wide text-[var(--color-text-muted)]">Visit History</p>
-                    {isAdmin && !isCompleted && (
+                    {canEditInstallations && !isCompleted && (
                       <Button
                         size="xs"
                         variant="outline"
@@ -739,7 +745,7 @@ export default function MobileInstallationsWorkspace({ mode }: { mode: Mode }) {
                     <div className="flex flex-col items-center py-8 text-center">
                       <Calendar className="h-6 w-6 text-[var(--color-text-muted)] mb-2" />
                       <p className="text-xs text-[var(--color-text-muted)]">No visits scheduled</p>
-                      {isAdmin && !isCompleted && (
+                      {canEditInstallations && !isCompleted && (
                         <Button size="xs" variant="outline" onClick={() => setShowScheduleVisit(true)} className="mt-2">
                           Schedule First Visit
                         </Button>
@@ -770,7 +776,7 @@ export default function MobileInstallationsWorkspace({ mode }: { mode: Mode }) {
                             </div>
                           </div>
                           {/* Visit actions */}
-                          {isAdmin && visit.status === 'scheduled' && (
+                          {canEditInstallations && visit.status === 'scheduled' && (
                             <div className="flex gap-1">
                               <button
                                 onClick={() => handleVisitStatus(visit.id, 'completed')}
@@ -822,7 +828,7 @@ export default function MobileInstallationsWorkspace({ mode }: { mode: Mode }) {
                       <input
                         type="checkbox"
                         checked={item.completed}
-                        disabled={!isAdmin || updatingChecklistIndex === index}
+                        disabled={!canEditInstallations || updatingChecklistIndex === index}
                         onChange={() => handleToggleChecklist(index)}
                         className="mt-0.5 h-3.5 w-3.5 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
                       />
