@@ -120,8 +120,17 @@ describe('api/biometrics/status.ts — on-behalf-of status reuses resolveEnrollm
     expect(statusRouteCode).toContain('cross_tenant_denied: 403');
   });
 
-  it('resolveEnrollmentTarget itself is unchanged by this pass — confirms no duplicate/weakened authorization path was introduced', () => {
-    expect(authorizationCode).toContain("auth.role !== 'Admin' && auth.role !== 'HR' && !auth.isSuperAdmin");
+  // The on-behalf-of role gate was widened by RBAC Master Plan AUTH-D10
+  // (commit 38f3077) to also admit GroupAdmin — a false-DENY closure, since
+  // GroupAdmin is a same-company scope-extension alias of Admin everywhere
+  // else this exact check is made (client/server canDo(), firestore.rules'
+  // own biometricCreateAllowed `sameCo` branch). Phase 8 (f53cc18) then
+  // added the SAME-GROUP sibling-company branch. This assertion is updated
+  // to pin the current, approved gate; the test's purpose is unchanged —
+  // status.ts still routes through this ONE authorization function, with no
+  // duplicate or weakened parallel path.
+  it('status.ts reuses the SAME resolveEnrollmentTarget() gate (Admin/HR/GroupAdmin/SuperAdmin, post-AUTH-D10) — no duplicate or weakened authorization path', () => {
+    expect(authorizationCode).toContain("auth.role !== 'Admin' && auth.role !== 'HR' && auth.role !== 'GroupAdmin' && !auth.isSuperAdmin");
     expect(authorizationCode).toContain('crossTenantDenied()');
   });
 });
