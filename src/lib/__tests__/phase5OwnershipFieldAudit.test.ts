@@ -98,10 +98,42 @@ describe('AUTH-C1 — cases has createdBy but is moot until BD-4 (only Admin hol
   });
 });
 
-describe('AUTH-C3 — commission_records/settlements ownership narrowing remains a documented, deliberate, unchanged trade-off (re-verified, not newly discovered)', () => {
-  it('the existing rules comment explicitly says team/self scoping was deliberately left out to avoid extra get() calls', () => {
-    expect(firestoreRulesSrc).toContain('does NOT replicate Manager\'s team-scope or Partner\'s');
-    expect(firestoreRulesSrc).toContain('to avoid the extra get() calls a');
+// AUTH-C3 was CLOSED in Phase 7 (commit 1916f4f). commission_records /
+// settlements gained a dedicated non-GroupAdmin read predicate,
+// commissionSettlementReadAllowed(), that rules-enforces Partner's seeded
+// visibility:'self' scope (data.partnerId must match the actor's own
+// users.channelPartnerId) while Admin/Manager/Director stay company-wide —
+// see the commissionSettlementOwnershipScope emulator suite for the
+// behavioural proof. This block previously asserted the pre-Phase-7
+// comment ("does NOT replicate Manager's team-scope or Partner's ... to
+// avoid the extra get() calls") that 1916f4f deliberately replaced; the
+// assertion is updated to pin the current, approved implementation, the
+// same test-hygiene correction 9488647 applied to the AUTH-C1 assertions
+// above.
+describe('AUTH-C3 — commission_records/settlements now rules-enforce Partner self-scope (Phase 7, re-verified against firestore.rules)', () => {
+  const readAllowedFn = firestoreRulesSrc.match(/function commissionSettlementReadAllowed\(data\) \{[\s\S]*?\n {4}\}/);
+
+  it('a dedicated commissionSettlementReadAllowed() predicate exists and is the non-GroupAdmin read branch for BOTH commission_records and settlements', () => {
+    expect(readAllowedFn).not.toBeNull();
+    // Both dedicated match blocks route their non-GroupAdmin read through it.
+    const usages = firestoreRulesSrc.match(/: commissionSettlementReadAllowed\(resource\.data\)\)/g) || [];
+    expect(usages.length).toBe(2);
+  });
+
+  it('Partner reads are narrowed to their own records — data.partnerId must equal the actor\'s own users.channelPartnerId', () => {
+    expect(readAllowedFn![0]).toContain("role == 'Partner'");
+    expect(readAllowedFn![0]).toContain("data.get('partnerId', '') != ''");
+    expect(readAllowedFn![0]).toContain("actor.get('channelPartnerId', '') == data.partnerId");
+  });
+
+  it('Admin/Manager/Director keep company-wide read (their seed normalizes to visibility:\'all\' — unchanged by AUTH-C3)', () => {
+    expect(readAllowedFn![0]).toContain("role in ['Admin', 'Manager', 'Director']");
+  });
+
+  it('owner / super-admin bypass and sameCompany() tenant isolation are preserved in the predicate', () => {
+    expect(readAllowedFn![0]).toContain('isOwnerIdentity()');
+    expect(readAllowedFn![0]).toContain("actor.get('isSuperAdmin', false) == true");
+    expect(readAllowedFn![0]).toContain('sameCompany(data)');
   });
 });
 
