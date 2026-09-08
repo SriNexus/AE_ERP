@@ -2166,25 +2166,65 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // RBAC Master Plan Phase 7 (AUTH-C3) — non-GroupAdmin read predicate for
+    // commission_records / settlements.
+    //
+    // These collections are governed by the 'partners' permissions.ts module.
+    // roleBootstrap.ts seeds Partner at visibility:'self' on that module; every
+    // other role granted it (Admin/Manager/Director) has no visibility key and
+    // normalizes to 'all' (plan §8). That Partner self-scope was real
+    // client-side (applyAccessFilters / buildOwnershipVisibilityQueryPlan on
+    // OWNERSHIP_FIELDS) but advisory only at the rules layer — a same-company
+    // Partner could getDoc() ANOTHER partner's commission/settlement row
+    // directly, bypassing the UI (AUTH-C3, High). This closes that gap; it
+    // does NOT change what a Partner sees through the normal query-scoped UI.
+    //
+    // Budget: binds authMap + actor ONCE via `let` and reads role/
+    // channelPartnerId as plain fields — replaces the prior
+    // `actorIsSuperAdmin() || actorRoleMatches('Admin|Manager|Partner|Director')`
+    // combo, which re-resolved the auth-map/users-doc chain ~5x inline and
+    // exceeded the per-request expression budget on a first attempt. Net
+    // expression count is LOWER than the rule it replaces. Mirrors
+    // canReadCustomerScoped()'s proven let-once-reuse shape (this variant has
+    // no team branch — no role is seeded 'team' on the partners module).
+    //
+    // Company/group isolation: sameCompany() is unchanged (owner/SuperAdmin
+    // bypass, companyId match, §9.6 group-active check). Admin/Manager/Director
+    // company-wide access is byte-for-byte the same set as before.
+    function commissionSettlementReadAllowed(data) {
+      let authMap = get(authMapPath()).data;
+      let actor = get(/databases/$(database)/documents/users/$(authMap.userId)).data;
+      let role = actor.get('role', '');
+      return isOwnerIdentity()
+        || actor.get('isSuperAdmin', false) == true
+        || (
+          sameCompany(data)
+          && (
+            role in ['Admin', 'Manager', 'Director']
+            || (
+              role == 'Partner'
+              && data.get('partnerId', '') != ''
+              && actor.get('channelPartnerId', '') == data.partnerId
+            )
+          )
+        );
+    }
+
     match /commission_records/{recordId} {
       // Governed by the 'partners' permissions.ts module — confirmed via
       // routes.tsx's RoleRoute module="partners" gate on every Settlements/
       // Commission page. Role grants: Admin (full), GroupAdmin (own Group),
-      // Manager (view/create/edit, team-scope at the app layer), Partner
-      // (view, self-scope at the app layer), Director (view only). This
-      // rules-layer gate is deliberately coarse (company/role boundary
-      // only) — it does NOT replicate Manager's team-scope or Partner's
-      // self-scope narrowing, matching the existing dispatch/stock
-      // precedent where visibility scoping stays an application-layer
-      // concern (canDo()'s `visibility` field + applyAccessFilters), never
-      // a Firestore-rules concept, to avoid the extra get() calls a
-      // per-record ownership check would require.
+      // Manager (view/create/edit, company-wide — 'all' seed), Partner (view,
+      // self-scope — now rules-enforced via commissionSettlementReadAllowed(),
+      // AUTH-C3), Director (view only, company-wide). create/update stay on the
+      // plain company + role gate (the client model never restricted who may
+      // create/edit by self/team — only who may list/view a row they don't own).
       // Phase 8 home read: see employees block — GroupAdmin ternary gains
       // `|| canReadCompanyScoped()` (companyId-proof for home lists).
       allow read: if actorIsActive()
         && (isGroupAdmin()
           ? (groupAdminCanRead(resource.data) || canReadCompanyScoped())
-          : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager|Partner|Director'))));
+          : commissionSettlementReadAllowed(resource.data));
       allow create: if actorIsActive()
         && (isGroupAdmin() ? groupAdminCanCreate(request.resource.data) : (canCreateCompanyScoped() && (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager'))));
       allow update: if actorIsActive()
@@ -2193,14 +2233,15 @@ service cloud.firestore {
     }
 
     match /settlements/{settlementId} {
-      // Identical authorization shape to commission_records — same
-      // governing 'partners' module, same routes.tsx module="partners" gate.
+      // Identical authorization shape to commission_records — same governing
+      // 'partners' module, same routes.tsx module="partners" gate, same
+      // AUTH-C3 Partner self-scope via commissionSettlementReadAllowed().
       // Phase 8 home read: see employees block — GroupAdmin ternary gains
       // `|| canReadCompanyScoped()` (companyId-proof for home lists).
       allow read: if actorIsActive()
         && (isGroupAdmin()
           ? (groupAdminCanRead(resource.data) || canReadCompanyScoped())
-          : (sameCompany(resource.data) && (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager|Partner|Director'))));
+          : commissionSettlementReadAllowed(resource.data));
       allow create: if actorIsActive()
         && (isGroupAdmin() ? groupAdminCanCreate(request.resource.data) : (canCreateCompanyScoped() && (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager'))));
       allow update: if actorIsActive()

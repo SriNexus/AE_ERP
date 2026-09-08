@@ -116,8 +116,15 @@ const COLLECTIONS: CollectionSpec[] = [
   { name: 'payroll', readRoles: ['HR', 'Director'], writeRoles: [], unauthorizedRole: 'Sales' },
   { name: 'payments', readRoles: ['Accounts', 'Director'], writeRoles: ['Accounts'], unauthorizedRole: 'Sales' },
   { name: 'banks', readRoles: ['Sales', 'Accounts', 'Director', 'Manager'], writeRoles: [], unauthorizedRole: 'Partner' },
-  { name: 'commission_records', readRoles: ['Manager', 'Partner', 'Director'], writeRoles: ['Manager'], unauthorizedRole: 'Sales' },
-  { name: 'settlements', readRoles: ['Manager', 'Partner', 'Director'], writeRoles: ['Manager'], unauthorizedRole: 'Sales' },
+  // commission_records / settlements: Manager/Director read company-wide
+  // ('all' on the governing 'partners' module — plan §8). Partner is NOT a
+  // blanket reader here — RBAC Phase 7 (AUTH-C3) narrowed Partner to rows
+  // whose partnerId matches their own channel_partners doc. That
+  // ownership-conditional contract is covered in full by
+  // commissionSettlementOwnershipScope.emulator.test.ts; the AUTH-C3
+  // describe block at the bottom of this file additionally pins it here.
+  { name: 'commission_records', readRoles: ['Manager', 'Director'], writeRoles: ['Manager'], unauthorizedRole: 'Sales' },
+  { name: 'settlements', readRoles: ['Manager', 'Director'], writeRoles: ['Manager'], unauthorizedRole: 'Sales' },
 ];
 
 for (const col of COLLECTIONS) {
@@ -217,3 +224,45 @@ for (const col of COLLECTIONS) {
     });
   });
 }
+
+// RBAC Master Plan Phase 7 (AUTH-C3): Partner read on commission_records /
+// settlements is now ownership-conditional (partnerId == the actor's own
+// channel_partners doc), no longer a blanket same-company role grant. Full
+// coverage lives in commissionSettlementOwnershipScope.emulator.test.ts;
+// this block pins the before/after here so the change is visible in the
+// file whose readRoles list it altered.
+describe('commission_records / settlements — AUTH-C3 Partner self-scope', () => {
+  const PARTNER_DOC = 'CP-AUTHC3';
+  const OTHER_PARTNER_DOC = 'CP-AUTHC3-OTHER';
+
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (rulesCtx) => {
+      const db = rulesCtx.firestore();
+      // link MUSR-PARTNER-A (Company A) to a channel_partners doc
+      await setDoc(doc(db, 'channel_partners', PARTNER_DOC), { id: PARTNER_DOC, companyId: COMPANY_A, userId: 'MUSR-PARTNER-A', status: 'Active' });
+      await setDoc(doc(db, 'users', 'MUSR-PARTNER-A'), {
+        id: 'MUSR-PARTNER-A', companyId: COMPANY_A, groupId: 'GROUP-A', role: 'Partner',
+        email: 'partner.a@neozy.test', status: 'Active', isSuperAdmin: false, isDeleted: false,
+        channelPartnerId: PARTNER_DOC,
+      });
+      for (const c of ['commission_records', 'settlements']) {
+        await setDoc(doc(db, c, `${c}-own`), { id: `${c}-own`, companyId: COMPANY_A, groupId: 'GROUP-A', partnerId: PARTNER_DOC, note: 'own' });
+        await setDoc(doc(db, c, `${c}-other`), { id: `${c}-other`, companyId: COMPANY_A, groupId: 'GROUP-A', partnerId: OTHER_PARTNER_DOC, note: 'other' });
+      }
+    });
+  });
+
+  for (const c of ['commission_records', 'settlements']) {
+    it(`Partner A CAN read a ${c} row linked to their own channel_partners doc — ALLOW`, async () => {
+      await assertSucceeds(getDoc(doc(ctx('MUSR-PARTNER-A'), c, `${c}-own`)));
+    });
+
+    it(`Partner A CANNOT direct-read a ${c} row linked to a DIFFERENT partner — DENY (AUTH-C3)`, async () => {
+      await assertFails(getDoc(doc(ctx('MUSR-PARTNER-A'), c, `${c}-other`)));
+    });
+
+    it(`Manager still reads ANY same-company ${c} row regardless of partnerId — unchanged`, async () => {
+      await assertSucceeds(getDoc(doc(ctx('MUSR-MANAGER-A'), c, `${c}-other`)));
+    });
+  }
+});
