@@ -753,7 +753,14 @@ export function MobileTopBar() {
       <header
         className={cn(
           'mobile-topbar',
-          'h-[60px] shrink-0 z-30 sticky top-0',
+          // box-content: the CSS `.mobile-topbar` adds `padding-top:
+          // var(--safe-area-top)` for notched devices. With the default
+          // border-box that inset eats into the 60px, squashing the content
+          // area and pushing the logo/icons down until they clip under the
+          // header's `overflow:hidden`. content-box keeps 60px as the real
+          // content height and lets the safe-area inset extend the box above
+          // it, so the row stays vertically centred on every viewport.
+          'box-content h-[60px] shrink-0 z-30 sticky top-0',
           'flex items-center justify-between px-3',
           'relative',
           // Use theme tokens — matches desktop TopBar pattern
