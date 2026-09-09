@@ -24,9 +24,9 @@
  * dev/test), never by omission.
  */
 
-import { MockProvider } from '../../../src/lib/biometrics/providers/MockProvider';
-import type { BiometricProvider } from '../../../src/lib/biometrics/providers/BiometricProvider';
-import { DeepFaceProvider } from './providers/DeepFaceProvider';
+import { MockProvider } from '../../../src/lib/biometrics/providers/MockProvider.js';
+import type { BiometricProvider } from '../../../src/lib/biometrics/providers/BiometricProvider.js';
+import { DeepFaceProvider } from './providers/DeepFaceProvider.js';
 
 export function resolveConfiguredProvider(): BiometricProvider {
   const raw = process.env.BIOMETRIC_PROVIDER;

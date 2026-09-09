@@ -15,8 +15,8 @@
  * this phase's scope discipline forbids.
  */
 
-import { enrollmentRevoked } from './types';
-import type { VerifyOutcome } from './verify';
+import { enrollmentRevoked } from './types.js';
+import type { VerifyOutcome } from './verify.js';
 
 export type BiometricReferenceStatus = 'active' | 'revoked';
 

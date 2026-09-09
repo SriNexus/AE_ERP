@@ -6,9 +6,9 @@
  * returns raw secret values to the caller.
  */
 
-import { getAdminDb, getAdminStorageBucket } from './firebase';
-import { AuthResolutionError, resolveAuthenticatedUser, type AuthenticatedUser } from './auth';
-import { sanitizePayload } from '../../src/lib/sanitizer';
+import { getAdminDb, getAdminStorageBucket } from './firebase.js';
+import { AuthResolutionError, resolveAuthenticatedUser, type AuthenticatedUser } from './auth.js';
+import { sanitizePayload } from '../../src/lib/sanitizer.js';
 
 export type IntegrationSectionId = 'email' | 'whatsapp' | 'sms' | 'integrations';
 export type IntegrationAction = 'status' | 'update' | 'rotate' | 'test' | 'disconnect';

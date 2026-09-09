@@ -8,15 +8,15 @@
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { getAdminDb } from './_lib/firebase';
-import { verifyAuthToken } from './_lib/auth';
-import { requirePermission } from './_lib/permissions';
-import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked, isApiGroupAdmin, resolveApiCreateTenant, ApiTenantScopeError } from './_lib/registry';
-import { resolveApiOwnershipScope, apiRecordIsOwned } from './_lib/ownership';
-import { assertApiPartnerCanCreate, PartnerNotEligibleError } from './_lib/partnerEligibility';
-import { checkRateLimit, getRateLimitKey } from './_lib/rateLimit';
-import { filterManageableUsers, isOwnerEmail } from '../src/lib/ownerAccess';
-import { createProductWithSkuLockAdmin, SkuConflictError } from './_lib/productSkuLock';
+import { getAdminDb } from './_lib/firebase.js';
+import { verifyAuthToken } from './_lib/auth.js';
+import { requirePermission } from './_lib/permissions.js';
+import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked, isApiGroupAdmin, resolveApiCreateTenant, ApiTenantScopeError } from './_lib/registry.js';
+import { resolveApiOwnershipScope, apiRecordIsOwned } from './_lib/ownership.js';
+import { assertApiPartnerCanCreate, PartnerNotEligibleError } from './_lib/partnerEligibility.js';
+import { checkRateLimit, getRateLimitKey } from './_lib/rateLimit.js';
+import { filterManageableUsers, isOwnerEmail } from '../src/lib/ownerAccess.js';
+import { createProductWithSkuLockAdmin, SkuConflictError } from './_lib/productSkuLock.js';
 import {
   sendPaginated,
   sendCreated,
@@ -26,7 +26,7 @@ import {
   parsePagination,
   parseSearch,
   sanitizeCreateBody,
-} from './_lib/response';
+} from './_lib/response.js';
 
 const READ_ONLY_ENTITY_MESSAGE =
   'This resource is read-only through the REST API. Inventory quantities and ledger movements ' +

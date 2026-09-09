@@ -94,12 +94,12 @@ describe('api/biometrics/status.ts — minimal, self-only, never leaks the embed
   });
 
   it('reuses the existing createDefaultBiometricReferenceStore() — never a second storage model/collection', () => {
-    expect(statusRoute).toContain("import { createDefaultBiometricReferenceStore } from '../_lib/biometrics/referenceStore'");
+    expect(statusRoute).toMatch(/import \{ createDefaultBiometricReferenceStore \} from '\.\.\/_lib\/biometrics\/referenceStore(?:\.js)?'/);
   });
 
   it('is authenticated via the same verifyAuthToken/rateLimit mechanism as enroll.ts/verify.ts', () => {
-    expect(statusRoute).toContain("import { verifyAuthToken } from '../_lib/auth'");
-    expect(statusRoute).toContain("import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit'");
+    expect(statusRoute).toMatch(/import \{ verifyAuthToken \} from '\.\.\/_lib\/auth(?:\.js)?'/);
+    expect(statusRoute).toMatch(/import \{ checkRateLimit, getRateLimitKey \} from '\.\.\/_lib\/rateLimit(?:\.js)?'/);
   });
 });
 

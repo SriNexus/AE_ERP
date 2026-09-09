@@ -33,7 +33,7 @@ import type {
   QualityResult,
   ResolvedFaceDetection,
   VerificationResult,
-} from '../providers/BiometricProvider';
+} from '../providers/BiometricProvider.js';
 
 export type PipelineDomainReason =
   | 'no_face'

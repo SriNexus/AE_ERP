@@ -1,4 +1,4 @@
-import type { DemoDocument, DemoSeedPlan } from '../types.ts';
+import type { DemoDocument, DemoSeedPlan } from '../types.js';
 import {
   DEMO_COMPANY_ID,
   DEMO_ERP_USER_ID,
@@ -6,8 +6,8 @@ import {
   DEMO_SEED_ID,
   OFFICIAL_DEMO_EMAIL,
   demoDocumentId,
-} from '../config.ts';
-import { demoAt, demoDate } from './timeline.ts';
+} from '../config.js';
+import { demoAt, demoDate } from './timeline.js';
 
 // Phase 1 (Multi-Tenant): every demo business document carries the demo
 // tenant's Group, exactly like companyId — the demo dataset is a fully

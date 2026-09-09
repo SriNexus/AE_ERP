@@ -18,9 +18,9 @@
  * environment config, §19, not a code change).
  */
 
-import type { BiometricEmbeddingVector, BiometricProvider } from '../providers/BiometricProvider';
-import { ambiguousMatch, verificationFailed } from './types';
-import { translateProviderError } from './detect';
+import type { BiometricEmbeddingVector, BiometricProvider } from '../providers/BiometricProvider.js';
+import { ambiguousMatch, verificationFailed } from './types.js';
+import { translateProviderError } from './detect.js';
 
 export interface VerifyPolicyConfig {
   /** Overrides the provider's own reported threshold. Unset by default —

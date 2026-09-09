@@ -7,8 +7,8 @@
  * fail-closed decision actually happens, exactly as §10 assigns it.
  */
 
-import { BiometricProviderError, type BiometricFrame, type BiometricProvider, type ResolvedFaceDetection } from '../providers/BiometricProvider';
-import { BiometricPipelineError, multipleFaces, noFace } from './types';
+import { BiometricProviderError, type BiometricFrame, type BiometricProvider, type ResolvedFaceDetection } from '../providers/BiometricProvider.js';
+import { BiometricPipelineError, multipleFaces, noFace } from './types.js';
 
 /** Translates a Phase 2 provider-level failure into the Phase 4 pipeline's
  * shared error type — same reason string, never a different one, so callers

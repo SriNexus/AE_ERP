@@ -17,7 +17,7 @@
  * are plain strings (stamped values), never a DeepFace SDK type.
  */
 
-import type { BiometricEmbeddingVector } from './providers/BiometricProvider';
+import type { BiometricEmbeddingVector } from './providers/BiometricProvider.js';
 
 export const BIOMETRIC_FACE_REFERENCE_SCHEMA_VERSION = 1;
 

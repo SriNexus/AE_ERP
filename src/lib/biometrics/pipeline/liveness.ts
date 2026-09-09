@@ -11,9 +11,9 @@
  * independently re-checked here, per §6/§10).
  */
 
-import type { BiometricFrame, BiometricProvider, LivenessResult, ResolvedFaceDetection } from '../providers/BiometricProvider';
-import { livenessFailed } from './types';
-import { translateProviderError } from './detect';
+import type { BiometricFrame, BiometricProvider, LivenessResult, ResolvedFaceDetection } from '../providers/BiometricProvider.js';
+import { livenessFailed } from './types.js';
+import { translateProviderError } from './detect.js';
 
 export async function runLivenessStage(
   provider: BiometricProvider,

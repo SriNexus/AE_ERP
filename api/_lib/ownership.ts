@@ -26,8 +26,8 @@
  *     to the manager's own company, excluding deleted users. No recursion.
  */
 
-import type { AuthenticatedUser } from './auth';
-import { resolveEffectiveVisibility } from './permissions';
+import type { AuthenticatedUser } from './auth.js';
+import { resolveEffectiveVisibility } from './permissions.js';
 
 /** Registered entities whose seed narrows some role below 'all' visibility. */
 export const OWNERSHIP_SCOPED_COLLECTIONS = new Set<string>(['leads', 'customers']);

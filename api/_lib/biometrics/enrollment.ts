@@ -11,17 +11,17 @@
  * nothing is written"). Every outcome (pass and fail) is audited.
  */
 
-import type { AuthenticatedUser } from '../auth';
-import type { BiometricFrame, BiometricProvider } from '../../../src/lib/biometrics/providers/BiometricProvider';
-import { BiometricPipelineError, enrollmentRevoked, persistenceFailed } from '../../../src/lib/biometrics/pipeline/types';
-import { runDetectStage } from '../../../src/lib/biometrics/pipeline/detect';
-import { runQualityStage } from '../../../src/lib/biometrics/pipeline/quality';
-import { runLivenessStage } from '../../../src/lib/biometrics/pipeline/liveness';
-import { runEmbeddingStage } from '../../../src/lib/biometrics/pipeline/embedding';
-import { evaluateDuplicateFacePolicy, type DuplicateFaceWarning } from '../../../src/lib/biometrics/pipeline/duplicateFacePolicy';
-import { resolveEnrollmentTarget, type UserProfileReader } from './authorization';
-import { buildNewReference, buildReEnrollmentPatch, type BiometricReferenceStore } from './referenceStore';
-import type { BiometricAuditWriter } from './audit';
+import type { AuthenticatedUser } from '../auth.js';
+import type { BiometricFrame, BiometricProvider } from '../../../src/lib/biometrics/providers/BiometricProvider.js';
+import { BiometricPipelineError, enrollmentRevoked, persistenceFailed } from '../../../src/lib/biometrics/pipeline/types.js';
+import { runDetectStage } from '../../../src/lib/biometrics/pipeline/detect.js';
+import { runQualityStage } from '../../../src/lib/biometrics/pipeline/quality.js';
+import { runLivenessStage } from '../../../src/lib/biometrics/pipeline/liveness.js';
+import { runEmbeddingStage } from '../../../src/lib/biometrics/pipeline/embedding.js';
+import { evaluateDuplicateFacePolicy, type DuplicateFaceWarning } from '../../../src/lib/biometrics/pipeline/duplicateFacePolicy.js';
+import { resolveEnrollmentTarget, type UserProfileReader } from './authorization.js';
+import { buildNewReference, buildReEnrollmentPatch, type BiometricReferenceStore } from './referenceStore.js';
+import type { BiometricAuditWriter } from './audit.js';
 
 export interface EnrollmentDependencies {
   provider: BiometricProvider;

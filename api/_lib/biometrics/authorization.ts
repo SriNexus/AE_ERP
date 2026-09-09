@@ -35,8 +35,8 @@
  * own `INACTIVE_USER` check) — never from a request body field.
  */
 
-import type { AuthenticatedUser } from '../auth';
-import { crossTenantDenied, notAuthorized } from '../../../src/lib/biometrics/pipeline/types';
+import type { AuthenticatedUser } from '../auth.js';
+import { crossTenantDenied, notAuthorized } from '../../../src/lib/biometrics/pipeline/types.js';
 
 export interface UserProfileReader {
   readUser(userId: string): Promise<Record<string, unknown> | null>;

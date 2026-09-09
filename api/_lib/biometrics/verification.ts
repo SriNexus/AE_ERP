@@ -14,18 +14,18 @@
  * biometric check-in/out is explicitly Phase 8's job.
  */
 
-import type { AuthenticatedUser } from '../auth';
-import type { BiometricFrame, BiometricProvider } from '../../../src/lib/biometrics/providers/BiometricProvider';
-import { BiometricPipelineError, noEnrollment, persistenceFailed } from '../../../src/lib/biometrics/pipeline/types';
-import { runDetectStage } from '../../../src/lib/biometrics/pipeline/detect';
-import { runQualityStage } from '../../../src/lib/biometrics/pipeline/quality';
-import { runLivenessStage } from '../../../src/lib/biometrics/pipeline/liveness';
-import { runEmbeddingStage } from '../../../src/lib/biometrics/pipeline/embedding';
-import { runVerifyStage, type VerifyPolicyConfig } from '../../../src/lib/biometrics/pipeline/verify';
-import { assertReferenceActive, decideVerification } from '../../../src/lib/biometrics/pipeline/policy';
-import { resolveVerificationTarget } from './authorization';
-import type { BiometricReferenceStore } from './referenceStore';
-import type { BiometricAuditWriter } from './audit';
+import type { AuthenticatedUser } from '../auth.js';
+import type { BiometricFrame, BiometricProvider } from '../../../src/lib/biometrics/providers/BiometricProvider.js';
+import { BiometricPipelineError, noEnrollment, persistenceFailed } from '../../../src/lib/biometrics/pipeline/types.js';
+import { runDetectStage } from '../../../src/lib/biometrics/pipeline/detect.js';
+import { runQualityStage } from '../../../src/lib/biometrics/pipeline/quality.js';
+import { runLivenessStage } from '../../../src/lib/biometrics/pipeline/liveness.js';
+import { runEmbeddingStage } from '../../../src/lib/biometrics/pipeline/embedding.js';
+import { runVerifyStage, type VerifyPolicyConfig } from '../../../src/lib/biometrics/pipeline/verify.js';
+import { assertReferenceActive, decideVerification } from '../../../src/lib/biometrics/pipeline/policy.js';
+import { resolveVerificationTarget } from './authorization.js';
+import type { BiometricReferenceStore } from './referenceStore.js';
+import type { BiometricAuditWriter } from './audit.js';
 
 export interface VerificationDependencies {
   provider: BiometricProvider;

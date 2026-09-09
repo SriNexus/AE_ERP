@@ -8,15 +8,15 @@
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { getAdminDb } from '../_lib/firebase';
-import { verifyAuthToken } from '../_lib/auth';
-import { requirePermission } from '../_lib/permissions';
-import { ENTITY_REGISTRY, isRestWriteBlocked, canAccessApiResource, isGlobalCollection } from '../_lib/registry';
-import { resolveApiOwnershipScope, apiRecordIsOwned } from '../_lib/ownership';
-import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
-import { isHiddenOwnerRecord } from '../../src/lib/ownerAccess';
-import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, sendMethodNotAllowed, buildWritableUpdatePayload } from '../_lib/response';
-import { updateProductWithSkuLockAdmin, SkuConflictError } from '../_lib/productSkuLock';
+import { getAdminDb } from '../_lib/firebase.js';
+import { verifyAuthToken } from '../_lib/auth.js';
+import { requirePermission } from '../_lib/permissions.js';
+import { ENTITY_REGISTRY, isRestWriteBlocked, canAccessApiResource, isGlobalCollection } from '../_lib/registry.js';
+import { resolveApiOwnershipScope, apiRecordIsOwned } from '../_lib/ownership.js';
+import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit.js';
+import { isHiddenOwnerRecord } from '../../src/lib/ownerAccess.js';
+import { sendSuccess, sendNoContent, sendBadRequest, sendNotFound, sendInternalError, sendMethodNotAllowed, buildWritableUpdatePayload } from '../_lib/response.js';
+import { updateProductWithSkuLockAdmin, SkuConflictError } from '../_lib/productSkuLock.js';
 
 const READ_ONLY_ENTITY_MESSAGE =
   'This resource is read-only through the REST API. Inventory quantities and ledger movements ' +

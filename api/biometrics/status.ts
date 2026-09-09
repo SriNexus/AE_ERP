@@ -33,14 +33,14 @@
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { verifyAuthToken } from '../_lib/auth';
-import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
-import { sendSuccess, sendError, sendInternalError } from '../_lib/response';
-import { getAdminDb } from '../_lib/firebase';
-import { COLLECTIONS } from '../../src/lib/collections';
-import { createDefaultBiometricReferenceStore } from '../_lib/biometrics/referenceStore';
-import { resolveEnrollmentTarget } from '../_lib/biometrics/authorization';
-import { BiometricPipelineError } from '../../src/lib/biometrics/pipeline/types';
+import { verifyAuthToken } from '../_lib/auth.js';
+import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit.js';
+import { sendSuccess, sendError, sendInternalError } from '../_lib/response.js';
+import { getAdminDb } from '../_lib/firebase.js';
+import { COLLECTIONS } from '../../src/lib/collections.js';
+import { createDefaultBiometricReferenceStore } from '../_lib/biometrics/referenceStore.js';
+import { resolveEnrollmentTarget } from '../_lib/biometrics/authorization.js';
+import { BiometricPipelineError } from '../../src/lib/biometrics/pipeline/types.js';
 
 export type BiometricEnrollmentStatus = 'none' | 'active' | 'revoked';
 

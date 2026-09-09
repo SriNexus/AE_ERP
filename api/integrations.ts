@@ -1,13 +1,13 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { AuthResolutionError, resolveAuthenticatedUser } from './_lib/auth';
+import { AuthResolutionError, resolveAuthenticatedUser } from './_lib/auth.js';
 import {
   createDefaultIntegrationPlatformAdapter,
   resolveIntegrationRequest,
   normalizeIntegrationAction,
   normalizeIntegrationSection,
   type IntegrationPlatformAdapter,
-} from './_lib/integrationPlatform';
-import { sendBadRequest, sendError, sendSuccess } from './_lib/response';
+} from './_lib/integrationPlatform.js';
+import { sendBadRequest, sendError, sendSuccess } from './_lib/response.js';
 
 function headerValue(value: string | string[] | undefined): string | null {
   if (Array.isArray(value)) return value[0] || null;

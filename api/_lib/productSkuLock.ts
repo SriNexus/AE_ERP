@@ -19,7 +19,7 @@
  * Admin SDK in this Vercel function).
  */
 import type { Firestore } from 'firebase-admin/firestore';
-import { normalizeSku, productSkuLockId, lockHeldByAnotherProduct, type ProductSkuLockDoc } from '../../src/lib/inventory/skuLock';
+import { normalizeSku, productSkuLockId, lockHeldByAnotherProduct, type ProductSkuLockDoc } from '../../src/lib/inventory/skuLock.js';
 
 const PRODUCTS = 'products';
 const PRODUCT_SKU_LOCKS = 'product_sku_locks';

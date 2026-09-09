@@ -14,14 +14,14 @@
  * does not invent any field Phase 3 did not already define.
  */
 
-import { getAdminDb } from '../firebase';
-import { sanitizePayload } from '../../../src/lib/sanitizer';
-import { COLLECTIONS } from '../../../src/lib/collections';
+import { getAdminDb } from '../firebase.js';
+import { sanitizePayload } from '../../../src/lib/sanitizer.js';
+import { COLLECTIONS } from '../../../src/lib/collections.js';
 import {
   BIOMETRIC_FACE_REFERENCE_SCHEMA_VERSION,
   type BiometricFaceReference,
   type BiometricFaceReferenceHistoryEntry,
-} from '../../../src/lib/biometrics/biometricFaceReference';
+} from '../../../src/lib/biometrics/biometricFaceReference.js';
 
 export interface ActiveReferenceSummary {
   readonly userId: string;

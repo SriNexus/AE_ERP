@@ -19,7 +19,7 @@
  * profile status check in api/_lib/auth.ts).
  */
 
-import type { AuthenticatedUser } from './auth';
+import type { AuthenticatedUser } from './auth.js';
 
 /** Collections a Partner may create through the generic REST facade that are
  *  subject to the BD-3 lifecycle gate. */

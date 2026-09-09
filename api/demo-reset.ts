@@ -32,14 +32,14 @@
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { getAdminDb } from './_lib/firebase';
-import { verifyAuthToken } from './_lib/auth';
-import { DEMO_ERP_USER_ID } from '../src/config/demo';
-import { isOfficialDemoCompany } from '../src/config/demo';
-import { DEMO_COMPANY_ID, DEMO_RESETTABLE_COLLECTIONS, DEMO_SEED_ID } from '../scripts/demo/config.ts';
-import { buildCompleteDemoPlan } from '../scripts/demo/datasets/complete.ts';
+import { getAdminDb } from './_lib/firebase.js';
+import { verifyAuthToken } from './_lib/auth.js';
+import { DEMO_ERP_USER_ID } from '../src/config/demo.js';
+import { isOfficialDemoCompany } from '../src/config/demo.js';
+import { DEMO_COMPANY_ID, DEMO_RESETTABLE_COLLECTIONS, DEMO_SEED_ID } from '../scripts/demo/config.js';
+import { buildCompleteDemoPlan } from '../scripts/demo/datasets/complete.js';
 import { FieldValue } from 'firebase-admin/firestore';
-import { sanitizePayload } from '../src/lib/sanitizer';
+import { sanitizePayload } from '../src/lib/sanitizer.js';
 
 // ── Rate limiting ────────────────────────────────────────────
 const RESET_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes

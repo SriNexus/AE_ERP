@@ -20,13 +20,13 @@
  * request payloads").
  */
 
-import { getAdminDb } from '../firebase';
-import { sanitizePayload } from '../../../src/lib/sanitizer';
-import { COLLECTIONS } from '../../../src/lib/collections';
-import type { AuditLogEntry, AuditSeverity } from '../../../src/lib/auditLogger';
-import type { AuthenticatedUser } from '../auth';
-import type { PipelineReason } from '../../../src/lib/biometrics/pipeline/types';
-import type { DuplicateFaceWarning } from '../../../src/lib/biometrics/pipeline/duplicateFacePolicy';
+import { getAdminDb } from '../firebase.js';
+import { sanitizePayload } from '../../../src/lib/sanitizer.js';
+import { COLLECTIONS } from '../../../src/lib/collections.js';
+import type { AuditLogEntry, AuditSeverity } from '../../../src/lib/auditLogger.js';
+import type { AuthenticatedUser } from '../auth.js';
+import type { PipelineReason } from '../../../src/lib/biometrics/pipeline/types.js';
+import type { DuplicateFaceWarning } from '../../../src/lib/biometrics/pipeline/duplicateFacePolicy.js';
 
 export interface BiometricAuditWriter {
   writeEnrollmentEvent(input: {

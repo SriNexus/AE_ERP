@@ -258,7 +258,7 @@ describe('Phase 15.1 — the login-triggered sandbox reset endpoint uses the SAM
 
   it('seeds from the single deterministic buildCompleteDemoPlan(), not a separate hand-written dataset', () => {
     expect(src).toContain('buildCompleteDemoPlan');
-    expect(src).toMatch(/from ['"]\.\.\/scripts\/demo\/datasets\/complete\.ts['"]/);
+    expect(src).toMatch(/from ['"]\.\.\/scripts\/demo\/datasets\/complete(?:\.[tj]s)?['"]/);
   });
 
   it('deletes from the authoritative DEMO_RESETTABLE_COLLECTIONS list (kept in sync with the generator itself), not a hand-typed collection array that can silently drift out of sync', () => {

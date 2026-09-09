@@ -79,7 +79,7 @@ import {
   type QualityResult,
   type ResolvedFaceDetection,
   type VerificationResult,
-} from '../../../../src/lib/biometrics/providers/BiometricProvider';
+} from '../../../../src/lib/biometrics/providers/BiometricProvider.js';
 
 export interface DeepFaceProviderConfig {
   /** `DEEPFACE_SERVICE_URL` — base URL of the Phase 1 Python service, no

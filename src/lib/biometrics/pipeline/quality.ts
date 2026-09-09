@@ -3,9 +3,9 @@
  * "quality.ts → calls provider.assessQuality(), fails closed below threshold."
  */
 
-import type { BiometricFrame, BiometricProvider, QualityResult, ResolvedFaceDetection } from '../providers/BiometricProvider';
-import { poorQuality } from './types';
-import { translateProviderError } from './detect';
+import type { BiometricFrame, BiometricProvider, QualityResult, ResolvedFaceDetection } from '../providers/BiometricProvider.js';
+import { poorQuality } from './types.js';
+import { translateProviderError } from './detect.js';
 
 export async function runQualityStage(
   provider: BiometricProvider,

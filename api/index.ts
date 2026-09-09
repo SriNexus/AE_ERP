@@ -5,9 +5,9 @@
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { isAdminConfigured } from './_lib/firebase';
-import { verifyAuthToken } from './_lib/auth';
-import { ENTITY_REGISTRY } from './_lib/registry';
+import { isAdminConfigured } from './_lib/firebase.js';
+import { verifyAuthToken } from './_lib/auth.js';
+import { ENTITY_REGISTRY } from './_lib/registry.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Set CORS headers

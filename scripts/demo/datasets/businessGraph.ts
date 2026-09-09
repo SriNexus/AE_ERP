@@ -1,8 +1,8 @@
-import type {DemoDocument,DemoSeedPlan} from '../types.ts';
-import {DEMO_COMPANY_ID,DEMO_ERP_USER_ID,DEMO_SEED_ID,demoDocumentId} from '../config.ts';
-import {demoAt,demoDate} from './timeline.ts';
-import {warehouseNames,vendorNames,demoGstin,employeeUserIds as foundationEmployeeUserIds,assigneeIds} from './foundation.ts';
-import {SCHEME_REGISTRATION_REQUIRED_DOCUMENTS} from '../../../src/features/scheme-registration/types.ts';
+import type {DemoDocument,DemoSeedPlan} from '../types.js';
+import {DEMO_COMPANY_ID,DEMO_ERP_USER_ID,DEMO_SEED_ID,demoDocumentId} from '../config.js';
+import {demoAt,demoDate} from './timeline.js';
+import {warehouseNames,vendorNames,demoGstin,employeeUserIds as foundationEmployeeUserIds,assigneeIds} from './foundation.js';
+import {SCHEME_REGISTRATION_REQUIRED_DOCUMENTS} from '../../../src/features/scheme-registration/types.js';
 
 const base={companyId:DEMO_COMPANY_ID,isDemo:true,demoSeedId:DEMO_SEED_ID,isDeleted:false};
 const audit={createdBy:DEMO_ERP_USER_ID,updatedBy:DEMO_ERP_USER_ID};

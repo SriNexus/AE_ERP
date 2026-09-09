@@ -17,16 +17,16 @@
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { verifyAuthToken } from '../_lib/auth';
-import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit';
-import { sendSuccess, sendError, sendBadRequest, sendInternalError } from '../_lib/response';
-import { getAdminDb } from '../_lib/firebase';
-import { COLLECTIONS } from '../../src/lib/collections';
-import { BiometricPipelineError, malformedImage } from '../../src/lib/biometrics/pipeline/types';
-import { enrollBiometricFace } from '../_lib/biometrics/enrollment';
-import { createDefaultBiometricReferenceStore } from '../_lib/biometrics/referenceStore';
-import { createDefaultBiometricAuditWriter } from '../_lib/biometrics/audit';
-import { resolveConfiguredProvider } from '../_lib/biometrics/providerConfig';
+import { verifyAuthToken } from '../_lib/auth.js';
+import { checkRateLimit, getRateLimitKey } from '../_lib/rateLimit.js';
+import { sendSuccess, sendError, sendBadRequest, sendInternalError } from '../_lib/response.js';
+import { getAdminDb } from '../_lib/firebase.js';
+import { COLLECTIONS } from '../../src/lib/collections.js';
+import { BiometricPipelineError, malformedImage } from '../../src/lib/biometrics/pipeline/types.js';
+import { enrollBiometricFace } from '../_lib/biometrics/enrollment.js';
+import { createDefaultBiometricReferenceStore } from '../_lib/biometrics/referenceStore.js';
+import { createDefaultBiometricAuditWriter } from '../_lib/biometrics/audit.js';
+import { resolveConfiguredProvider } from '../_lib/biometrics/providerConfig.js';
 
 function setCorsHeaders(res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');

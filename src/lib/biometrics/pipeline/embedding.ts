@@ -7,8 +7,8 @@
  * frame was already rejected by the Detect stage before this one runs).
  */
 
-import type { BiometricFrame, BiometricProvider, EmbeddingResult, ResolvedFaceDetection } from '../providers/BiometricProvider';
-import { translateProviderError } from './detect';
+import type { BiometricFrame, BiometricProvider, EmbeddingResult, ResolvedFaceDetection } from '../providers/BiometricProvider.js';
+import { translateProviderError } from './detect.js';
 
 export async function runEmbeddingStage(
   provider: BiometricProvider,

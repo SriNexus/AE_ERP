@@ -5,10 +5,18 @@
  * for server-side enforcement. Reads role documents from Firestore.
  */
 
-import { getAdminDb } from './firebase';
-import type { AuthenticatedUser } from './auth';
-import { roleDocumentId } from '../../src/lib/roleBootstrap';
-import { isApiGroupAdmin } from './registry';
+import { getAdminDb } from './firebase.js';
+import type { AuthenticatedUser } from './auth.js';
+import { isApiGroupAdmin } from './registry.js';
+
+// Per-company system-role document id — `{companyId}_{RoleName}`, the exact
+// deterministic scheme `roleDocumentId()` in `src/lib/roleBootstrap.ts` and the
+// role-seeding code use. Inlined here (rather than imported) so this server
+// module stays free of the client `src/lib/*` import graph (`roleBootstrap`
+// pulls in `src/lib/permissions` → `src/store/useAppStore` → …), keeping the
+// Vercel function bundle small and Node-safe (BRAIN.md §21).
+const roleDocumentId = (companyId: string, roleName: string): string =>
+  `${companyId}_${roleName}`;
 
 // ── Permission types (mirrors client-side) ────────────────────
 

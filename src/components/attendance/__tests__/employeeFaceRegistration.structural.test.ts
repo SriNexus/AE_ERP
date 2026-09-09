@@ -107,7 +107,7 @@ describe('api/biometrics/status.ts — on-behalf-of status reuses resolveEnrollm
   });
 
   it('imports and calls the SAME resolveEnrollmentTarget() enroll.ts uses — no duplicate/parallel authorization function', () => {
-    expect(statusRouteCode).toContain("import { resolveEnrollmentTarget } from '../_lib/biometrics/authorization'");
+    expect(statusRouteCode).toMatch(/import \{ resolveEnrollmentTarget \} from '\.\.\/_lib\/biometrics\/authorization(?:\.js)?'/);
     expect(statusRouteCode).toContain('resolveEnrollmentTarget(user, requestedTargetUserId,');
   });
 

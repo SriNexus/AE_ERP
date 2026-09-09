@@ -40,7 +40,7 @@ import type {
   QualityResult,
   ResolvedFaceDetection,
   VerificationResult,
-} from './BiometricProvider';
+} from './BiometricProvider.js';
 
 const DEFAULT_DETECTION_RESULT: DetectionResult = {
   faceCount: 1,

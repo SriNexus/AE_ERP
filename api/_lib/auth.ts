@@ -7,8 +7,8 @@
  */
 
 import { getAuth, type DecodedIdToken } from 'firebase-admin/auth';
-import { getAdminDb } from './firebase';
-import { isOwnerEmail } from '../../src/lib/ownerAccess';
+import { getAdminDb } from './firebase.js';
+import { isOwnerEmail } from '../../src/lib/ownerAccess.js';
 
 export interface AuthenticatedUser {
   uid: string;

@@ -27,7 +27,7 @@
  * candidate list from Firestore and passing it in.
  */
 
-import type { BiometricEmbeddingVector, BiometricProvider } from '../providers/BiometricProvider';
+import type { BiometricEmbeddingVector, BiometricProvider } from '../providers/BiometricProvider.js';
 
 export interface DuplicateFaceCandidate {
   readonly userId: string;
