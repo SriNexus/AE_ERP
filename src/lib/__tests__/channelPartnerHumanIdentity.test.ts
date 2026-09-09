@@ -57,7 +57,10 @@ describe('partnerAccountState — approval must not silently mean "can log in"',
 const h = vi.hoisted(() => ({
   getDoc: vi.fn(),
   getDocs: vi.fn(),
-  user: { id: 'uid-partner' } as { id: string } | null,
+  // role: 'Partner' — resolveCurrentPartnerDocId's fast path short-circuits to
+  // null (zero reads) for any non-Partner identity; the cache-semantics cases
+  // below exercise the Partner fallthrough that actually hits Firestore.
+  user: { id: 'uid-partner', role: 'Partner' } as { id: string; role?: string } | null,
 }));
 vi.mock('firebase/firestore', () => ({
   collection: vi.fn(), doc: vi.fn(), query: vi.fn(), where: vi.fn(),
@@ -78,7 +81,7 @@ describe('resolveCurrentPartnerDocId — never caches a null / error result', ()
   beforeEach(() => {
     vi.clearAllMocks();
     resetPartnerDocIdCache();
-    h.user = { id: 'uid-partner' };
+    h.user = { id: 'uid-partner', role: 'Partner' };
   });
 
   it('a transient read error is NOT cached — the next call retries and resolves', async () => {

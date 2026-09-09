@@ -24,6 +24,11 @@ export type AppUser = {
   status?: string;
   isSuperAdmin?: boolean;
   isOwner?: boolean;
+  // Phase 1 (Channel Partner): users.channelPartnerId — denormalized link to
+  // the ONE channel_partners doc this login is linked to (Partner role only).
+  // Carried into the session so resolveCurrentPartnerDocId() resolves a linked
+  // partner from memory instead of a Firestore round-trip on every getAll().
+  channelPartnerId?: string;
 };
 export type RuntimePermissionMap = Record<string, unknown>;
 export type RuntimePermissionCache = { ready:boolean; roles:RuntimePermissionMap; loadedAt?:string; diagnostics:string[] };

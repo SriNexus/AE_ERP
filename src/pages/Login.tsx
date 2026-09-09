@@ -321,6 +321,11 @@ export default function Login() {
           signatureUrl: typeof match.signatureUrl === 'string' ? match.signatureUrl : typeof match.signature === 'string' ? match.signature : undefined,
           status: typeof match.status === 'string' ? match.status : undefined,
           isSuperAdmin: match.isSuperAdmin === true,
+          // PERF: carry the partner link so resolveCurrentPartnerDocId() is a
+          // memory read from the first getAll() (boot self-heal also refills it).
+          channelPartnerId: typeof (match as { channelPartnerId?: unknown }).channelPartnerId === 'string'
+            ? (match as { channelPartnerId?: string }).channelPartnerId
+            : undefined,
         });
         setActiveCompanyId(appUser.companyId);
         setUser(appUser);

@@ -303,6 +303,73 @@ describe('Phase 6 — creation + canonical ownership', () => {
     await expect(createSchemeRegistration({ projectId: 'PRJ-1', vendorName: 'Vendor A' }))
       .rejects.toThrow('You do not have permission to create scheme registrations.');
   });
+
+  // ── RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09) ──────────────
+  // A SUSPENDED / INACTIVE / not-yet-approved Channel Partner cannot FILE a
+  // NEW scheme registration. This is the workflow-layer (runtime) proof —
+  // createSchemeRegistration() actually runs and calls assertPartnerCanCreate
+  // on the resolved channel_partners record. The rules-layer twin
+  // (schemeRegPartnerOwnsProject -> channelPartnerStatusActive) shares the
+  // exact status check that partnerLifecycleEligibility.emulator.test.ts
+  // proves against the real emulator for leads/customers/projects; the
+  // scheme_registrations rules block itself is documented not directly
+  // emulator-testable (§10.4 / AUTH-S1b — create+update+fallback coverage
+  // summation exceeds the 1000-expression ceiling).
+  describe('BD-3 — partner lifecycle gate on scheme creation', () => {
+    function partnerActor(status: string | undefined) {
+      mocks.resolveCurrentPartnerDocId.mockResolvedValue('PART-1');
+      mocks.getOne.mockImplementation(async (collection: string) => {
+        if (collection === 'projects') return PARTNER_PROJECT;
+        if (collection === 'channel_partners') {
+          return { id: 'PART-1', userId: 'u-partner', managerId: 'u-manager', partnerName: 'Partner One', ...(status !== undefined ? { status } : {}) };
+        }
+        return undefined;
+      });
+    }
+
+    it('ACTIVE partner CAN file a registration', async () => {
+      partnerActor('active');
+      const record = await createSchemeRegistration({ projectId: 'PRJ-1', vendorName: 'Vendor A' });
+      expect(record.status).toBe('Draft');
+      expect(mocks.createDocWithId).toHaveBeenCalled();
+    });
+
+    it('partner with NO status field CAN file (grandfathered to active)', async () => {
+      partnerActor(undefined);
+      const record = await createSchemeRegistration({ projectId: 'PRJ-1', vendorName: 'Vendor A' });
+      expect(record.status).toBe('Draft');
+    });
+
+    it('SUSPENDED partner CANNOT file a new registration', async () => {
+      partnerActor('suspended');
+      await expect(createSchemeRegistration({ projectId: 'PRJ-1', vendorName: 'Vendor A' }))
+        .rejects.toThrow(/suspended/i);
+      expect(mocks.createDocWithId).not.toHaveBeenCalled();
+    });
+
+    it('INACTIVE partner CANNOT file a new registration', async () => {
+      partnerActor('inactive');
+      await expect(createSchemeRegistration({ projectId: 'PRJ-1', vendorName: 'Vendor A' }))
+        .rejects.toThrow(/deactivat/i);
+      expect(mocks.createDocWithId).not.toHaveBeenCalled();
+    });
+
+    it('pending_approval partner CANNOT file a new registration', async () => {
+      partnerActor('pending_approval');
+      await expect(createSchemeRegistration({ projectId: 'PRJ-1', vendorName: 'Vendor A' }))
+        .rejects.toThrow(/pending approval/i);
+      expect(mocks.createDocWithId).not.toHaveBeenCalled();
+    });
+
+    it('a STAFF (non-partner) actor is not gated by any partner status', async () => {
+      // no resolveCurrentPartnerDocId -> staff path; project carries partnerId
+      mocks.resolveCurrentPartnerDocId.mockResolvedValue(null);
+      mocks.getOne.mockImplementation(async (collection: string) =>
+        collection === 'projects' ? { ...PARTNER_PROJECT, partnerId: 'PART-SUSPENDED' } : undefined);
+      const record = await createSchemeRegistration({ projectId: 'PRJ-1', vendorName: 'Vendor A' });
+      expect(record.status).toBe('Draft');
+    });
+  });
 });
 
 describe('Phase 6 — status machine (authoritative 8-status model)', () => {

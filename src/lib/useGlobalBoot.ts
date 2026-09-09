@@ -316,7 +316,6 @@ export function useGlobalBoot() {
     // fallback. Company Settings changes (name, branding, GST, etc.) made
     // through the normal UI are reflected here the same as any other Group.
     if (!companies || companies.length === 0) return;
-    if (!companies || companies.length === 0) return;
     const defaultCo = companies.find((c: any) => c.isDefault) || companies[0];
     if (defaultCo) {
       const currentGlobal = useAppStore.getState().globalCompany;
@@ -442,7 +441,12 @@ export function useGlobalBoot() {
   // adds cases where teamMemberIds gets resolved, never removes one.
   const roleHasTeamVisibility = !!roleData?.permissions && Object.values(roleData.permissions as Record<string, { visibility?: string }>).some((modulePermissions) => modulePermissions?.visibility === 'team');
   const isManager = user?.role==='Manager'||user?.role==='TL'||roleHasTeamVisibility;
-  const { data: users } = useQuery({ queryKey:['users_hierarchy'], queryFn:()=>getAll(COLLECTIONS.USERS,[]), staleTime:1000*60*30, enabled:!!user&&isManager });
+  // PERF: share the ['users'] cache key with every use*Users() hook (assignee
+  // pickers, Users page, etc.) instead of a private ['users_hierarchy'] key —
+  // both back the identical getAll(USERS) read, so keying them together turns
+  // a Manager's "boot reads all users + first assignee-picker page reads all
+  // users again" into a single warm read.
+  const { data: users } = useQuery({ queryKey:['users'], queryFn:()=>getAll(COLLECTIONS.USERS,[]), staleTime:1000*60*30, enabled:!!user&&isManager });
   useEffect(() => {
     if (!user || !users) return;
     setTeamMemberIds(users.filter((u:any)=>u.managerId===user.id).map((u:any)=>u.id));

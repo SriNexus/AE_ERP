@@ -50,6 +50,21 @@ export async function resolveCurrentPartnerDocId(): Promise<string | null> {
   const state = useAppStore.getState();
   const user = state.user;
   if (!user?.id) return null;
+
+  // PERF: fast path — NO Firestore read. This resolver is awaited at the start
+  // of EVERY getAll() call; the old code re-ran two round-trips (a users-doc
+  // get + a channel_partners scan) on every list load for every NON-partner
+  // user, because it only cached a *successful* resolution. Two facts remove
+  // that tax:
+  //   1. the canonical link (users.channelPartnerId) is now carried into the
+  //      session at login (userProfile.profileToAppUser) — a linked partner
+  //      resolves from memory;
+  //   2. only a Partner-role identity is ever linked to a channel_partners
+  //      doc — every other role short-circuits to null with zero reads.
+  const sessionLink = typeof user.channelPartnerId === 'string' ? user.channelPartnerId.trim() : '';
+  if (sessionLink) return sessionLink;
+  if (String(user.role || '').trim().toLowerCase() !== 'partner') return null;
+
   if (cachedForUserId === user.id && cachedPartnerDocId) return cachedPartnerDocId;
 
   try {

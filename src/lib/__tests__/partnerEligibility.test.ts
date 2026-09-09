@@ -150,6 +150,10 @@ describe('BD-3 — enforcement is wired at every plane', () => {
   it('ChannelPartnerDomainService.ts: transitioning a partner to "inactive" also deactivates the linked login', () => {
     const svc = readFileSync(new URL('../../services/ChannelPartnerDomainService.ts', import.meta.url), 'utf8');
     expect(svc).toMatch(/newStatus === 'inactive'[\s\S]{0,200}status: 'Inactive'/);
-    expect(svc).toMatch(/partner\?\.status === 'inactive' && newStatus !== 'inactive'[\s\S]{0,200}status: 'Active'/);
+    // Reactivation is guarded: it restores status: 'Active' ONLY when the
+    // partnerLifecycleHold marker (set when THIS flow deactivated an active
+    // login) is present, so an independent deactivation is never overridden.
+    expect(svc).toMatch(/partner\?\.status === 'inactive'[\s\S]{0,300}partnerLifecycleHold === true[\s\S]{0,120}status: 'Active'/);
+    expect(svc).toMatch(/partnerLifecycleHold: true/);
   });
 });

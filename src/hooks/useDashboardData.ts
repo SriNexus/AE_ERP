@@ -42,7 +42,15 @@ export function useDashboardOverview(companyId?: string) {
   return useQuery({
     queryKey: ['dashboard-overview', companyId || 'none'],
     enabled: Boolean(companyId),
-    staleTime: 45_000,
+    // PERF: a KPI dashboard does not need 45s freshness — this query fans out
+    // to ~30 aggregate/count round-trips, so the old 45s staleTime re-ran all
+    // of them on every navigation back to the dashboard within a working
+    // session. 3 min is well within acceptable staleness for headline counts
+    // and is still tighter than the app-wide 5 min default (queryClient.ts).
+    // A hard refresh, reconnect, or any mutation that invalidates
+    // ['dashboard-overview'] still forces a refetch.
+    staleTime: 3 * 60_000,
+    gcTime: 10 * 60_000,
     placeholderData: EMPTY_DASHBOARD_OVERVIEW,
     queryFn: async (): Promise<DashboardOverview> => {
       if (!companyId) return EMPTY_DASHBOARD_OVERVIEW;

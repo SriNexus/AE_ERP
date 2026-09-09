@@ -38,6 +38,9 @@ export type CanonicalUserProfile = {
   isSuperAdmin?: boolean;
   // Phase 1 (Multi-Tenant §3.2): users.groupId — denormalized Group FK.
   groupId?: string;
+  // Phase 1 (Channel Partner): users.channelPartnerId — denormalized link to
+  // the ONE channel_partners doc this login is linked to (Partner role only).
+  channelPartnerId?: string;
   updatedAt?: string;
   updatedBy?: string;
 };
@@ -131,6 +134,7 @@ export function normalizeUserProfile(raw: Record<string, unknown> & { id: string
     status: text(raw.status) || undefined,
     isSuperAdmin: raw.isSuperAdmin === true,
     groupId: text(raw.groupId) || undefined,
+    channelPartnerId: text(raw.channelPartnerId) || undefined,
     updatedAt: toISO(raw.updatedAt),
     updatedBy: text(raw.updatedBy) || undefined,
   };
@@ -154,6 +158,10 @@ export function profileToAppUser(profile: CanonicalUserProfile): AppUser {
     status: profile.status,
     isSuperAdmin: profile.isSuperAdmin === true,
     groupId: profile.groupId,
+    // PERF (§28): carried into the session so resolveCurrentPartnerDocId()
+    // resolves a linked partner from memory instead of a Firestore round-trip
+    // on every getAll() call.
+    channelPartnerId: profile.channelPartnerId,
   };
 }
 

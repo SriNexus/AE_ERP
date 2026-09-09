@@ -142,26 +142,48 @@ export class ChannelPartnerDomainService {
     // then denies every read/write and onUserDeactivated revokes tokens —
     // no per-collection rules change and no client hiding required.
     // 'suspended' deliberately does NOT touch the login (the owner policy
-    // keeps portal access for suspended partners). Reversible: transitioning
-    // a previously-inactive partner back to any other status reactivates the
-    // login. No-op for every current UI flow (approve / suspend / reactivate
-    // never involve 'inactive').
+    // keeps portal access for suspended partners).
+    //
+    // Reversibility is SAFE: a `partnerLifecycleHold` marker is stamped on
+    // the users doc ONLY when this mechanism deactivates an otherwise-active
+    // login, and a later reactivate restores `status: 'Active'` ONLY when
+    // that marker is present — so a login that was independently deactivated
+    // for another reason (HR leave, security hold, an admin action outside
+    // this flow) is NEVER accidentally re-enabled when the partner status
+    // flips back. Both writes are best-effort (a non-Admin actor — e.g. a
+    // Manager — cannot write the users doc; the partner-status write already
+    // succeeded and still blocks NEW-record creation via
+    // channelPartnerStatusActive()).
     const linkedUserId = stringValue(partner?.userId);
     if (linkedUserId) {
       const actorId = useAppStore.getState().user?.id || 'system';
       const nowIso = new Date().toISOString();
-      if (newStatus === 'inactive') {
-        await updateDocById(COLLECTIONS.USERS, linkedUserId, {
-          status: 'Inactive',
-          updatedBy: actorId,
-          updatedAt: nowIso,
-        });
-      } else if (partner?.status === 'inactive' && newStatus !== 'inactive') {
-        await updateDocById(COLLECTIONS.USERS, linkedUserId, {
-          status: 'Active',
-          updatedBy: actorId,
-          updatedAt: nowIso,
-        });
+      const inactiveLike = (s: unknown) => /^(inactive|suspended|disabled)$/i.test(String(s ?? ''));
+      try {
+        if (newStatus === 'inactive') {
+          const linkedUser = await getOne<{ status?: string }>(COLLECTIONS.USERS, linkedUserId);
+          await updateDocById(COLLECTIONS.USERS, linkedUserId, {
+            status: 'Inactive',
+            // claim the hold only if WE are deactivating an active login
+            ...(inactiveLike(linkedUser?.status) ? {} : { partnerLifecycleHold: true }),
+            updatedBy: actorId,
+            updatedAt: nowIso,
+          });
+        } else if (partner?.status === 'inactive') {
+          const linkedUser = await getOne<{ partnerLifecycleHold?: boolean }>(COLLECTIONS.USERS, linkedUserId);
+          if (linkedUser?.partnerLifecycleHold === true) {
+            await updateDocById(COLLECTIONS.USERS, linkedUserId, {
+              status: 'Active',
+              partnerLifecycleHold: false,
+              updatedBy: actorId,
+              updatedAt: nowIso,
+            });
+          }
+          // else: the login was NOT deactivated by the partner lifecycle
+          // (or is inactive for an independent reason) — leave it untouched.
+        }
+      } catch (err) {
+        console.warn('[transitionStatus] linked-login status sync skipped (best-effort)', err);
       }
     }
   }
