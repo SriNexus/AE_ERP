@@ -64,7 +64,11 @@ describe('P03 Appearance settings', () => {
     // this assertion protects are UNCHANGED: the admin branch still requires
     // Admin/owner/super AND same-active-company (hasCompanyId + map.companyId
     // equality + companyGroupIsActive), just expressed inline.
-    expect(rules).toContain("isOwnerIdentity() || actor.role == 'Admin' || isSuperAdminFlag(actor)");
+    // BD-5 (owner-approved 2026-09-09): the admin branch's raw `actor.role ==
+    // 'Admin'` now also admits the `Management` alias (Admin-equivalent) —
+    // identical treatment to every other direct role site. The tenant guard
+    // (owner/super OR same-active-company) is unchanged.
+    expect(rules).toContain("isOwnerIdentity() || actor.role in ['Admin', 'Management'] || isSuperAdminFlag(actor)");
     expect(rules).toContain('hasCompanyId(data) && data.companyId == authMap.companyId && companyGroupIsActive(data)');
   });
 });

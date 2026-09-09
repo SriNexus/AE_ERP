@@ -42,6 +42,7 @@ export default defineConfig({
       'src/lib/__tests__/customersOwnershipScope.emulator.test.ts',
       'src/lib/__tests__/leadsOwnershipScope.emulator.test.ts',
       'src/lib/__tests__/commissionSettlementOwnershipScope.emulator.test.ts',
+      'src/lib/__tests__/partnerLifecycleEligibility.emulator.test.ts',
     ],
   },
 });

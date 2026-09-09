@@ -28,6 +28,8 @@ import { useProjects, useSaveProject } from '../../features/projects/hooks/usePr
 import { useCustomers } from '../../features/customers/hooks/useCustomers';
 import { usePartnerSelf } from '../../features/channel-partner/hooks/usePartnerSelf';
 import { filterPartnerOwnedCustomers, filterPartnerOwnedProjects } from '../../lib/partnerOwnership';
+import { partnerCreateBlockReason } from '../../lib/partnerEligibility';
+import toast from 'react-hot-toast';
 import type { ChannelPartner } from '../../features/channel-partner/types';
 import { useAppStore } from '../../store/useAppStore';
 import { statusBadge } from '../../components/ui/Badge';
@@ -121,9 +123,19 @@ export default function PartnerProjects() {
     }
   }, [openParam, partnerProjects]);
 
+  // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a suspended /
+  // inactive / not-yet-approved partner cannot create new records.
+  // firestore.rules + the REST API are authoritative; this is the clear
+  // client-side message + affordance gate.
+  const createBlockReason = partnerCreateBlockReason(partner, 'creating a project');
+
   function handleSubmitProject(e: React.FormEvent) {
     e.preventDefault();
     if (saveProject.isPending) return;
+    if (createBlockReason) {
+      toast.error(createBlockReason);
+      return;
+    }
     const customer = partnerCustomers.find((c: any) => c.id === form.customerId);
     saveProject.mutate({ ...form, customerName: customer?.name || customer?.company || '' });
   }
@@ -217,7 +229,13 @@ export default function PartnerProjects() {
           <Button variant="outline" size="sm" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => refetch()}>
             Refresh
           </Button>
-          <Button size="sm" icon={<Plus className="h-4 w-4" />} onClick={() => { setForm({ ...PROJECT_FORM_DEFAULT }); setShowForm(true); }}>
+          <Button
+            size="sm"
+            icon={<Plus className="h-4 w-4" />}
+            onClick={() => { setForm({ ...PROJECT_FORM_DEFAULT }); setShowForm(true); }}
+            disabled={!!createBlockReason}
+            title={createBlockReason || undefined}
+          >
             Create Project
           </Button>
         </div>
@@ -304,7 +322,13 @@ export default function PartnerProjects() {
                         title="No Projects Yet"
                         description="Create a project from one of your customers to get started."
                         action={
-                          <Button size="sm" icon={<Plus className="h-4 w-4" />} onClick={() => { setForm({ ...PROJECT_FORM_DEFAULT }); setShowForm(true); }}>
+                          <Button
+                            size="sm"
+                            icon={<Plus className="h-4 w-4" />}
+                            onClick={() => { setForm({ ...PROJECT_FORM_DEFAULT }); setShowForm(true); }}
+                            disabled={!!createBlockReason}
+                            title={createBlockReason || undefined}
+                          >
                             Create Your First Project
                           </Button>
                         }
@@ -370,6 +394,11 @@ export default function PartnerProjects() {
 
       {/* ── Create Project Modal ──────────────────────────── */}
       <Modal open={showForm} onClose={handleCloseForm} size="2xl">
+        {createBlockReason && (
+          <div className="mb-4 rounded-xl border border-[var(--color-danger)] bg-[var(--color-danger-light,rgba(239,68,68,0.1))] px-4 py-3 text-sm text-[var(--color-danger-text,var(--color-danger))]">
+            {createBlockReason}
+          </div>
+        )}
         <ProjectForm
           form={form}
           onChange={setForm}

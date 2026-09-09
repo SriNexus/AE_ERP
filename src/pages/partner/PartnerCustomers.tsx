@@ -24,6 +24,7 @@ import { useAppStore } from '../../store/useAppStore';
 import { useCustomers } from '../../features/customers/hooks/useCustomers';
 import { usePartnerSelf } from '../../features/channel-partner/hooks/usePartnerSelf';
 import { filterPartnerOwnedCustomers } from '../../lib/partnerOwnership';
+import { partnerCreateBlockReason } from '../../lib/partnerEligibility';
 import type { ChannelPartner } from '../../features/channel-partner/types';
 import { PartnerCreateCustomerModal } from '../../components/partner/PartnerCreateCustomerModal';
 import { PartnerCustomerDetailDrawer } from '../../components/partner/PartnerCustomerDetailDrawer';
@@ -60,6 +61,8 @@ export default function PartnerCustomers() {
   // ── Partner profile ───────────────────────────────────
   const { data: partnerSelf, isLoading: partnersLoading } = usePartnerSelf();
   const partner: ChannelPartner | undefined = partnerSelf?.partner ?? undefined;
+  // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09) — new-record gate.
+  const customerCreateBlockReason = partnerCreateBlockReason(partner, 'adding a customer');
 
   // ── Data ──────────────────────────────────────────────
   const { data: allCustomers = [], isLoading: customersLoading, refetch, loadMore, hasMore, loadingMore } = useCustomers();
@@ -169,7 +172,13 @@ export default function PartnerCustomers() {
           <Button variant="outline" size="sm" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => refetch()}>
             Refresh
           </Button>
-          <Button size="sm" icon={<Plus className="h-4 w-4" />} onClick={() => setShowCreate(true)}>
+          <Button
+            size="sm"
+            icon={<Plus className="h-4 w-4" />}
+            onClick={() => setShowCreate(true)}
+            disabled={!!customerCreateBlockReason}
+            title={customerCreateBlockReason || undefined}
+          >
             Add Customer
           </Button>
         </div>

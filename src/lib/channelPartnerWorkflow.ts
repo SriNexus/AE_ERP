@@ -28,6 +28,7 @@ import { COLLECTIONS } from './firebase';
 import { partnerManagerEligibilityError } from '../features/users/orgHierarchy';
 import { createUserProjection } from '../features/users/hooks/useUsers';
 import { provisionAuthenticatedUser } from './authProvisioning';
+import { assertPartnerCanCreate } from './partnerEligibility';
 import type { ChannelPartner } from '../features/channel-partner/types';
 import type { AppUser } from '../types';
 
@@ -84,24 +85,41 @@ function currentUserName(): string {
 // ═══════════════════════════════════════════════════════════
 
 /**
- * Validates that a partner is in a valid state for operations.
- * Throws if the partner cannot perform actions.
+ * RBAC Master Plan §15 BD-3 — OWNER-APPROVED 2026-09-09.
+ *
+ * Validates that a partner may perform a NEW business-creating action
+ * (create a new Lead / Customer / Project / Scheme Registration). Throws a
+ * clear error when they may not; returns the partner record when they may.
+ *
+ *   - status `'active'`             → allowed
+ *   - status `'suspended'`          → BLOCKED for new records (existing work
+ *                                     stays editable; earned commission kept)
+ *   - status `'inactive'`           → BLOCKED (terminated; the login is also
+ *                                     deactivated by transitionStatus)
+ *   - status `'pending_approval'`   → BLOCKED (not yet operational)
+ *
+ * KYC status is ADVISORY per the owner decision and is deliberately NOT
+ * checked here — a partner with kycStatus `not_started` / `pending` /
+ * `submitted` / `rejected` is treated exactly like a `verified` one.
+ * (This is a change from the pre-Phase-10 semantics, which wrongly blocked
+ * every non-`verified` KYC state — that would have locked out every partner
+ * in the normal post-approval / pre-verification onboarding window.)
+ *
+ * This is CLIENT defense-in-depth. The authoritative boundaries are
+ * `firestore.rules` (`partnerCreateEligible()`) and the REST API
+ * (`api/_lib/partnerEligibility.ts`).
  */
 export async function validatePartnerCanAct(partnerId: string): Promise<ChannelPartner> {
   const partner = await ChannelPartnerDomainService.getById(partnerId);
   if (!partner) throw new Error(`Channel partner ${partnerId} not found`);
-  if (partner.isDeleted) throw new Error('Channel partner account has been deleted');
-  if (partner.status === 'suspended') throw new Error('Channel partner account is suspended');
-  if (partner.status === 'inactive') throw new Error('Channel partner account is inactive');
-  if (partner.status === 'pending_approval') throw new Error('Channel partner account is pending approval');
-  if (partner.kycStatus !== 'verified') throw new Error('KYC verification is required');
+  assertPartnerCanCreate(partner, 'creating new records');
   return partner;
 }
 
 /**
- * Validates that a partner can create a lead.
- * Separated from validatePartnerCanAct for future expansion
- * (e.g., daily lead limits, spam detection).
+ * Validates that a partner may create a lead. Alias of validatePartnerCanAct —
+ * kept as a distinct entry point for future lead-specific rules (daily limits,
+ * spam detection) that would not apply to other create actions.
  */
 export async function validatePartnerCanCreateLead(partnerId: string): Promise<ChannelPartner> {
   return validatePartnerCanAct(partnerId);

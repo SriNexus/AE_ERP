@@ -127,7 +127,9 @@ describe('AUTH-C3 — commission_records/settlements now rules-enforce Partner s
   });
 
   it('Admin/Manager/Director keep company-wide read (their seed normalizes to visibility:\'all\' — unchanged by AUTH-C3)', () => {
-    expect(readAllowedFn![0]).toContain("role in ['Admin', 'Manager', 'Director']");
+    // BD-5 (owner-approved 2026-09-09): `Management` is an Admin alias — added
+    // to this raw-role list alongside Admin, same as every other == 'Admin' site.
+    expect(readAllowedFn![0]).toContain("role in ['Admin', 'Management', 'Manager', 'Director']");
   });
 
   it('owner / super-admin bypass and sameCompany() tenant isolation are preserved in the predicate', () => {

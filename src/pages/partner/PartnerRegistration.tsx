@@ -268,6 +268,7 @@ export default function PartnerRegistration() {
         onClose={() => setCreateOpen(false)}
         registrations={myRegistrations}
         projects={myProjects}
+        partner={partner}
         onCreated={(reg) => setViewReg(reg)}
       />
 

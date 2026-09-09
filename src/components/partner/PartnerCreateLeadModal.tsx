@@ -16,6 +16,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { Input, Select, Textarea, FormSection, FormRow } from '../../components/ui/Input';
 import { partnerCreateLead } from '../../lib/partnerLeadIntegration';
+import { partnerCreateBlockReason } from '../../lib/partnerEligibility';
 import { partnerDisplayName } from '../../lib/partnerOwnership';
 import { fetchAssignableSalesUsers } from '../../lib/salesTeam';
 import { queryKeys } from '../../lib/queryKeys';
@@ -46,6 +47,12 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
   const keys = queryKeys.forCompany(activeCompanyId);
   const [form, setForm] = useState<FormData>({ ...FORM_DEFAULT });
   const [triedSubmit, setTriedSubmit] = useState(false);
+
+  // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a suspended /
+  // inactive / not-yet-approved partner cannot create new records. The
+  // authoritative block is partnerCreateLead() -> assertPartnerCanCreate ->
+  // firestore.rules; this is the clear affordance gate + message.
+  const leadBlockReason = partnerCreateBlockReason(partner, 'creating a lead');
 
   // Sales Persons this partner may assign a lead to — the partner's OWN
   // company only (fetchAssignableSalesUsers scopes the read with an explicit
@@ -111,6 +118,10 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
     e.preventDefault();
     if (createLead.isPending) return;
     setTriedSubmit(true);
+    if (leadBlockReason) {
+      toast.error(leadBlockReason);
+      return;
+    }
     if (!form.name && !form.phone) {
       toast.error('Lead name or phone is required');
       return;
@@ -128,6 +139,11 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
   return (
     <Modal open={open} onClose={handleClose} title="Create Lead" size="lg">
       <form onSubmit={handleSubmit} className="space-y-5">
+        {leadBlockReason && (
+          <div className="rounded-xl border border-[var(--color-danger)] bg-[var(--color-danger-light,rgba(239,68,68,0.1))] px-4 py-3 text-sm text-[var(--color-danger-text,var(--color-danger))]">
+            {leadBlockReason}
+          </div>
+        )}
         {/* Partner attribution notice */}
         <div className="flex items-center gap-3 rounded-xl border border-[var(--color-primary-muted)] bg-[var(--color-primary-light)] px-4 py-3 text-sm">
           <Target className="h-5 w-5 text-[var(--color-primary-text)] shrink-0" />
@@ -230,7 +246,7 @@ export function PartnerCreateLeadModal({ open, onClose, partner }: PartnerCreate
           <Button variant="outline" type="button" onClick={handleClose} disabled={createLead.isPending}>
             Cancel
           </Button>
-          <Button type="submit" icon={<Plus className="h-4 w-4" />} loading={createLead.isPending}>
+          <Button type="submit" icon={<Plus className="h-4 w-4" />} loading={createLead.isPending} disabled={!!leadBlockReason}>
             Create Lead
           </Button>
         </div>

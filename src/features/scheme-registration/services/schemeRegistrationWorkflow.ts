@@ -44,6 +44,7 @@ import {
 import { canDo } from '../../../lib/permissions';
 import { useAppStore } from '../../../store/useAppStore';
 import { resolveCurrentPartnerDocId } from '../../../lib/partnerOwnership';
+import { assertPartnerCanCreate } from '../../../lib/partnerEligibility';
 import { propagateCaseIdFromChain } from '../../../lib/casePropagation';
 import { buildProjectStageAdvancePatch, projectStageIndex } from '../../../lib/projectLifecycle';
 import { logActivity, resolveWorkflowCompanyId } from '../../../lib/workflow';
@@ -155,6 +156,16 @@ export async function createSchemeRegistration(
     if (String(project.partnerId ?? '') !== authenticatedPartnerId) {
       throw new Error('You can only create a registration for a project you own.');
     }
+    // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a suspended /
+    // inactive / not-yet-approved partner cannot file a NEW registration.
+    // scheme_registrations has no generic REST entity, so the rules layer
+    // (schemeRegPartnerOwnsProject -> channelPartnerStatusActive) + this
+    // workflow are the two enforcement planes. KYC is advisory (not checked).
+    const actingPartner = await getOne<{ status?: string; isDeleted?: boolean }>(
+      COLLECTIONS.CHANNEL_PARTNERS,
+      authenticatedPartnerId,
+    );
+    assertPartnerCanCreate(actingPartner, 'filing a registration');
   }
   const partnerId = authenticatedPartnerId ?? project.partnerId ?? undefined;
   const partnerName = project.partnerName ?? undefined;

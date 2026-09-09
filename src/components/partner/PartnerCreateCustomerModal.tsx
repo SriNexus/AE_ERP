@@ -15,6 +15,7 @@ import { Button } from '../../components/ui/Button';
 import { Input, FormSection, FormRow } from '../../components/ui/Input';
 import { useSaveCustomer, CUSTOMER_FORM_DEFAULT } from '../../features/customers/hooks/useCustomers';
 import { partnerDisplayName } from '../../lib/partnerOwnership';
+import { partnerCreateBlockReason } from '../../lib/partnerEligibility';
 import type { ChannelPartner } from '../../features/channel-partner/types';
 
 interface PartnerCreateCustomerModalProps {
@@ -45,9 +46,18 @@ export function PartnerCreateCustomerModal({ open, onClose, partner }: PartnerCr
     onClose();
   }
 
+  // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a suspended /
+  // inactive / not-yet-approved partner cannot create new records. Rules +
+  // the REST API are authoritative; this surfaces a clear message.
+  const blockReason = partnerCreateBlockReason(partner, 'adding a customer');
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (saveCustomer.isPending) return;
+    if (blockReason) {
+      toast.error(blockReason);
+      return;
+    }
     if (!form.name.trim() && !form.phone.trim()) {
       toast.error('Customer name or phone is required');
       return;
@@ -72,6 +82,11 @@ export function PartnerCreateCustomerModal({ open, onClose, partner }: PartnerCr
   return (
     <Modal open={open} onClose={handleClose} title="Add Customer" size="lg">
       <form onSubmit={handleSubmit} className="space-y-5">
+        {blockReason && (
+          <div className="rounded-xl border border-[var(--color-danger)] bg-[var(--color-danger-light,rgba(239,68,68,0.1))] px-4 py-3 text-sm text-[var(--color-danger-text,var(--color-danger))]">
+            {blockReason}
+          </div>
+        )}
         {/* Partner attribution notice */}
         <div className="flex items-center gap-3 rounded-xl border border-[var(--color-primary-muted)] bg-[var(--color-primary-light)] px-4 py-3 text-sm">
           <Users className="h-5 w-5 text-[var(--color-primary-text)] shrink-0" />
@@ -149,7 +164,7 @@ export function PartnerCreateCustomerModal({ open, onClose, partner }: PartnerCr
           <Button variant="outline" type="button" onClick={handleClose} disabled={saveCustomer.isPending}>
             Cancel
           </Button>
-          <Button type="submit" icon={<Plus className="h-4 w-4" />} loading={saveCustomer.isPending}>
+          <Button type="submit" icon={<Plus className="h-4 w-4" />} loading={saveCustomer.isPending} disabled={!!blockReason}>
             Add Customer
           </Button>
         </div>

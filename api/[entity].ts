@@ -13,6 +13,7 @@ import { verifyAuthToken } from './_lib/auth';
 import { requirePermission } from './_lib/permissions';
 import { ENTITY_REGISTRY, isGlobalCollection, isRestWriteBlocked, isApiGroupAdmin, resolveApiCreateTenant, ApiTenantScopeError } from './_lib/registry';
 import { resolveApiOwnershipScope, apiRecordIsOwned } from './_lib/ownership';
+import { assertApiPartnerCanCreate, PartnerNotEligibleError } from './_lib/partnerEligibility';
 import { checkRateLimit, getRateLimitKey } from './_lib/rateLimit';
 import { filterManageableUsers, isOwnerEmail } from '../src/lib/ownerAccess';
 import { createProductWithSkuLockAdmin, SkuConflictError } from './_lib/productSkuLock';
@@ -338,6 +339,22 @@ async function handleCreate(req: VercelRequest, res: VercelResponse, config: typ
   // (resolveApiCreateTenant already rejected an out-of-group target with a
   // 403). Non-GroupAdmin actors always resolve to their own `companyId` here.
   await requirePermission(user, 'create', config.module as any, companyId);
+
+  // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a suspended /
+  // inactive / not-yet-approved Channel Partner may not create NEW
+  // leads/customers/projects/scheme_registrations through the REST facade —
+  // mirrors firestore.rules' partnerCreateEligible(). No-op for every
+  // non-Partner caller and every other collection. KYC is advisory (not
+  // checked). Runs after requirePermission so it never leaks whether the
+  // module grant exists.
+  try {
+    await assertApiPartnerCanCreate(db, user, config.collection);
+  } catch (error) {
+    if (error instanceof PartnerNotEligibleError) {
+      return res.status(403).json({ success: false, error: { code: error.code, message: error.message } });
+    }
+    throw error;
+  }
 
   // Phase 15: this used to ALSO enforce a hard per-entity cap (max 5
   // non-deleted records for the demo company) here. Removed — it directly

@@ -131,10 +131,39 @@ export class ChannelPartnerDomainService {
       ...(reason ? { reason } : {}),
     };
 
-    return updateDocById(COLLECTIONS.CHANNEL_PARTNERS, partnerId, {
+    await updateDocById(COLLECTIONS.CHANNEL_PARTNERS, partnerId, {
       status: newStatus,
       statusHistory: [...currentHistory, entry],
     });
+
+    // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09) — INACTIVE /
+    // TERMINATED partner = full stop. The authoritative enforcement is to
+    // deactivate the linked login account: firestore.rules' actorIsActive()
+    // then denies every read/write and onUserDeactivated revokes tokens —
+    // no per-collection rules change and no client hiding required.
+    // 'suspended' deliberately does NOT touch the login (the owner policy
+    // keeps portal access for suspended partners). Reversible: transitioning
+    // a previously-inactive partner back to any other status reactivates the
+    // login. No-op for every current UI flow (approve / suspend / reactivate
+    // never involve 'inactive').
+    const linkedUserId = stringValue(partner?.userId);
+    if (linkedUserId) {
+      const actorId = useAppStore.getState().user?.id || 'system';
+      const nowIso = new Date().toISOString();
+      if (newStatus === 'inactive') {
+        await updateDocById(COLLECTIONS.USERS, linkedUserId, {
+          status: 'Inactive',
+          updatedBy: actorId,
+          updatedAt: nowIso,
+        });
+      } else if (partner?.status === 'inactive' && newStatus !== 'inactive') {
+        await updateDocById(COLLECTIONS.USERS, linkedUserId, {
+          status: 'Active',
+          updatedBy: actorId,
+          updatedAt: nowIso,
+        });
+      }
+    }
   }
 
   // ── Wallet Operations ─────────────────────────────────────

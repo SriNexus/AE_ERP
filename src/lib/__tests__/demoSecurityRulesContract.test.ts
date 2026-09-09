@@ -94,7 +94,10 @@ describe('Demo tenant security rules contract',()=>{
    // Write validation: a partner can only create on a project whose
    // partnerId == the authenticated partner (§9.3 anti-spoofing).
    expect(rules).toContain('function schemeRegPartnerOwnsProject(data)');
-   expect(rules).toMatch(/function schemeRegPartnerOwnsProject\(data\)[\s\S]*?projects\/\$\(data\.projectId\)[\s\S]*?data\.partnerId == data\.partnerId/);
+   expect(rules).toMatch(/function schemeRegPartnerOwnsProject\(data\)[\s\S]*?projects\/\$\(data\.projectId\)[\s\S]*?\.get\('partnerId', ''\) == data\.partnerId/);
+   // BD-3 (owner-approved 2026-09-09): a suspended/inactive partner cannot
+   // FILE a new scheme registration — the gate lives inside this function.
+   expect(rules).toMatch(/function schemeRegPartnerOwnsProject\(data\)[\s\S]*?channelPartnerStatusActive\(data\.partnerId\)/);
    // Partner update: pre-completion states + partner-side targets only.
    expect(rules).toMatch(/resource\.data\.status in \['Draft', 'Submitted', 'Rejected', 'Failed'\]/);
    expect(rules).toMatch(/request\.resource\.data\.status in \['Draft', 'Submitted', 'Cancelled'\]/);

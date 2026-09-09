@@ -133,12 +133,31 @@ service cloud.firestore {
     // schemeRegCanRead() helpers plus the explicit top-level clauses that call
     // isAdmin()/isSuperAdmin()/roleMatches() directly. This keeps the gate
     // evaluated ONCE per allow clause instead of ~3-4x per nested chain.
+    // RBAC Master Plan §15 BD-5 (owner-approved 2026-09-09): `Management` is an
+    // intentional alias of `Admin` for authorization — identical to the client
+    // (src/lib/permissions.ts EXACT_ROLE_COMPATIBILITY) and the REST API
+    // (api/_lib/permissions.ts). The rules engine can't call the JS alias
+    // table, so every role check in this file resolves `Management` -> `Admin`
+    // before matching:
+    //   - direct `role in ['Admin', 'Management']` : the `== 'Admin'` sites
+    //     (inlined, not a helper — one extra list element, `role` evaluated
+    //     once — because isAdmin() is on the file's most budget-marginal hot
+    //     paths: the users update rule's two stacked statements, §10.4).
+    //   - roleStringMatches() for the roleMatches() / actorRoleMatches() regex
+    //     sites — a `Management` actor is tested as the literal 'Admin', so it
+    //     is NEVER widened past Admin (not GroupAdmin/Owner; `isSuperAdmin()`
+    //     still keys off the doc field, never the role).
+    function roleStringMatches(rawRole, pattern) {
+      return rawRole == 'Management' ? ('Admin').matches(pattern) : rawRole.matches(pattern);
+    }
+
     function isAdmin() {
-      return isOwnerIdentity() || isSuperAdmin() || (hasUserProfile() && currentUser().role == 'Admin');
+      return isOwnerIdentity() || isSuperAdmin()
+        || (hasUserProfile() && currentUser().role in ['Admin', 'Management']);
     }
 
     function roleMatches(pattern) {
-      return hasUserProfile() && currentUser().role.matches(pattern);
+      return hasUserProfile() && roleStringMatches(currentUser().role, pattern);
     }
 
     // GAP-01 remediation (independent Vendor Lock audit, 2026-08-14): the
@@ -429,7 +448,8 @@ service cloud.firestore {
       return hasAuthMap()
         && get(authMapPath()).data.userId is string
         && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.keys().hasAny(['role'])
-        && get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.role.matches(pattern);
+        // BD-5: Management resolves to Admin (see roleStringMatches)
+        && roleStringMatches(get(/databases/$(database)/documents/users/$(get(authMapPath()).data.userId)).data.role, pattern);
     }
 
     function sameWarehouse(data) {
@@ -698,6 +718,38 @@ service cloud.firestore {
       return hasUserProfile() && currentUser().role == 'Partner';
     }
 
+    // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a Channel Partner
+    // may CREATE a new business record (Lead / Customer / Project / Scheme
+    // Registration) only while their channel_partners.status is 'active'.
+    //   - 'suspended' / 'inactive' / 'pending_approval' → blocked here (not
+    //     UI-only). A suspended partner keeps read + update on existing work
+    //     (those rules are unchanged); only NEW creation is gated.
+    //   - a missing status field → grandfathered to 'active' (an explicit
+    //     transitionStatus always writes a concrete value).
+    //   - KYC status is ADVISORY per the owner decision and is NEVER read.
+    //   - 'inactive' is additionally cut off end-to-end by deactivating the
+    //     linked login (transitionStatus → users.status='Inactive' →
+    //     actorIsActive() denies everything, onUserDeactivated revokes tokens).
+    // Non-Partner actors are unaffected — the ternary is lazy so the extra
+    // channel_partners get() only runs for a Partner-role writer.
+    function channelPartnerStatusActive(cpId) {
+      // PartnerStatus is lowercase everywhere it is written (constants/index.ts,
+      // transitionStatus); 'Active' is tolerated only for defensive robustness
+      // against legacy/miscased data. A missing status field is grandfathered
+      // to 'active'. Every other value (suspended / inactive / pending_approval
+      // / unknown) fails closed. exists()+get() — the file's established
+      // possibly-missing-doc idiom (isTeamMemberOf / schemeRegManagerOfPartner).
+      return cpId is string && cpId != ''
+        && exists(/databases/$(database)/documents/channel_partners/$(cpId))
+        && get(/databases/$(database)/documents/channel_partners/$(cpId)).data.get('status', 'active') in ['active', 'Active'];
+    }
+
+    function partnerCreateEligible() {
+      return !isPartner()
+        ? true
+        : channelPartnerStatusActive(currentUser().get('channelPartnerId', ''));
+    }
+
     function isProjectScopedRole() {
       return hasUserProfile() && currentUser().role in ['Surveyor', 'Engineer', 'InstallationLead', 'ServiceTechnician', 'ComplianceOfficer'];
     }
@@ -829,10 +881,18 @@ service cloud.firestore {
     function schemeRegPartnerOwnsProject(data) {
       return isPartner()
         && partnerLinkedToSelf(data.partnerId)
+        // BD-3: partnerLinkedToSelf just proved data.partnerId is the acting
+        // partner's OWN channel_partners doc — so this is the actor's own
+        // status. A suspended/inactive/pending partner cannot file a NEW
+        // scheme registration (reuses data.partnerId — no identity re-walk).
+        && channelPartnerStatusActive(data.partnerId)
         && data.projectId is string && data.projectId.size() > 0
         && exists(/databases/$(database)/documents/projects/$(data.projectId))
-        && hasOrgField(get(/databases/$(database)/documents/projects/$(data.projectId)).data, 'partnerId')
-        && get(/databases/$(database)/documents/projects/$(data.projectId)).data.partnerId == data.partnerId;
+        // .get('partnerId','') folds the old hasOrgField() keys()-guard away
+        // (one cached read + one field access, not two) — §10.4 budget: this
+        // block is tight and BD-3's status check above is paid for by the
+        // create-rule ternary restructure + this trim.
+        && get(/databases/$(database)/documents/projects/$(data.projectId)).data.get('partnerId', '') == data.partnerId;
     }
 
     // Manager create: the project's owning partner must report to the acting
@@ -1386,7 +1446,7 @@ service cloud.firestore {
           //    keys().hasAny()+field-access) so each site stays cheap even
           //    called individually rather than hoisted.
           || (
-            actor.role == 'Admin'
+            actor.role in ['Admin', 'Management']  // BD-5: Admin or Management
             && (
               isSuperAdminFlag(actor)
               || (
@@ -1945,33 +2005,70 @@ service cloud.firestore {
     // service-machine contract (statuses), not enumerable in rules.
     match /scheme_registrations/{id} {
       allow read: if actorIsActive() && signedIn() && (schemeRegCanRead(resource.data) || groupAdminCanRead(resource.data));
-      allow create: if actorIsActive() && signedIn()
+      // BD-3: a suspended/inactive/pending partner cannot file a NEW scheme
+      // registration — enforced INSIDE schemeRegPartnerOwnsProject() (which
+      // already resolves the acting Partner + verifies data.partnerId is the
+      // actor's own channelPartnerId, so no identity re-walk).
+      //
+      // This create rule was `(isAdmin() || partnerOwns || managerOwns)` under
+      // a non-lazy `||` — every branch (and every get() it makes) was
+      // evaluated for every actor, and the block is documented
+      // expression-budget-tight (§10.4 / AUTH-S1b). Restructured to the
+      // file's established ternary-discriminator shape so exactly ONE
+      // role-branch evaluates: a Partner never pays for isAdmin() or the
+      // manager path, an Admin never pays for the partner/manager gets. This
+      // trim is what makes room for BD-3's status check. Behaviour is
+      // identical — same ALLOW/DENY set for every role.
+      allow create: if actorIsActive()
+        && groupIdMatchesCompany(request.resource.data)
         && (
-          (sameCompany(request.resource.data)
-            && (isAdmin() || schemeRegPartnerOwnsProject(request.resource.data) || schemeRegManagerOwnsProject(request.resource.data)))
-          || (isGroupAdmin() && sameGroup(request.resource.data))
-        )
-        && groupIdMatchesCompany(request.resource.data);
+          isGroupAdmin()
+            ? sameGroup(request.resource.data)
+            : (
+                sameCompany(request.resource.data)
+                && (
+                  isPartner()
+                    ? schemeRegPartnerOwnsProject(request.resource.data)
+                    : (isSchemeRegManagerRole()
+                        ? schemeRegManagerOwnsProject(request.resource.data)
+                        : isAdmin())
+                )
+              )
+        );
       // Partner self-edit: own record only, pre-completion states only
       // (Draft/Submitted/Rejected/Failed sources) with partner-side targets
       // (Draft/Submitted/Cancelled), identity fields immutable. Staff
       // (Manager team / Admin) may manage team records — the service
       // enforces the exact status machine + approval permission. Group Admin
       // is Admin-equivalent (§5.2): same Group-scope, identity still immutable.
-      allow update: if actorIsActive() && signedIn() && schemeRegIdentityUnchanged()
+      // Restructured to the file's ternary-discriminator shape (same as the
+      // create rule above, same reason — §10.4: the old non-lazy `||` chain
+      // evaluated the Admin check + the manager-role check + its manager-of-
+      // partner get + the Partner check + partnerLinkedToSelf and all their
+      // get()s for EVERY actor, and the emulator's create+update+fallback
+      // coverage summation put this block over 1000 expressions). Behaviour
+      // is identical — the
+      // exact same ALLOW/DENY set for every role. Partner self-edit is
+      // deliberately NOT gated by channelPartnerStatusActive (BD-3): a
+      // suspended partner may still edit existing/in-flight work.
+      allow update: if actorIsActive() && schemeRegIdentityUnchanged()
+        && groupIdMatchesCompany(request.resource.data)
         && (
-          (sameCompany(request.resource.data) && companyIdUnchanged()
-            && (
-              (isAdmin() || (isSchemeRegManagerRole() && schemeRegManagerOfPartner(resource.data.partnerId)))
-              || (
-                isPartner() && partnerLinkedToSelf(resource.data.partnerId)
-                && resource.data.status in ['Draft', 'Submitted', 'Rejected', 'Failed']
-                && request.resource.data.status in ['Draft', 'Submitted', 'Cancelled']
+          isGroupAdmin()
+            ? (sameGroup(resource.data) && sameGroup(request.resource.data) && groupIdUnchanged())
+            : (
+                sameCompany(request.resource.data) && companyIdUnchanged()
+                && (
+                  isPartner()
+                    ? (partnerLinkedToSelf(resource.data.partnerId)
+                        && resource.data.status in ['Draft', 'Submitted', 'Rejected', 'Failed']
+                        && request.resource.data.status in ['Draft', 'Submitted', 'Cancelled'])
+                    : (isSchemeRegManagerRole()
+                        ? schemeRegManagerOfPartner(resource.data.partnerId)
+                        : isAdmin())
+                )
               )
-            ))
-          || (isGroupAdmin() && sameGroup(resource.data) && sameGroup(request.resource.data) && groupIdUnchanged())
-        )
-        && groupIdMatchesCompany(request.resource.data);
+        );
       // Protected records: hard delete is Admin-only (the audited override
       // path); everyone else must use the workflow's terminal transitions.
       // Group Admin inherits the Admin hard-delete per §5.2 (Group-scoped).
@@ -2200,7 +2297,7 @@ service cloud.firestore {
         || (
           sameCompany(data)
           && (
-            role in ['Admin', 'Manager', 'Director']
+            role in ['Admin', 'Management', 'Manager', 'Director']  // BD-5: Management == Admin
             || (
               role == 'Partner'
               && data.get('partnerId', '') != ''
@@ -2313,7 +2410,8 @@ service cloud.firestore {
 
     match /projects/{projectId} {
       allow read: if actorIsActive() && signedIn() && (canReadProjectScoped(resource.data) || groupAdminCanRead(resource.data));
-      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data)) && request.resource.data.projectId == projectId;
+      // BD-3: a suspended/inactive/pending partner cannot create NEW projects.
+      allow create: if actorIsActive() && partnerCreateEligible() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data)) && request.resource.data.projectId == projectId;
       allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data))
         && request.resource.data.projectId == resource.data.projectId;
       allow delete: if false;
@@ -2595,7 +2693,7 @@ service cloud.firestore {
             || (hasCompanyId(data) && data.companyId == authMap.companyId && companyGroupIsActive(data)))
         ) || (
           // 2) Company Admin / Super Admin on company-scoped sections.
-          (isOwnerIdentity() || actor.role == 'Admin' || isSuperAdminFlag(actor))
+          (isOwnerIdentity() || actor.role in ['Admin', 'Management'] || isSuperAdminFlag(actor))  // BD-5: Admin or Management
           && (isOwnerIdentity() || isSuperAdminFlag(actor)
             || (hasCompanyId(data) && data.companyId == authMap.companyId && companyGroupIsActive(data)))
         ) || (
@@ -2627,7 +2725,7 @@ service cloud.firestore {
           && companyIdUnchanged()
         ) || (
           // 2) Company Admin / Super Admin — company-scoped sections.
-          (isOwnerIdentity() || actor.role == 'Admin' || isSuperAdminFlag(actor))
+          (isOwnerIdentity() || actor.role in ['Admin', 'Management'] || isSuperAdminFlag(actor))  // BD-5: Admin or Management
           && (isOwnerIdentity() || isSuperAdminFlag(actor)
             || (hasCompanyId(oldData) && oldData.companyId == authMap.companyId && companyGroupIsActive(oldData)))
           && (isOwnerIdentity() || isSuperAdminFlag(actor)
@@ -3023,7 +3121,7 @@ service cloud.firestore {
         && authMap.keys().hasAny(['groupId']) && authMap.groupId is string && data.groupId == authMap.groupId && groupIsActive(data.groupId));
       return ownerOrSuper
         || isSelf
-        || (sameCo && (actor.role == 'Admin' || actor.role == 'HR'))
+        || (sameCo && (actor.role in ['Admin', 'Management'] || actor.role == 'HR'))
         || sameGrp;
     }
 
@@ -3045,7 +3143,7 @@ service cloud.firestore {
       return identityAnchored
         && hasValidBiometricReferenceShape(data)
         && groupIdMatchesCompany(data)
-        && ((sameCo && (isSelf || actor.role == 'Admin' || actor.role == 'HR')) || sameGrp);
+        && ((sameCo && (isSelf || actor.role in ['Admin', 'Management'] || actor.role == 'HR')) || sameGrp);
     }
 
     function biometricUpdateAllowed(oldData, newData) {
@@ -3098,7 +3196,7 @@ service cloud.firestore {
         && newData.updatedBy == actorUid
         && (
           ownerOrSuper
-          || (sameCo && (actor.role == 'Admin' || actor.role == 'HR'))
+          || (sameCo && (actor.role in ['Admin', 'Management'] || actor.role == 'HR'))
           || sameGrp
           || (isSelf && selfExcludesRevocation)
         );
@@ -3139,7 +3237,8 @@ service cloud.firestore {
     // Matches this file's own "cheap-first ordering" principle elsewhere.
     match /customers/{customerId} {
       allow read: if actorIsActive() && (groupAdminCanRead(resource.data) || canReadCustomerScoped(resource.data));
-      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      // BD-3: a suspended/inactive/pending partner cannot create NEW customers.
+      allow create: if actorIsActive() && partnerCreateEligible() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
       allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }
@@ -3193,7 +3292,8 @@ service cloud.firestore {
     // LIST budget when the per-record team-membership predicate ran first).
     match /leads/{leadId} {
       allow read: if actorIsActive() && (groupAdminCanRead(resource.data) || canReadLeadScoped(resource.data));
-      allow create: if actorIsActive() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
+      // BD-3: a suspended/inactive/pending partner cannot create NEW leads.
+      allow create: if actorIsActive() && partnerCreateEligible() && (canCreateCompanyScoped() || groupAdminCanCreate(request.resource.data));
       allow update: if actorIsActive() && (canUpdateCompanyScoped() || groupAdminCanUpdate(resource.data));
       allow delete: if false;
     }

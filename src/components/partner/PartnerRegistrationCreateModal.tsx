@@ -13,6 +13,8 @@ import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Input, FormSection } from '../ui/Input';
 import { useCreateSchemeRegistration } from '../../features/scheme-registration/hooks/useSchemeRegistrations';
+import { partnerCreateBlockReason } from '../../lib/partnerEligibility';
+import type { ChannelPartner } from '../../features/channel-partner/types';
 import type {
   SchemeRegistrationRecord,
   SchemeRegistrationPortalType,
@@ -23,15 +25,22 @@ export function PartnerRegistrationCreateModal({
   onClose,
   registrations,
   projects,
+  partner,
   onCreated,
 }: {
   open: boolean;
   onClose: () => void;
   registrations: SchemeRegistrationRecord[];
   projects: any[];
+  partner?: ChannelPartner;
   onCreated?: (reg: SchemeRegistrationRecord) => void;
 }) {
   const createMutation = useCreateSchemeRegistration();
+
+  // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a suspended /
+  // inactive / not-yet-approved partner cannot file a new registration.
+  // firestore.rules + the REST API are authoritative.
+  const blockReason = partnerCreateBlockReason(partner, 'filing a registration');
 
   const [projectId, setProjectId] = useState('');
   const [vendorName, setVendorName] = useState('');
@@ -55,6 +64,7 @@ export function PartnerRegistrationCreateModal({
 
   function handleSubmit() {
     if (createMutation.isPending) return;
+    if (blockReason) { toast.error(blockReason); return; }
     if (!projectId) { toast.error('Select one of your projects'); return; }
     if (!vendorName.trim()) { toast.error('Please enter the vendor name'); return; }
     if (applicantPhone && !/^\d{10}$/.test(applicantPhone.trim())) {
@@ -100,6 +110,11 @@ export function PartnerRegistrationCreateModal({
   return (
     <Modal open={open} onClose={onClose} size="2xl" title="New Registration">
       <div className="space-y-3">
+        {blockReason && (
+          <div className="rounded-lg border border-[var(--color-danger)] bg-[var(--color-danger-light,rgba(239,68,68,0.1))] px-3 py-2.5 text-xs text-[var(--color-danger-text,var(--color-danger))]">
+            {blockReason}
+          </div>
+        )}
         <div className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-sunken)] px-3 py-2.5">
           <p className="text-[11px] text-[var(--color-text-muted)]">
             File the Vendor Lock / scheme registration for one of your projects. Ownership flows from the project's partner chain — you can only create a Registration on a project you own.
@@ -159,7 +174,7 @@ export function PartnerRegistrationCreateModal({
 
         <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
           <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-          <Button size="sm" loading={createMutation.isPending} onClick={handleSubmit}>
+          <Button size="sm" loading={createMutation.isPending} onClick={handleSubmit} disabled={!!blockReason}>
             Create Registration Draft
           </Button>
         </div>

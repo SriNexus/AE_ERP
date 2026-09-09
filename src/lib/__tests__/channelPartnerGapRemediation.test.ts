@@ -98,8 +98,12 @@ describe('GAP-01 remediation — firestore.rules TL/Manager parity for scheme_re
     expect(section).not.toMatch(/roleMatches\('Manager'\)/);
     const occurrences = (section.match(/isSchemeRegManagerRole\(\)/g) || []).length;
     // Read (schemeRegCanRead), Manager-create (schemeRegManagerOwnsProject),
-    // and the update rule's Manager branch — exactly 3 call sites.
-    expect(occurrences).toBe(3);
+    // and — since BD-3's create + update rules were restructured to the
+    // ternary-discriminator shape — the create AND update rules' explicit
+    // Manager branch. Exactly 4 call sites (was 3 before the restructure;
+    // the create rule now names the helper directly instead of relying on
+    // schemeRegManagerOwnsProject()'s internal check).
+    expect(occurrences).toBe(4);
   });
 
   it('the fix did not broaden access: Director stays view-only and Accounts stays fully denied', () => {
@@ -122,10 +126,10 @@ describe('GAP-01 remediation — firestore.rules TL/Manager parity for scheme_re
     // guards against an unreviewed future edit silently widening the
     // helper's reach into unrelated collections' rules.
     const allUses = (rules.match(/isSchemeRegManagerRole\(\)/g) || []).length;
-    expect(allUses).toBe(4);
+    expect(allUses).toBe(5); // 1 definition + 4 call sites (create + update rules each name it after the BD-3 ternary restructure)
     const section = readSchemeSection();
     const inSection = (section.match(/isSchemeRegManagerRole\(\)/g) || []).length;
-    expect(inSection).toBe(3); // the section excludes the function's own definition, which lives earlier in the file near roleMatches()
+    expect(inSection).toBe(4); // the section excludes the function's own definition, which lives earlier in the file near roleMatches()
   });
 });
 

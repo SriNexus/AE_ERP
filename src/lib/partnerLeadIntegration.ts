@@ -15,6 +15,7 @@
 
 import { updateDocById, genId, createDocWithId, getOne, getAll, resolveWriteCompanyId, resolveWriteGroupId } from './firestore';
 import { resolveCurrentPartnerDocId, partnerDisplayName } from './partnerOwnership';
+import { assertPartnerCanCreate } from './partnerEligibility';
 import { leadDisplayName } from './leadDisplayName';
 import type { ChannelPartner } from '../features/channel-partner/types';
 import { fetchAssignableSalesUsers } from './salesTeam';
@@ -341,6 +342,18 @@ export async function partnerCreateLead(input: PartnerCreateLeadInput): Promise<
   // record. A Channel Partner is a human/agent — `firmName` may be blank, so
   // fall back to `contactPerson` and finally the supplied name.
   const partnerRecord = await getOne<ChannelPartner>(COLLECTIONS.CHANNEL_PARTNERS, effectivePartnerId);
+
+  // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a suspended /
+  // inactive / not-yet-approved partner may not create NEW records. Only when
+  // a Partner-role actor is creating for their OWN linked account AND their
+  // partner record actually resolved — an internal Admin/Manager creating on
+  // a partner's behalf is not gated, and if the client can't load the record
+  // the authoritative firestore.rules `partnerCreateEligible()` + the REST
+  // API still enforce it. KYC is advisory and not checked here.
+  if (authenticatedPartnerId && effectivePartnerId === authenticatedPartnerId && partnerRecord) {
+    assertPartnerCanCreate(partnerRecord, 'creating a lead');
+  }
+
   const effectivePartnerName =
     partnerDisplayName(partnerRecord, '') || String(input.partnerName || '').trim() || effectivePartnerId;
 
@@ -460,6 +473,21 @@ export async function generateCommissionRecord(leadId: string): Promise<string |
   const companyId = resolveCompanyId();
   const lead = await getOne(COLLECTIONS.LEADS, leadId) as any;
   if (!lead || !lead.partnerId) return null;
+
+  // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a TERMINATED
+  // (status 'inactive') partner earns no new commission. A 'suspended' or
+  // 'active' partner DOES — commission legitimately earned before/around a
+  // suspension is preserved (this only gates NEW generation; it never
+  // touches existing commission_records / settlements / wallet balances).
+  const commissionPartner = await getOne<ChannelPartner>(COLLECTIONS.CHANNEL_PARTNERS, String(lead.partnerId));
+  if (commissionPartner && (commissionPartner.status === 'inactive' || commissionPartner.isDeleted === true)) {
+    await logActivity('Leads', 'Commission Generation Skipped', leadId, {
+      partnerId: lead.partnerId,
+      reason: 'partner_inactive',
+      actionLabel: 'Commission not generated — channel partner account is deactivated',
+    });
+    return null;
+  }
 
   // Resolve the best matching rule using the Commission Engine
   const allRules = await getAll<CommissionRule>(COLLECTIONS.COMMISSION_RULES);
