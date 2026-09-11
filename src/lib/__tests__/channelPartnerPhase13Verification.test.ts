@@ -81,6 +81,7 @@ vi.mock('../firestore', () => ({
   getOne: mocks.getOne,
   getAll: mocks.getAll,
   genId: mocks.genId,
+  isRealCompanyId: (id: unknown): boolean => typeof id === 'string' && id.length > 0 && !['all', 'group', 'default', ''].includes(id),
   resolveWriteCompanyId: () => 'comp-1',
 }));
 
@@ -521,13 +522,17 @@ describe('VL-13 — cross-company denial at the service boundary', () => {
     expect(mocks.notifyPartnerTeam).not.toHaveBeenCalled();
   });
 
-  it('staff cross-company writes are rules-enforced (sameCompany) — the service trusts the tenant-gated rules layer', () => {
+  it('staff cross-company writes are rules-enforced — the service trusts the tenant-gated rules layer', () => {
     // The service enforces partner self-scope + permissions; the Firestore
-    // rules enforce the company/tenant boundary for staff (Manager/Admin).
-    // Static contract assertion — see the rules hardening block below.
+    // rules enforce the company/tenant boundary for staff (Manager/Admin) via
+    // the SAME canonical tenant helpers the working leads/employees rules use
+    // (canCreateCompanyScoped internally = sameCompany(request) &&
+    // groupIdMatchesCompany; tenantWriteCanUpdate = one companyGroupIsActive
+    // check + companyId immutability; delete = sameCompany(resource)).
     const block = readSchemeBlock();
-    expect(block).toContain('sameCompany(request.resource.data)');
-    expect(block).toContain('sameCompany(resource.data)');
+    expect(block).toContain('canCreateCompanyScoped()');
+    expect(block).toContain('tenantWriteCanUpdate(resource.data)');
+    expect(block).toContain('sameCompany(resource.data)'); // delete
   });
 });
 
@@ -590,11 +595,22 @@ describe('VL-13 — Firestore rules hardening (static contract)', () => {
     const block = readSchemeBlock();
     expect(block).toContain('schemeRegIdentityUnchanged()');
     // The immutability helper must compare all three canonical identity fields.
+    // Round 8: partnerId's comparison is null-safe (keys().hasAny() guarded) —
+    // a genuinely partnerless (internal, non-Channel-Partner) registration has
+    // NO partnerId key at all, and the old unguarded equality threw "Property
+    // partnerId is undefined on object" on every update to such a record
+    // (found live: attachRegistrationDocument denied with a generic
+    // permission error even though the Storage upload + documents-collection
+    // write had both already succeeded). projectId/companyId stay plain
+    // equality — both are Required+Immutable (§3.2), never absent.
     const rules = readFileSync(new URL('../../../firestore.rules', import.meta.url), 'utf8');
     const fn = rules.slice(rules.indexOf('function schemeRegIdentityUnchanged'), rules.indexOf('function isSpecialCollection'));
-    expect(fn).toContain('request.resource.data.partnerId == resource.data.partnerId');
     expect(fn).toContain('request.resource.data.projectId == resource.data.projectId');
     expect(fn).toContain('request.resource.data.companyId == resource.data.companyId');
+    expect(fn).toMatch(/resource\.data\.keys\(\)\.hasAny\(\['partnerId'\]\)/);
+    expect(fn).toContain('request.resource.data.keys().hasAny([\'partnerId\'])');
+    expect(fn).toContain('resource.data.partnerId');
+    expect(fn).toContain('request.resource.data.partnerId');
   });
 
   it('Director is view-only (no write branch) and Accounts is never an allowed writer', () => {
@@ -610,16 +626,29 @@ describe('VL-13 — Firestore rules hardening (static contract)', () => {
     expect(block).toContain('partnerLinkedToSelf(resource.data.partnerId)');
   });
 
-  it('create/update/delete all enforce the sameCompany tenant boundary', () => {
+  it('create/update use canonical tenant-scope helpers (the employees/payments lean shape) — no scheme-specific tenant workaround', () => {
     const block = readSchemeBlock();
-    expect(block).toContain('sameCompany(request.resource.data)');
-    expect(block).toContain('sameCompany(resource.data)');
-    // F-13 (Phase 0): actorIsActive() prefix added — authority is still
-    // Admin-only + same-company after the deactivation gate. Phase 2
-    // (Master Plan §5.2/§9.3): additive-OR Group Admin branch keeps the
-    // Admin sameCompany branch intact and adds the sameGroup-scoped
-    // Group Admin hard-delete.
-    expect(block).toMatch(/allow delete: if actorIsActive\(\) && \(\(isAdmin\(\) && sameCompany\(resource\.data\)\) \|\| \(isGroupAdmin\(\) && sameGroup\(resource\.data\)\)\)/);
+    // Group Admin arm: their group-wide reach OR their home company via the
+    // SAME canonical helpers the working leads/employees rules use.
+    expect(block).toContain('groupAdminCanCreate(request.resource.data) || canCreateCompanyScoped()');
+    expect(block).toContain('groupAdminCanUpdate(resource.data) || tenantWriteCanUpdate(resource.data)');
+    // Non-Group-Admin arm: tenant helper + LEAN role check that resolves
+    // Management -> Admin (roleStringMatches inside actorRoleMatches).
+    expect(block).toContain('tenantWriteCanUpdate(resource.data)');
+    expect(block).toContain("actorRoleMatches('Admin|Manager|TL|Partner')");
+    // BD-3 partner status gated once, exactly like leads/customers/projects.
+    expect(block).toContain('partnerCreateEligible()');
+    // No scheme-specific tenant/ownership predicate in the rule — the bespoke
+    // helper AND the per-record ownership get() are gone; ownership is
+    // workflow-enforced (createSchemeRegistration), same as leads.
+    expect(block).not.toContain('actorHomeCompanyMatches');
+    expect(block).not.toContain('schemeRegPartnerOwnsProject');
+    expect(block).not.toContain('schemeRegManagerOwnsProject');
+  });
+
+  it('delete stays an audited Admin/Group-Admin-only hard-delete, canonical helpers only', () => {
+    const block = readSchemeBlock();
+    expect(block).toMatch(/allow delete: if actorIsActive\(\) && \(\s*isGroupAdmin\(\)\s*\?\s*\(sameGroup\(resource\.data\) \|\| canReadCompanyScoped\(\)\)\s*:\s*\(\(actorIsSuperAdmin\(\) \|\| actorRoleMatches\('Admin'\)\) && sameCompany\(resource\.data\)\)\s*\)/);
   });
 });
 

@@ -99,6 +99,15 @@ async function seed() {
     // A case document under CO-C, staff-managed (no partnerId) — exercises
     // the scoped-document path (canReadScopedDocuments/canWriteScopedDocuments).
     await setDoc(doc(db, 'cases', 'CASE-C1'), { id: 'CASE-C1', companyId: COMPANY_C });
+
+    // A case document under GA_A's OWN HOME company CO-A (mirrors the real
+    // production shape exactly: companyId AND groupId both stamped on the
+    // case, matching the actor's own home company/group — Round 6's reported
+    // bug (`storage/unauthorized` on a Registration upload) occurred on a
+    // GroupAdmin's home-company case, not a sibling company, and the
+    // existing test above only ever exercised the sibling-company (CO-C)
+    // branch of isGroupAdminOfCompany() — this seeds the untested case.
+    await setDoc(doc(db, 'cases', 'CASE-A1'), { id: 'CASE-A1', companyId: COMPANY_A, groupId: 'GROUP-A' });
   });
 }
 
@@ -163,6 +172,22 @@ describe('Phase 8 (Master Plan §9.5) — Storage Rules GroupAdmin extension', (
   it('GroupAdmin extension also applies to the scoped case-document path (canReadScopedDocuments/canWriteScopedDocuments)', async () => {
     const storage = ctx(UID_GA_A, 'ga.a@neozy.test').storage();
     const path = `companies/${COMPANY_C}/cases/CASE-C1/documents/reg.pdf`;
+    await assertSucceeds(uploadBytes(ref(storage, path), bytes));
+    await assertSucceeds(getBytes(ref(storage, path)));
+  });
+
+  // Round 6 (2026-09-11): reproduces the exact real production shape behind
+  // the reported `storage/unauthorized` bug — a GroupAdmin uploading a
+  // Registration document to a case-scoped path under their OWN HOME
+  // company (not a sibling), where the case doc itself carries the SAME
+  // companyId/groupId as the actor. Every field matches what
+  // scripts/tmp-diag-storage-groupid.cjs read off production
+  // (companies/company-demo-neozy.groupId === groups/group-demo-neozy,
+  // status Active; cases/CASE-...companyId/groupId both match; the demo
+  // user's role is literally 'GroupAdmin'). MUST pass for the fix to be real.
+  it('GroupAdmin can write/read a case-scoped Registration document under their OWN home company (production repro)', async () => {
+    const storage = ctx(UID_GA_A, 'ga.a@neozy.test').storage();
+    const path = `companies/${COMPANY_A}/cases/CASE-A1/documents/SIG-repro-doc.jpg`;
     await assertSucceeds(uploadBytes(ref(storage, path), bytes));
     await assertSucceeds(getBytes(ref(storage, path)));
   });

@@ -43,7 +43,7 @@ import { getAll, fmtDateSafe } from '../../../../../lib/firestore';
 import { COLLECTIONS } from '../../../../../lib/firebase';
 import { queryKeys } from '../../../../../lib/queryKeys';
 import { useAppStore } from '../../../../../store/useAppStore';
-import { usePermissions } from '../../../../../lib/permissions';
+import { resolveCompatibleRole, usePermissions } from '../../../../../lib/permissions';
 import {
   isPartnerSideTransition,
   SCHEME_REGISTRATION_TRANSITIONS,
@@ -57,10 +57,13 @@ import {
   useTransitionSchemeRegistration,
 } from '../../../../scheme-registration/hooks/useSchemeRegistrations';
 import {
+  DISCOM_SUGGESTIONS,
   RegistrationRequiredDocuments,
   RegistrationTimeline,
+  SCHEME_OPTIONS,
   SchemeRegistrationStatusBadge,
   schemeRegistrationStatusLabel,
+  todayIsoDate,
 } from '../../../../scheme-registration/components/registrationShared';
 import type { ProjectStageWorkspaceProps } from './types';
 
@@ -111,7 +114,10 @@ function SchemeRegistrationView({
   const nextStatuses = SCHEME_REGISTRATION_TRANSITIONS[record.status] || [];
   const canApprove = perms.canApprove('scheme_registration');
   const canEdit = perms.canEdit('scheme_registration');
-  const isAdmin = currentUser?.role === 'Admin';
+  // Admin-tier (Admin / Group Admin / 'Management' alias — canonical alias
+  // table, matching the reopenSchemeRegistration service gate). 'Manager'/'TL'
+  // stay excluded from the audited reopen override.
+  const isAdmin = currentUser?.isSuperAdmin === true || resolveCompatibleRole(currentUser?.role) === 'Admin';
 
   function handleTransition(next: SchemeRegistrationStatus) {
     if (transitionMutation.isPending) return;
@@ -516,44 +522,86 @@ function SchemeRegistrationView({
 /** Create the Scheme Registration draft — pre-scoped to this project. Calls
  * the canonical useCreateSchemeRegistration hook exactly like the portal's
  * create surface will. Ownership (partnerId/partnerName) is derived inside
- * the service from the Project chain — never from this form. */
-function SchemeRegistrationForm({ project }: { project: any }) {
+ * the service from the Project chain — never from this form. Applicant +
+ * vendor + customer fields are PRE-FILLED from the existing Lead → Customer →
+ * Project → Company chain (the service re-derives them authoritatively too);
+ * the operator only fills genuinely new portal data. */
+function SchemeRegistrationForm({ project, customer }: { project: any; customer?: any }) {
   const perms = usePermissions();
   const createMutation = useCreateSchemeRegistration();
+  const activeCompanyId = useAppStore((s) => s.activeCompanyId);
 
+  // Vendor = the company that files the registration on the portal (the EPC
+  // firm registers ITSELF). Derived from the project's own company — never a
+  // manual company/vendor pick. Read from the already-loaded companies cache
+  // (companies_global, populated at boot) so no extra round-trip; the service
+  // re-derives it authoritatively on write regardless.
+  const { data: companies = [] } = useQuery<any[]>({
+    queryKey: ['companies_global'],
+    queryFn: () => getAll(COLLECTIONS.COMPANIES, []),
+    staleTime: 1000 * 60 * 30,
+  });
+  const derivedVendorName = useMemo(() => {
+    const cid = String(project?.companyId || activeCompanyId || '');
+    const co = (companies as any[]).find((c) => c?.id === cid) || (companies as any[])[0];
+    return String(co?.name ?? co?.companyName ?? co?.legalName ?? '').trim();
+  }, [companies, project?.companyId, activeCompanyId]);
+
+  // Everything the ERP already knows — pre-filled, still editable.
+  const knownApplicantName = String(
+    customer?.name ?? customer?.fullName ?? customer?.contactPerson ?? (project as any)?.customerName ?? '',
+  ).trim();
+  const knownApplicantPhone = String(
+    customer?.phone ?? customer?.mobile ?? customer?.businessPhone ?? (project as any)?.customerPhone ?? '',
+  ).trim();
+  const knownApplicantEmail = String(customer?.email ?? customer?.businessEmail ?? '').trim();
+  const knownDiscom = String(
+    customer?.discom ?? customer?.discomName ?? project?.siteAddress?.discom ?? '',
+  ).trim();
+
+  // All "known from the ERP" fields use the controlled-with-fallback pattern
+  // (empty local state = "use the known value") — the customer/company records
+  // load async, so a plain useState(known) initializer would lock in '' on the
+  // first render before they arrive. The displayed value is `state || known`;
+  // an explicit edit sets state and wins from then on.
   const [vendorName, setVendorName] = useState('');
-  const [schemeName, setSchemeName] = useState('');
+  const [scheme, setScheme] = useState('');
+  const [customScheme, setCustomScheme] = useState('');
   const [portalType, setPortalType] = useState<SchemeRegistrationPortalType | ''>('');
   const [discom, setDiscom] = useState('');
-  const [applicationNumber, setApplicationNumber] = useState('');
-  const [portalReference, setPortalReference] = useState('');
-  const [registrationDate, setRegistrationDate] = useState('');
+  const [registrationDate, setRegistrationDate] = useState(todayIsoDate());
   const [applicantName, setApplicantName] = useState('');
   const [applicantPhone, setApplicantPhone] = useState('');
   const [applicantEmail, setApplicantEmail] = useState('');
   const [notes, setNotes] = useState('');
 
+  const effectiveVendor = (vendorName.trim() || derivedVendorName).trim();
+  const effectiveDiscom = discom.trim() || knownDiscom;
+  const effectiveApplicantName = applicantName.trim() || knownApplicantName;
+  const effectiveApplicantPhone = applicantPhone.trim() || knownApplicantPhone;
+  const effectiveApplicantEmail = applicantEmail.trim() || knownApplicantEmail;
+  const schemeName = scheme === '__other__' ? customScheme.trim() : scheme.trim();
+
   const canCreate = perms.canCreate('scheme_registration');
 
   function handleSubmit() {
     if (!canCreate || createMutation.isPending) return;
-    if (!vendorName.trim()) { toast.error('Please enter the vendor name'); return; }
-    if (applicantPhone && !/^\d{10}$/.test(applicantPhone.trim())) {
+    if (effectiveApplicantPhone && !/^\d{10}$/.test(effectiveApplicantPhone)) {
       toast.error('A valid 10-digit mobile number is required');
       return;
     }
     createMutation.mutate({
       projectId: project.id,
-      vendorName: vendorName.trim(),
-      schemeName: schemeName.trim() || undefined,
+      // Vendor is auto-derived (company) — sent only when the operator typed
+      // an override; the service fills the company name otherwise.
+      vendorName: vendorName.trim() || undefined,
+      schemeName: schemeName || undefined,
       portalType: portalType || undefined,
-      discom: discom.trim() || undefined,
-      applicationNumber: applicationNumber.trim() || undefined,
-      portalReference: portalReference.trim() || undefined,
+      discom: effectiveDiscom || undefined,
       registrationDate: registrationDate || undefined,
-      applicantName: applicantName.trim() || undefined,
-      applicantPhone: applicantPhone.trim() || undefined,
-      applicantEmail: applicantEmail.trim() || undefined,
+      applicantName: effectiveApplicantName || undefined,
+      applicantPhone: effectiveApplicantPhone || undefined,
+      applicantEmail: effectiveApplicantEmail || undefined,
       notes: notes.trim() || undefined,
     });
   }
@@ -575,14 +623,50 @@ function SchemeRegistrationForm({ project }: { project: any }) {
           <BadgeCheck className="h-3.5 w-3.5" /> No registration filed yet — {project.projectId || project.id}
         </p>
         <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">
-          File the scheme Registration for this project. Ownership flows from the project's partner chain; submitting it advances the project to the Registration stage and a Survey becomes schedulable once the registration is completed. Portal details are recorded manually (application number / portal reference).
+          Applicant, vendor and customer details are pre-filled from this project's Lead → Customer → Company chain. This starts an internal record — the actual scheme registration happens on the government/DISCOM portal; the application number and portal reference are recorded once you submit for verification, after the portal has actually issued them.
         </p>
       </div>
 
       <FormSection title="Registration Details">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Input label="Vendor Name *" value={vendorName} onChange={(e) => setVendorName(e.target.value)} placeholder="Vendor to be locked" />
-          <Input label="Scheme Name" value={schemeName} onChange={(e) => setSchemeName(e.target.value)} placeholder="Government / financing scheme" />
+          {/* Vendor — auto-derived from the registering company. Editable on
+              the right, matching the app's existing "value + inline edit"
+              field pattern. Not required: the service fills the company name. */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-[var(--color-text-secondary)]">Vendor (registering company)</label>
+            <div className="flex items-center gap-1.5">
+              <input
+                value={vendorName || derivedVendorName}
+                onChange={(e) => setVendorName(e.target.value)}
+                placeholder={derivedVendorName || 'Derived from your company'}
+                className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
+              />
+              {vendorName.trim() && vendorName.trim() !== derivedVendorName && (
+                <button type="button" title="Reset to company" onClick={() => setVendorName('')} className="shrink-0 rounded-md border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]">
+                  Reset
+                </button>
+              )}
+            </div>
+            <p className="text-[10px] text-[var(--color-text-muted)]">Auto-derived from your authorized company{effectiveVendor ? ` — ${effectiveVendor}` : ''}.</p>
+          </div>
+
+          {/* Scheme — selectable pick-list (with a free-text "Other"). */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-[var(--color-text-secondary)]">Scheme</label>
+            <select
+              value={scheme}
+              onChange={(e) => setScheme(e.target.value)}
+              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
+            >
+              <option value="">Select scheme…</option>
+              {SCHEME_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+              <option value="__other__">Other (type below)</option>
+            </select>
+            {scheme === '__other__' && (
+              <Input label="" value={customScheme} onChange={(e) => setCustomScheme(e.target.value)} placeholder="Scheme name" />
+            )}
+          </div>
+
           <div className="space-y-1">
             <label className="text-xs font-medium text-[var(--color-text-secondary)]">Portal Type</label>
             <select
@@ -598,13 +682,44 @@ function SchemeRegistrationForm({ project }: { project: any }) {
               <option value="other">Other</option>
             </select>
           </div>
-          <Input label="DISCOM" value={discom} onChange={(e) => setDiscom(e.target.value)} placeholder="DISCOM name" />
-          <Input label="Application Number" value={applicationNumber} onChange={(e) => setApplicationNumber(e.target.value)} placeholder="External portal application number" />
-          <Input label="Portal Reference" value={portalReference} onChange={(e) => setPortalReference(e.target.value)} placeholder="Portal reference ID / URL" />
-          <Input label="Registration Date" type="date" value={registrationDate} onChange={(e) => setRegistrationDate(e.target.value)} />
-          <Input label="Applicant Name" value={applicantName} onChange={(e) => setApplicantName(e.target.value)} placeholder="Applicant / customer name" />
-          <Input label="Applicant Phone" value={applicantPhone} onChange={(e) => setApplicantPhone(e.target.value)} placeholder="10-digit mobile number" />
-          <Input label="Applicant Email" value={applicantEmail} onChange={(e) => setApplicantEmail(e.target.value)} placeholder="Email address" />
+
+          {/* DISCOM — free text with an autocomplete list of common utilities;
+              pre-filled from the customer where the ERP already has it. */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-[var(--color-text-secondary)]">DISCOM</label>
+            <input
+              list="scheme-reg-discom-list"
+              value={discom || knownDiscom}
+              onChange={(e) => setDiscom(e.target.value)}
+              placeholder="Power distribution utility"
+              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
+            />
+            <datalist id="scheme-reg-discom-list">
+              {DISCOM_SUGGESTIONS.map((d) => <option key={d} value={d} />)}
+            </datalist>
+          </div>
+
+          {/* Registration Date — native calendar (compact, current month,
+              today one-click); defaults to today, with an explicit reset. */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-[var(--color-text-secondary)]">Registration Date</label>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="date"
+                value={registrationDate}
+                max={todayIsoDate()}
+                onChange={(e) => setRegistrationDate(e.target.value)}
+                className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)] outline-none focus:ring-2 focus:ring-[var(--color-focus-ring)]"
+              />
+              <button type="button" onClick={() => setRegistrationDate(todayIsoDate())} className="shrink-0 rounded-md border border-[var(--color-border)] px-2 py-1.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]">
+                Today
+              </button>
+            </div>
+          </div>
+
+          <Input label="Applicant Name" value={applicantName || knownApplicantName} onChange={(e) => setApplicantName(e.target.value)} placeholder="Applicant / customer name" />
+          <Input label="Applicant Phone" value={applicantPhone || knownApplicantPhone} onChange={(e) => setApplicantPhone(e.target.value)} placeholder="10-digit mobile number" />
+          <Input label="Applicant Email" value={applicantEmail || knownApplicantEmail} onChange={(e) => setApplicantEmail(e.target.value)} placeholder="Email address" />
         </div>
         <Input label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Additional notes about the registration" />
       </FormSection>
@@ -624,7 +739,7 @@ function SchemeRegistrationForm({ project }: { project: any }) {
 /** The real Registration state for one project — create form when no record
  * exists yet, record view after; a cancelled registration re-opens the create
  * form (a fresh draft can be filed). One active registration per project. */
-export default function ProjectSchemeRegistrationWorkspace({ project }: ProjectStageWorkspaceProps) {
+export default function ProjectSchemeRegistrationWorkspace({ project, customer }: ProjectStageWorkspaceProps) {
   const activeCompanyId = useAppStore((s) => s.activeCompanyId);
   const keys = queryKeys.forCompany(activeCompanyId);
 
@@ -660,7 +775,7 @@ export default function ProjectSchemeRegistrationWorkspace({ project }: ProjectS
       {latest ? <SchemeRegistrationView record={latest} project={project} /> : null}
       {showCreateForm && (
         <div className={latest ? 'rounded-lg border border-[var(--color-border-subtle)] p-3' : ''}>
-          <SchemeRegistrationForm project={project} />
+          <SchemeRegistrationForm project={project} customer={customer} />
         </div>
       )}
     </div>

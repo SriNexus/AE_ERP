@@ -127,17 +127,19 @@ describe('BD-3 — active partner CAN create (KYC is advisory)', () => {
     const db = ctx(P_ACTIVE.uid, P_ACTIVE.user);
     await assertSucceeds(setDoc(doc(db, 'projects', 'PRJ-NEW-1'), projectPayload('PRJ-NEW-1', P_ACTIVE.cp)));
   });
-  // NOTE — `scheme_registrations` writes are NOT asserted in this emulator
-  // suite. That block's create+update rules are documented
-  // expression-budget-critical (§10.4 / AUTH-S1b), and the emulator — which is
-  // stricter than prod AND sums the create + update + generic-fallback
-  // coverage for a single write — cannot evaluate ANY scheme_registrations
-  // write (Admin included), on the pre-BD-3 rules just as on these. That is
-  // why no scheme-registration emulator test has ever existed. BD-3 for
-  // scheme is enforced (a) at the rules layer inside
-  // schemeRegPartnerOwnsProject() → channelPartnerStatusActive(data.partnerId)
-  // and (b) in the createSchemeRegistration workflow — both structurally
-  // covered in partnerEligibility.test.ts. The create + update rules were
+  // NOTE — `scheme_registrations` write coverage now lives in its own suite,
+  // `schemeRegistrationAccess.emulator.test.ts` (added 2026-09-10 with the
+  // production fix that re-based this block onto the working leads/employees
+  // rule shape — `partnerCreateEligible() && (canCreateCompanyScoped() ||
+  // groupAdminCanCreate())` + a LEAN `actorRoleMatches()` role gate, no
+  // per-record ownership get()). That leaner shape brought the whole block —
+  // Admin, Management, Group Admin, Manager AND Partner create/update/delete —
+  // back inside the emulator's 1000-expression budget (it previously could not
+  // evaluate ANY scheme_registrations write). BD-3 for scheme is now enforced
+  // (a) at the rules layer by `partnerCreateEligible()` at the top of the
+  // create rule — identical to leads/customers/projects — and (b) in the
+  // createSchemeRegistration workflow. Its own suite asserts the suspended-
+  // partner denial directly. The pre-2026-09-10 create/update rules were
   // ALSO restructured to the file's ternary-discriminator shape (behaviour-
   // identical, lower prod expression cost) as part of this change.
 
@@ -172,10 +174,9 @@ describe('BD-3 — suspended partner CANNOT create new records', () => {
     const db = ctx(P_SUSPENDED.uid, P_SUSPENDED.user);
     await assertFails(setDoc(doc(db, 'projects', 'PRJ-SUSP-1'), projectPayload('PRJ-SUSP-1', P_SUSPENDED.cp)));
   });
-  // scheme_registrations suspended-partner denial: see the NOTE above — the
-  // emulator can't evaluate the partner-scheme create path. A suspended
-  // partner is denied there anyway (schemeRegPartnerOwnsProject now requires
-  // channelPartnerStatusActive), plus the workflow + modal gate.
+  // scheme_registrations suspended-partner denial is asserted directly in
+  // schemeRegistrationAccess.emulator.test.ts ("a SUSPENDED Partner CANNOT
+  // file a Registration — BD-3 via partnerCreateEligible()").
 });
 
 describe('BD-3 — suspended partner keeps existing/in-flight work', () => {

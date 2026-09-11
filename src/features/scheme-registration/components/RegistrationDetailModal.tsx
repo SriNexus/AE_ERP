@@ -32,7 +32,7 @@ import { COLLECTIONS } from '../../../lib/firebase';
 import { getAll, fmtDateSafe } from '../../../lib/firestore';
 import { queryKeys } from '../../../lib/queryKeys';
 import { useAppStore } from '../../../store/useAppStore';
-import { isPartnerPortalUser, usePermissions } from '../../../lib/permissions';
+import { isPartnerPortalUser, resolveCompatibleRole, usePermissions } from '../../../lib/permissions';
 import { cn } from '../../../utils/cn';
 import { Button } from '../../../components/ui/Button';
 import {
@@ -89,7 +89,11 @@ export function RegistrationDetailModal({
   const [note, setNote] = useState('');
   const [reopenNote, setReopenNote] = useState('');
 
-  const isAdmin = user?.role === 'Admin';
+  // Admin-tier (Admin / Group Admin / 'Management' alias — resolved through the
+  // canonical alias table, matching the reopenSchemeRegistration service gate);
+  // 'Manager'/'TL' resolve to 'Manager' and stay excluded from the audited
+  // reopen override even though they hold scheme_registration:approve.
+  const isAdmin = user?.isSuperAdmin === true || resolveCompatibleRole(user?.role) === 'Admin';
   const isPartnerActor = isPartnerPortalUser(user?.role, user?.isSuperAdmin);
   const canEdit = perms.canEdit('scheme_registration');
   const canApprove = perms.canApprove('scheme_registration');

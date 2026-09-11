@@ -61,12 +61,24 @@ export function buildProjectCreatePayload(
     partnerName: context.partnerName?.trim() || undefined,
     capacityKw,
     siteAddress: projectFormToAddress(form.siteAddress),
-    currentStage: 'New',
+    // A new B2C project opens ON its first working stage — Registration
+    // (SchemeRegistration, the canonical stage between New and Survey, and the
+    // first entry on the Project Workspace stage rail). Before this, projects
+    // were created at the vestigial pre-stage 'New', which is not a member of
+    // the workspace LIFECYCLE (src/hooks/useProjectStage.ts) — so every stage
+    // card resolved to 'upcoming'/locked and there was no active stage where
+    // work could begin. 'New' → 'SchemeRegistration' is a forward move within
+    // the canonical PROJECT_STAGE_ORDER; downstream stages stay pending until
+    // their own prerequisites complete, and the registration-submit stage
+    // advance (buildProjectStageAdvancePatch → 'SchemeRegistration') becomes a
+    // harmless no-op. createSchemeRegistration's own lifecycle guard already
+    // names "New or Registration stage" as the valid creation window.
+    currentStage: 'SchemeRegistration',
     stageHistory: [{
-      stage: 'New',
+      stage: 'SchemeRegistration',
       changedAt: now,
       changedBy: context.userId,
-      note: 'Project created',
+      note: 'Project created — Registration stage active',
     }],
     assignedSurveyor: form.assignedSurveyor.trim() || undefined,
     assignedInstaller: form.assignedInstaller.trim() || undefined,

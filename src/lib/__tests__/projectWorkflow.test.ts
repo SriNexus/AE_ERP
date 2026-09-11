@@ -26,9 +26,14 @@ describe('project workflow payloads', () => {
     });
 
     expect(payload.projectId).toBe('PRJ-20260709-ABCD');
-    expect(payload.currentStage).toBe('New');
+    // A new B2C project opens on its first working stage — Registration
+    // (SchemeRegistration) — not the vestigial pre-stage 'New' (which is not
+    // a member of the Project Workspace stage rail, so it left every stage
+    // card locked with no place for work to begin).
+    expect(payload.currentStage).toBe('SchemeRegistration');
     expect(payload.capacityKw).toBe(12.5);
     expect(payload.stageHistory).toHaveLength(1);
+    expect(payload.stageHistory?.[0].stage).toBe('SchemeRegistration');
     expect(payload.siteAddress.city).toBe('Pune');
     expect(payload.projectType).toBe('Residential');
   });

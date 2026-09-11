@@ -36,6 +36,12 @@ const mocks = vi.hoisted(() => ({
   sendNotification: vi.fn(async (..._args: any[]) => {}),
   notifyRoleUsers: vi.fn(async (..._args: any[]) => {}),
   canDo: vi.fn((..._args: any[]) => true),
+  resolveCompatibleRole: vi.fn((role?: string | null) => {
+    const key = String(role || '').trim().toLowerCase();
+    if (key === 'admin' || key === 'groupadmin' || key === 'management') return 'Admin';
+    if (key === 'manager' || key === 'tl') return 'Manager';
+    return key ? role : null;
+  }),
   resolveCurrentPartnerDocId: vi.fn(async (..._args: any[]): Promise<string | null> => null),
   propagateCaseIdFromChain: vi.fn(async (..._args: any[]): Promise<any> => null),
 }));
@@ -60,6 +66,7 @@ vi.mock('../firestore', () => ({
   getOne: mocks.getOne,
   getAll: mocks.getAll,
   genId: mocks.genId,
+  isRealCompanyId: (id: unknown): boolean => typeof id === 'string' && id.length > 0 && !['all', 'group', 'default', ''].includes(id),
   // Resolved by the auditLogger (logEntityChange) context on every transition.
   resolveWriteCompanyId: () => 'comp-1',
 }));
@@ -79,6 +86,7 @@ vi.mock('../notifications', () => ({
 
 vi.mock('../permissions', () => ({
   canDo: mocks.canDo,
+  resolveCompatibleRole: mocks.resolveCompatibleRole,
 }));
 
 vi.mock('../partnerOwnership', () => ({
@@ -487,6 +495,61 @@ describe('Phase 6 — status machine (authoritative 8-status model)', () => {
     expect(mocks.updateDocById).toHaveBeenCalledWith('projects', 'PRJ-1', expect.objectContaining({ currentStage: 'SchemeRegistration' }));
   });
 
+  // Round 8 (2026-09-11): the reported bug — Registration completed, but the
+  // next Project stage (Survey) never became active. Root cause:
+  // transitionSchemeRegistrationStatus never advanced project.currentStage
+  // to 'Survey' when the Survey gate (isSurveyGateSatisfied — VendorLocked
+  // with complete vendor-lock data, or Completed) became satisfied — the
+  // ONE stage transition in this codebase's chain (Submitted→SchemeReg,
+  // scheduleSurvey→Survey, surveyApproval→Engineering, designApproval→
+  // Quotation, PO→Procurement) that was never wired to the shared
+  // buildProjectStageAdvancePatch mechanism. Fixed by adding it here, using
+  // the exact same canonical helper every other transition already uses.
+  describe('Round 8 — advances the project to Survey when the Survey gate is satisfied', () => {
+    function projectHarness(record: SchemeRegistrationRecord, initialProject = { ...PARTNER_PROJECT, currentStage: 'SchemeRegistration' }) {
+      let project = initialProject;
+      mocks.getOne.mockImplementation(async (collection: string) => {
+        if (collection === 'scheme_registrations') return record;
+        if (collection === 'projects') return project;
+        return undefined;
+      });
+      mocks.updateDocById.mockImplementation(async (collection: string, _id: string, patch: any) => {
+        if (collection === 'scheme_registrations') Object.assign(record, patch);
+        if (collection === 'projects') project = { ...project, ...patch };
+      });
+      return { getProject: () => project };
+    }
+
+    it('advances SchemeRegistration → Survey on VendorLocked (forward-only patch)', async () => {
+      const record = transitionHarness({ status: 'UnderVerification' });
+      const { getProject } = projectHarness(record);
+
+      await transitionSchemeRegistrationStatus(record.id, 'VendorLocked', { vendorName: 'Vendor A' });
+
+      expect(getProject().currentStage).toBe('Survey');
+      expect(mocks.updateDocById).toHaveBeenCalledWith('projects', 'PRJ-1', expect.objectContaining({ currentStage: 'Survey' }));
+    });
+
+    it('advances SchemeRegistration → Survey on Completed (forward-only patch)', async () => {
+      const record = transitionHarness({ status: 'VendorLocked', vendorName: 'Vendor A', vendorLockedAt: '2026-01-10T00:00:00.000Z', vendorLockDate: '2026-01-10' });
+      const { getProject } = projectHarness(record);
+
+      await transitionSchemeRegistrationStatus(record.id, 'Completed');
+
+      expect(getProject().currentStage).toBe('Survey');
+      expect(mocks.updateDocById).toHaveBeenCalledWith('projects', 'PRJ-1', expect.objectContaining({ currentStage: 'Survey' }));
+    });
+
+    it('does NOT regress a project already past Survey when its registration is (re-)completed', async () => {
+      const record = transitionHarness({ status: 'VendorLocked', vendorName: 'Vendor A', vendorLockedAt: '2026-01-10T00:00:00.000Z', vendorLockDate: '2026-01-10' });
+      const { getProject } = projectHarness(record, { ...PARTNER_PROJECT, currentStage: 'Order', stageHistory: [{ stage: 'Order', changedAt: 'T1' }] });
+
+      await transitionSchemeRegistrationStatus(record.id, 'Completed');
+
+      expect(getProject().currentStage).toBe('Order');
+    });
+  });
+
   it('requires a vendor selection before Vendor Lock (irreversible lock)', async () => {
     const record = transitionHarness({ vendorName: undefined, vendorId: undefined });
     await transitionSchemeRegistrationStatus(record.id, 'Submitted');
@@ -707,11 +770,22 @@ describe('Phase 6 — Admin-only audited reopen (§13)', () => {
     expect(mocks.logActivity).toHaveBeenCalledWith('scheme_registration', 'reopened', record.id, expect.anything());
   });
 
-  it('refuses reopen for a non-Admin actor', async () => {
+  it('refuses reopen for a non-Admin actor (Manager holds approve but is still excluded from the audited override)', async () => {
     useAppStore.setState({ user: { ...USER, role: 'Manager' } });
     const record = baseRecord({ status: 'Completed', completedAt: '2026-01-20T00:00:00.000Z' });
     mocks.getOne.mockImplementation(async (collection: string) => (collection === 'scheme_registrations' ? record : undefined));
-    await expect(reopenSchemeRegistration(record.id, 'nope')).rejects.toThrow('Only an Admin can reopen a completed registration.');
+    await expect(reopenSchemeRegistration(record.id, 'nope')).rejects.toThrow('Only an Admin or Group Admin can reopen a completed registration.');
+  });
+
+  it('allows reopen for a Group Admin (Admin-equivalent, group-scoped — RBAC Master Plan §5.2)', async () => {
+    useAppStore.setState({ user: { ...USER, role: 'GroupAdmin' } });
+    const record = baseRecord({ status: 'VendorLocked' });
+    mocks.getOne.mockImplementation(async (collection: string) => (collection === 'scheme_registrations' ? record : undefined));
+    mocks.updateDocById.mockImplementation(async (collection: string, _id: string, patch: any) => {
+      if (collection === 'scheme_registrations') Object.assign(record, patch);
+    });
+    const reopened = await reopenSchemeRegistration(record.id, 'Group Admin correction');
+    expect(reopened.status).toBe('Submitted');
   });
 
   it('refuses reopen for records not in Completed/VendorLocked and requires a reason', async () => {

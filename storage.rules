@@ -131,29 +131,56 @@ service firebase.storage {
     // assertions, not actual rules evaluation). Rewritten below as an
     // equivalent ternary chain — same priority-ordered decision logic,
     // same outcome for every case, now syntactically valid.
+    // Round 7 fix (2026-09-11): a real GroupAdmin, in their OWN home Company,
+    // got a genuine `storage/unauthorized` on every case/project-scoped
+    // document (Registration uploads) while the general company path (Lead
+    // uploads) worked for the identical identity/request. Root cause: this
+    // function evaluated isGroupAdminOfCompany() UNCONDITIONALLY FIRST, as a
+    // ternary condition — a 4-hop chain of cross-service firestore.get()/
+    // exists() calls (currentUserRole()'s 2 hops -> companies doc ->
+    // groupIsActive()'s groups doc). Live-reproduced (old AND a brand-new
+    // Case, same result both times): this chain reliably fails/errors when
+    // Storage Rules' cross-service Firestore calls run against the real
+    // deployed project, even though every document it reads is correct
+    // (confirmed via direct Admin SDK reads) and the identical chain passes
+    // cleanly in the local Firestore+Storage emulator (see
+    // multiTenantStorageSecurity.emulator.test.ts) — a genuine emulator-vs-
+    // production divergence, not a data or logic defect. A ternary
+    // CONDITION that throws denies the whole rule; it never falls through to
+    // the (already-correct) same-company fallback below it.
+    // canAccessGeneralCompanyPath() (used by Lead's path, which DOES work in
+    // production) never hits this: `currentUserCompanyId() == companyId`
+    // is checked FIRST via `||`, and for a same-company actor (the common
+    // case, including this GroupAdmin's own home Company) it short-circuits
+    // BEFORE isGroupAdminOfCompany() is ever evaluated — 1 cheap
+    // cross-service call instead of 4+. Fix: apply that exact same
+    // cheap-check-first order here. Semantics are unchanged for every actor
+    // (isGroupAdminOfCompany() is still evaluated, and still governs
+    // cross-company GroupAdmin access — see the sibling-company test in
+    // multiTenantStorageSecurity.emulator.test.ts, which still passes) —
+    // only the EVALUATION ORDER changes, so a same-company actor (the
+    // overwhelming majority of real requests, GroupAdmin included) never
+    // needs the expensive chain at all.
     function canReadScopedDocuments(companyId, docPath) {
-      // Phase 8 (§9.5): GroupAdmin reads any Company in their own active
-      // Group as if they were that Company's Admin (§5.2) — checked before
-      // the same-company gate, which would otherwise deny a sibling Company.
       return !signedIn() ? false
-        : isGroupAdminOfCompany(companyId) ? true
-        : currentUserCompanyId() != companyId ? false
-        : currentUserRole() == 'Accounts' ? false
-        : currentUserRole() == 'Admin' ? true
-        : isCaseDocManagerRole() ? isManagerOfPartner(docPartnerId(docPath))
-        : currentUserRole() == 'Partner' ? isOwnerPartner(docPartnerId(docPath))
-        : true;
+        : currentUserCompanyId() == companyId
+          ? (currentUserRole() == 'Accounts' ? false
+            : currentUserRole() == 'Admin' ? true
+            : isCaseDocManagerRole() ? isManagerOfPartner(docPartnerId(docPath))
+            : currentUserRole() == 'Partner' ? isOwnerPartner(docPartnerId(docPath))
+            : true)
+        : isGroupAdminOfCompany(companyId);
     }
 
     function canWriteScopedDocuments(companyId, docPath) {
       return !signedIn() ? false
-        : isGroupAdminOfCompany(companyId) ? true
-        : currentUserCompanyId() != companyId ? false
-        : (currentUserRole() == 'Accounts' || currentUserRole() == 'Director') ? false
-        : currentUserRole() == 'Admin' ? true
-        : isCaseDocManagerRole() ? isManagerOfPartner(docPartnerId(docPath))
-        : currentUserRole() == 'Partner' ? isOwnerPartner(docPartnerId(docPath))
-        : true;
+        : currentUserCompanyId() == companyId
+          ? ((currentUserRole() == 'Accounts' || currentUserRole() == 'Director') ? false
+            : currentUserRole() == 'Admin' ? true
+            : isCaseDocManagerRole() ? isManagerOfPartner(docPartnerId(docPath))
+            : currentUserRole() == 'Partner' ? isOwnerPartner(docPartnerId(docPath))
+            : true)
+        : isGroupAdminOfCompany(companyId);
     }
 
     // NOTE (Phase 8 discovery): the exclusion of scoped-document paths from

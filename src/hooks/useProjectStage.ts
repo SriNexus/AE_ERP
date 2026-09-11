@@ -67,17 +67,30 @@ export function resolveProjectWorkspaceStages(project: ProjectRecord): ProjectWo
   // position within this component's own 12-item LIFECYCLE subset — the two
   // scales aren't interchangeable, so both sides of every comparison
   // must resolve through the same canonical index.
-  const currentCanonicalIndex = projectStageIndex(project.currentStage);
-  const completedStages = new Set((project.stageHistory || []).map((entry) => entry.stage));
   const archived = project.currentStage === 'Archived';
+  // The workspace stage rail starts at Registration (SchemeRegistration) — it
+  // has no entry for the vestigial pre-stage 'New'. A project whose stored
+  // currentStage is 'New', empty, or an unrecognized value therefore has no
+  // stage on the rail and every card resolves to 'upcoming'/locked, leaving no
+  // place for work to begin. Surface Registration as the active stage for that
+  // case: new projects are now created at 'SchemeRegistration' directly
+  // (src/lib/projectWorkflow.ts), and this also repairs projects created
+  // before that default — a read-time resolution only, the stored record is
+  // never rewritten. Archived is untouched (index far past Registration).
+  const effectiveCurrentStage: ProjectStage =
+    projectStageIndex(project.currentStage) < projectStageIndex('SchemeRegistration')
+      ? 'SchemeRegistration'
+      : (project.currentStage as ProjectStage);
+  const currentCanonicalIndex = projectStageIndex(effectiveCurrentStage);
+  const completedStages = new Set((project.stageHistory || []).map((entry) => entry.stage));
 
   return LIFECYCLE.map((stage) => {
     let status: StageCardStatus = 'upcoming';
     if (archived || completedStages.has(stage.projectStage) || projectStageIndex(stage.projectStage) < currentCanonicalIndex) status = 'completed';
-    if (!archived && stage.projectStage === project.currentStage) status = 'current';
-    if (!archived && (project.currentStage === 'NetMetering' || project.currentStage === 'Subsidy')
+    if (!archived && stage.projectStage === effectiveCurrentStage) status = 'current';
+    if (!archived && (effectiveCurrentStage === 'NetMetering' || effectiveCurrentStage === 'Subsidy')
       && (stage.projectStage === 'NetMetering' || stage.projectStage === 'Subsidy')
-      && stage.projectStage !== project.currentStage
+      && stage.projectStage !== effectiveCurrentStage
       && !completedStages.has(stage.projectStage)) status = 'attention';
 
     return { ...stage, status, href: stageHref(stage.projectStage, project) };

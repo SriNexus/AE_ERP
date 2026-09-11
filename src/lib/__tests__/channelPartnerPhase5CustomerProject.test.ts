@@ -21,7 +21,7 @@
  *   11 Management/Admin visibility unaffected (filter helpers return all)
  *   12 Normal internal Sales user Customer/Project workflows still work
  *   13 B2B/B2C business-mode restrictions remain intact
- *   14 Existing Project lifecycle remains intact (New stage start)
+ *   14 Existing Project lifecycle remains intact (Registration stage start)
  *   15 Demo Partner → Lead → Customer → Project graph is coherent
  *   16 Loan Applications untouched (no registrations references added)
  */
@@ -281,7 +281,7 @@ describe('createProject — partner ownership + §9.3 + B2B guard', () => {
         partnerName: 'GreenLeaf Solar',
         customerId: 'CUST-1',
         leadId: 'LD-1',
-        currentStage: 'New',
+        currentStage: 'SchemeRegistration',
       }),
     );
     expect(payload.partnerId).toBe('partner-1');
@@ -306,13 +306,13 @@ describe('createProject — partner ownership + §9.3 + B2B guard', () => {
     expect(mocks.createDocWithId).not.toHaveBeenCalled();
   });
 
-  it('TEST 14: buildProjectCreatePayload always starts a fresh project at the New stage', () => {
+  it('TEST 14: buildProjectCreatePayload starts a fresh project on the Registration (SchemeRegistration) stage — the first stage on the workspace rail', () => {
     const payload = buildProjectCreatePayload(
       { ...form, customerId: 'CUST-1', capacityKw: '8', projectType: 'Residential' },
       { projectId: 'PRJ-20260709-ABCD', companyId: 'COMP-1', userId: 'USR-1', partnerId: 'partner-1', partnerName: 'GreenLeaf Solar', leadId: 'LD-1' },
     );
-    expect(payload.currentStage).toBe('New');
-    expect(payload.stageHistory[0].stage).toBe('New');
+    expect(payload.currentStage).toBe('SchemeRegistration');
+    expect(payload.stageHistory[0].stage).toBe('SchemeRegistration');
     expect(payload.partnerId).toBe('partner-1');
   });
 
@@ -321,7 +321,7 @@ describe('createProject — partner ownership + §9.3 + B2B guard', () => {
     const payload = await createProject(form);
     const created = mocks.createDocWithId.mock.calls[0][2];
     expect(created.partnerId).toBeFalsy();
-    expect(payload.currentStage).toBe('New');
+    expect(payload.currentStage).toBe('SchemeRegistration');
   });
 });
 

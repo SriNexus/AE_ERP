@@ -39,6 +39,41 @@ export const SCHEME_REGISTRATION_STATUS_COLORS: Record<string, string> = {
   Failed: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
 };
 
+// Common government / financing schemes for residential-solar registration.
+// A curated pick-list (NOT a new master collection) — shared by every create
+// surface (Project Workspace stage form, standalone /registration page) so
+// the two never drift into two separate scheme vocabularies.
+export const SCHEME_OPTIONS = [
+  'PM Surya Ghar (Muft Bijli Yojana)',
+  'PM-KUSUM',
+  'State Rooftop Solar Subsidy',
+  'DISCOM Net-Metering Scheme',
+  'Non-Subsidised / Commercial',
+];
+
+// Common Indian power-distribution utilities — an autocomplete helper for the
+// free-text DISCOM field (no canonical DISCOM master exists in the data
+// model; this is a <datalist>, not a second source of truth). Shared by every
+// create surface for the same reason as SCHEME_OPTIONS above.
+export const DISCOM_SUGGESTIONS = [
+  'MSEDCL', 'BESCOM', 'MESCOM', 'HESCOM', 'GESCOM', 'CESC Mysore',
+  'UPPCL', 'PVVNL', 'PuVVNL', 'DVVNL', 'MVVNL',
+  'TATA Power-DDL', 'BSES Rajdhani', 'BSES Yamuna',
+  'TANGEDCO', 'TSSPDCL', 'TSNPDCL', 'APSPDCL', 'APEPDCL', 'APCPDCL',
+  'PSPCL', 'UHBVN', 'DHBVN', 'JVVNL', 'AVVNL', 'JdVVNL',
+  'MPPKVVCL', 'MPMKVVCL', 'MPPaKVVCL', 'CSPDCL', 'WBSEDCL',
+  'PGVCL', 'MGVCL', 'DGVCL', 'UGVCL', 'Torrent Power',
+  'KSEB', 'JBVNL', 'CEB', 'Assam Power (APDCL)',
+];
+
+/** Today as YYYY-MM-DD — shared by every create/edit surface's Registration
+ * Date field (default value + max= validation), so "today" resolves
+ * identically everywhere. */
+export function todayIsoDate(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export function schemeRegistrationStatusLabel(status: string): string {
   if (status === 'UnderVerification') return 'Under Verification';
   if (status === 'VendorLocked') return 'Vendor Locked';

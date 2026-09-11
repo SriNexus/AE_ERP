@@ -39,9 +39,9 @@
  */
 import { COLLECTIONS } from '../../../lib/firebase';
 import {
-  createDocWithId, genId, getAll, getOne, updateDocById,
+  createDocWithId, genId, getAll, getOne, isRealCompanyId, updateDocById,
 } from '../../../lib/firestore';
-import { canDo } from '../../../lib/permissions';
+import { canDo, resolveCompatibleRole } from '../../../lib/permissions';
 import { useAppStore } from '../../../store/useAppStore';
 import { resolveCurrentPartnerDocId } from '../../../lib/partnerOwnership';
 import { assertPartnerCanCreate } from '../../../lib/partnerEligibility';
@@ -158,9 +158,12 @@ export async function createSchemeRegistration(
     }
     // RBAC Master Plan §15 BD-3 (owner-approved 2026-09-09): a suspended /
     // inactive / not-yet-approved partner cannot file a NEW registration.
-    // scheme_registrations has no generic REST entity, so the rules layer
-    // (schemeRegPartnerOwnsProject -> channelPartnerStatusActive) + this
-    // workflow are the two enforcement planes. KYC is advisory (not checked).
+    // scheme_registrations has no generic REST entity. Enforcement planes:
+    // (a) firestore.rules `partnerCreateEligible()` at the top of the create
+    // rule (identical to the leads/customers/projects create rules), and
+    // (b) this workflow (assertPartnerCanCreate + the project-ownership check
+    // above — the rules layer no longer carries a per-record ownership
+    // predicate, matching the leads posture). KYC is advisory (not checked).
     const actingPartner = await getOne<{ status?: string; isDeleted?: boolean }>(
       COLLECTIONS.CHANNEL_PARTNERS,
       authenticatedPartnerId,
@@ -169,6 +172,42 @@ export async function createSchemeRegistration(
   }
   const partnerId = authenticatedPartnerId ?? project.partnerId ?? undefined;
   const partnerName = project.partnerName ?? undefined;
+
+  // ── Tenant: inherit from the PARENT PROJECT (its canonical anchor), not the
+  // session's resolveWorkflowCompanyId(). A Group Admin filing a Registration
+  // from the group-aggregate view would otherwise stamp their HOME company
+  // onto a registration whose project lives in a sibling company — a
+  // cross-tenant inconsistency and a rules denial (sameCompany/sameGroup see
+  // the wrong companyId). createDocWithId re-derives the authoritative groupId
+  // from whichever companyId it resolves, so passing the project's companyId
+  // is what lets the groupId land correctly for a Group Admin.
+  const tenantCompanyId = isRealCompanyId((project as any).companyId)
+    ? String((project as any).companyId)
+    : resolveWorkflowCompanyId();
+
+  // ── Auto-population from existing ERP data (Lead → Customer → Project) so
+  // the operator never re-types what Neozy already knows. The customer record
+  // is the canonical applicant identity; the company is the registering
+  // Vendor. Every value stays overridable from the form (input.* wins).
+  const customer = project.customerId
+    ? await getOne<any>(COLLECTIONS.CUSTOMERS, project.customerId).catch(() => null)
+    : null;
+  const companyDoc = await getOne<any>(COLLECTIONS.COMPANIES, tenantCompanyId).catch(() => null);
+  // Vendor = the company that registers the project on the portal (the EPC
+  // firm registers ITSELF as the vendor). Derived from the authorized
+  // company; never a manual company/vendor pick.
+  const derivedVendorName = String(
+    companyDoc?.name ?? companyDoc?.companyName ?? companyDoc?.legalName ?? '',
+  ).trim() || undefined;
+  const derivedCustomerName = String(
+    (project as any).customerName ?? customer?.name ?? customer?.fullName ?? customer?.contactPerson ?? '',
+  ).trim() || undefined;
+  const derivedCustomerPhone = String(
+    (project as any).customerPhone ?? customer?.phone ?? customer?.mobile ?? customer?.businessPhone ?? '',
+  ).trim() || undefined;
+  const derivedCustomerEmail = String(
+    customer?.email ?? customer?.businessEmail ?? '',
+  ).trim() || undefined;
 
   // Partner's linked user + TL/Manager — resolved from the canonical
   // channel_partners document (never from client input) so staff transitions
@@ -187,26 +226,28 @@ export async function createSchemeRegistration(
     registrationId,
     projectId: project.id,
     customerId: project.customerId ?? undefined,
-    customerName: (project as any).customerName ?? undefined,
-    customerPhone: (project as any).customerPhone ?? undefined,
+    customerName: derivedCustomerName,
+    customerPhone: derivedCustomerPhone,
     leadId: project.leadId ?? undefined,
     caseId: (project as any).caseId ?? undefined,
-    companyId: resolveWorkflowCompanyId(),
+    companyId: tenantCompanyId,
     partnerId,
     partnerName,
     managerId,
     userId: linkedUserId,
     vendorId: input.vendorId ?? undefined,
-    vendorName: input.vendorName?.trim() || undefined,
+    // Vendor auto-derived from the registering company (still editable via
+    // the form's existing Vendor field). Falls back to any explicit input.
+    vendorName: input.vendorName?.trim() || derivedVendorName,
     schemeName: input.schemeName?.trim() || undefined,
     portalType: input.portalType ?? undefined,
     discom: input.discom?.trim() || undefined,
     applicationNumber: input.applicationNumber?.trim() || undefined,
     portalReference: input.portalReference?.trim() || undefined,
     registrationDate: input.registrationDate?.trim() || undefined,
-    applicantName: input.applicantName?.trim() || undefined,
-    applicantPhone: input.applicantPhone?.trim() || undefined,
-    applicantEmail: input.applicantEmail?.trim() || undefined,
+    applicantName: input.applicantName?.trim() || derivedCustomerName,
+    applicantPhone: input.applicantPhone?.trim() || derivedCustomerPhone,
+    applicantEmail: input.applicantEmail?.trim() || derivedCustomerEmail,
     notes: input.notes?.trim() || undefined,
     // Who performed the portal operation (§12) — the actor filing the
     // registration (partner or staff).
@@ -415,6 +456,34 @@ export async function transitionSchemeRegistrationStatus(
     }
   }
 
+  // Round 8 fix: advance SchemeRegistration → Survey the moment the Survey
+  // gate itself is satisfied (isSurveyGateSatisfied — VendorLocked with
+  // complete vendor-lock data, or Completed; the EXACT condition
+  // assertSchemeRegistrationSurveyGate checks before scheduleSurvey allows a
+  // survey). Root cause of the reported bug: this write was never wired,
+  // so `project.currentStage` stayed at 'SchemeRegistration' forever — the
+  // stage rail (resolveProjectWorkspaceStages) kept Survey's card
+  // 'upcoming', which ALSO keeps it collapsed/non-expandable in
+  // ProjectWorkOnThisProject (`stage.status !== 'upcoming'` gates
+  // `expanded`), so the embedded Schedule Survey form was genuinely
+  // unreachable — not just a stale label. Uses the SAME canonical,
+  // forward-only, idempotent buildProjectStageAdvancePatch every other
+  // stage transition in this codebase already uses (scheduleSurvey →
+  // Survey, survey approval → Engineering, design approval → Quotation,
+  // PO creation → Procurement) — no new/duplicated transition mechanism.
+  if (
+    (newStatus === 'VendorLocked' && isSurveyGateSatisfied(newStatus, { ...record, ...patch }))
+    || newStatus === 'Completed'
+  ) {
+    const project = await requireProject(record.projectId);
+    const advancePatch = buildProjectStageAdvancePatch(
+      project, 'Survey', actorId, `Scheme registration ${id} ${newStatus === 'Completed' ? 'completed' : 'vendor-locked'}`,
+    );
+    if (Object.keys(advancePatch).length > 0) {
+      await updateDocById(COLLECTIONS.PROJECTS, record.projectId, advancePatch);
+    }
+  }
+
   // Capture the PRE-write state explicitly — the audit's oldValues must never
   // depend on the record object not having been mutated by the write.
   const previousStatus = record.status;
@@ -480,8 +549,15 @@ export async function reopenSchemeRegistration(id: string, note: string): Promis
     throw new Error('You do not have permission to reopen scheme registrations.');
   }
   const actor = useAppStore.getState().user;
-  if (actor?.role !== 'Admin') {
-    throw new Error('Only an Admin can reopen a completed registration.');
+  // Admin-tier only — the audited override stays out of a team Manager's
+  // reach even though Manager also holds scheme_registration:approve. Resolved
+  // through the canonical alias table (not a raw `role === 'Admin'` compare)
+  // so a Group Admin (Admin-equivalent, group-scoped — RBAC Master Plan §5.2)
+  // and a 'Management' actor (Admin alias — BD-5) are correctly admitted,
+  // matching the three-plane alias posture; 'Manager'/'TL' still resolve to
+  // 'Manager' and remain excluded.
+  if (!actor || (!actor.isSuperAdmin && resolveCompatibleRole(actor.role) !== 'Admin')) {
+    throw new Error('Only an Admin or Group Admin can reopen a completed registration.');
   }
   if (!note.trim()) throw new Error('A reopen reason is required for the audit trail.');
   if (record.status !== 'Completed' && record.status !== 'VendorLocked') {

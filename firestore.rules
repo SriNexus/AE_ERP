@@ -160,18 +160,11 @@ service cloud.firestore {
       return hasUserProfile() && roleStringMatches(currentUser().role, pattern);
     }
 
-    // GAP-01 remediation (independent Vendor Lock audit, 2026-08-14): the
-    // Channel Partner spec (§7/§45, LOCKED) treats `TL` as behaviorally
-    // equivalent to `Manager` for the Channel Partner / Registration domain;
-    // permissions.ts already aliases `tl -> Manager` at the JS canDo() layer,
-    // but that alias never reached the rules text, so a literal `role: 'TL'`
-    // failed every roleMatches('Manager') check in the scheme_registrations
-    // block below. Scoped deliberately to that block only — do not reuse for
-    // unrelated roleMatches('Manager') checks elsewhere in this file without
-    // separately auditing them (out of Vendor Lock scope).
-    function isSchemeRegManagerRole() {
-      return roleMatches('Manager') || roleMatches('TL');
-    }
+    // (The scheme_registrations block's Manager/TL role matching now uses the
+    // lean actorRoleMatches('Manager|TL') — the old isSchemeRegManagerRole()
+    // helper + schemeRegManagerOfPartner() per-record predicate were removed
+    // with the 2026-09-10 read/write budget rebase; TL is covered because
+    // 'TL' is an explicit alternative in every scheme role pattern.)
 
     function userCompanyId() {
       return hasUserProfile() ? get(authMapPath()).data.companyId : '';
@@ -853,65 +846,64 @@ service cloud.firestore {
     // reuse the Phase 1 canonical helpers (partnerLinkedToSelf /
     // currentUserId); every get() is engine-cached and each clause
     // short-circuits, keeping the rules well under the expression budget.
-    function schemeRegManagerOfPartner(partnerId) {
-      return partnerId is string && partnerId.size() > 0
-        && exists(/databases/$(database)/documents/channel_partners/$(partnerId))
-        && hasOrgField(get(/databases/$(database)/documents/channel_partners/$(partnerId)).data, 'managerId')
-        && get(/databases/$(database)/documents/channel_partners/$(partnerId)).data.managerId == currentUserId();
-    }
-
-    // Read scope (spec §19): partner self via users.channelPartnerId, TL/
-    // Manager team via channel_partners.managerId, Director (view-only
-    // executive visibility), Admin. Cross-company denied by sameCompany();
-    // Accounts gets nothing.
+    // Read scope (spec §19): Admin / Director / Manager / TL / Group Admin —
+    // company (Group Admin: group) scoped; Partner — self (own partnerId).
+    // Accounts gets nothing. Cross-company denied by canReadCompanyScoped().
+    //
+    // LEAN — a LAZY `isGroupAdmin() ? … : …` discriminator + the ternary
+    // role-branch shape the write rules use (§10.4). The OLD form was a
+    // non-short-circuiting `sameCompany(data) && (isAdmin() ||
+    // roleMatches('Director') || (isSchemeRegManagerRole() &&
+    // schemeRegManagerOfPartner(...)) || (isPartner() && partnerLinkedToSelf(...)))`
+    // — every actor (Group Admin included, via the old trailing `||
+    // groupAdminCanRead`) walked isSchemeRegManagerRole()'s two regex, the
+    // manager-of-partner get(), the isPartner() check and partnerLinkedToSelf()'s
+    // two get()s PER DOCUMENT, then the emulator summed the LIST + the generic
+    // fallback → "maximum of 1000 expressions" on a `getAll(scheme_registrations)`
+    // (the "one active registration per project" check in
+    // createSchemeRegistration → the ACTUAL blocker of Group Admin Registration
+    // creation, not the write rule). Now: a Group Admin evaluates ONLY
+    // groupAdminCanRead()/canReadCompanyScoped(); Manager/TL are company-scoped
+    // at the rules layer (BD-2 — team filtering is app-layer, same decision as
+    // the create rule); only a Partner pays for partnerLinkedToSelf()'s get().
     function schemeRegCanRead(data) {
-      return sameCompany(data)
-        && (
-          isAdmin()
-          || roleMatches('Director')
-          || (isSchemeRegManagerRole() && schemeRegManagerOfPartner(data.partnerId))
-          || (isPartner() && partnerLinkedToSelf(data.partnerId))
-        );
+      return isGroupAdmin()
+        ? (groupAdminCanRead(data) || canReadCompanyScoped())
+        : (
+            canReadCompanyScoped()
+            && (
+              (actorIsSuperAdmin() || actorRoleMatches('Admin|Director|Manager|TL'))
+                ? true
+                : (actorRoleMatches('Partner') && partnerLinkedToSelf(data.partnerId))
+            )
+          );
     }
 
-    // Partner create (§9.3): the partnerId being written must be the
-    // authenticated partner's OWN id AND must equal the referenced project's
-    // partnerId — a partner can never stamp a foreign partnerId or attach
-    // another partner's project.
-    function schemeRegPartnerOwnsProject(data) {
-      return isPartner()
-        && partnerLinkedToSelf(data.partnerId)
-        // BD-3: partnerLinkedToSelf just proved data.partnerId is the acting
-        // partner's OWN channel_partners doc — so this is the actor's own
-        // status. A suspended/inactive/pending partner cannot file a NEW
-        // scheme registration (reuses data.partnerId — no identity re-walk).
-        && channelPartnerStatusActive(data.partnerId)
-        && data.projectId is string && data.projectId.size() > 0
-        && exists(/databases/$(database)/documents/projects/$(data.projectId))
-        // .get('partnerId','') folds the old hasOrgField() keys()-guard away
-        // (one cached read + one field access, not two) — §10.4 budget: this
-        // block is tight and BD-3's status check above is paid for by the
-        // create-rule ternary restructure + this trim.
-        && get(/databases/$(database)/documents/projects/$(data.projectId)).data.get('partnerId', '') == data.partnerId;
-    }
-
-    // Manager create: the project's owning partner must report to the acting
-    // Manager (team scope — never a foreign partner's project).
-    function schemeRegManagerOwnsProject(data) {
-      return isSchemeRegManagerRole()
-        && data.projectId is string && data.projectId.size() > 0
-        && exists(/databases/$(database)/documents/projects/$(data.projectId))
-        && hasOrgField(get(/databases/$(database)/documents/projects/$(data.projectId)).data, 'partnerId')
-        && schemeRegManagerOfPartner(get(/databases/$(database)/documents/projects/$(data.projectId)).data.partnerId);
-    }
 
     // Identity immutability on update: a registration can never be re-pointed
     // at a different project, partner or company — ownership comes from the
     // canonical chain, never a late edit.
+    //
+    // Round 7 fix (2026-09-11): partnerId is genuinely OPTIONAL — a
+    // staff-created (non-Channel-Partner) registration has none ("Owner:
+    // Internal" in the UI), confirmed live on SREG-260911-8VOF
+    // (partnerId undefined on the stored doc). The original unguarded
+    // `request.resource.data.partnerId == resource.data.partnerId` throws
+    // "Property partnerId is undefined on object" the instant EITHER side
+    // lacks the field — denying every update (attachRegistrationDocument's
+    // requiredDocuments/documents patch included, live-reproduced: Storage
+    // upload + the `documents` collection write both succeeded, but this
+    // condition threw before the scheme_registrations update could commit,
+    // surfacing as a generic "Missing or insufficient permissions" toast).
+    // projectId/companyId are Required+Immutable (§3.2) on every
+    // scheme_registrations record, so they keep the plain equality check;
+    // only partnerId needs the keys().hasAny() guard already used
+    // throughout this file for genuinely optional fields (e.g. hasGroupId).
     function schemeRegIdentityUnchanged() {
-      return request.resource.data.partnerId == resource.data.partnerId
-        && request.resource.data.projectId == resource.data.projectId
-        && request.resource.data.companyId == resource.data.companyId;
+      return request.resource.data.projectId == resource.data.projectId
+        && request.resource.data.companyId == resource.data.companyId
+        && (resource.data.keys().hasAny(['partnerId']) ? resource.data.partnerId : null)
+           == (request.resource.data.keys().hasAny(['partnerId']) ? request.resource.data.partnerId : null);
     }
 
     // F-02 (Phase 0): isSpecialCollection() now also covers the 14 collections
@@ -2004,75 +1996,111 @@ service cloud.firestore {
     // denied by sameCompany() everywhere. Vendor Lock irreversibility is a
     // service-machine contract (statuses), not enumerable in rules.
     match /scheme_registrations/{id} {
-      allow read: if actorIsActive() && signedIn() && (schemeRegCanRead(resource.data) || groupAdminCanRead(resource.data));
-      // BD-3: a suspended/inactive/pending partner cannot file a NEW scheme
-      // registration — enforced INSIDE schemeRegPartnerOwnsProject() (which
-      // already resolves the acting Partner + verifies data.partnerId is the
-      // actor's own channelPartnerId, so no identity re-walk).
+      // schemeRegCanRead() now handles the Group Admin branch internally (lazy
+      // discriminator) — the old trailing `|| groupAdminCanRead()` is folded in.
+      allow read: if actorIsActive() && signedIn() && schemeRegCanRead(resource.data);
+
+      // WRITE RULES — the SAME budget-safe, role-gated, tenant-scoped shape the
+      // employees / payroll / payments blocks use (§10.4). It has THREE parts,
+      // and every one of them is a canonical helper already used by a working
+      // rule elsewhere — no scheme-specific tenant workaround:
       //
-      // This create rule was `(isAdmin() || partnerOwns || managerOwns)` under
-      // a non-lazy `||` — every branch (and every get() it makes) was
-      // evaluated for every actor, and the block is documented
-      // expression-budget-tight (§10.4 / AUTH-S1b). Restructured to the
-      // file's established ternary-discriminator shape so exactly ONE
-      // role-branch evaluates: a Partner never pays for isAdmin() or the
-      // manager path, an Admin never pays for the partner/manager gets. This
-      // trim is what makes room for BD-3's status check. Behaviour is
-      // identical — same ALLOW/DENY set for every role.
-      allow create: if actorIsActive()
-        && groupIdMatchesCompany(request.resource.data)
+      //  1. `isGroupAdmin() ? (…) : (…)` — a LAZY ternary discriminator (NOT an
+      //     `||` between the two): a Group Admin evaluates ONLY the first arm,
+      //     every other role ONLY the second. This is what keeps the block
+      //     under Firestore's 1000-expression cap even with the emulator
+      //     summing create + update + the generic fallback.
+      //
+      //  2. Group Admin arm = `groupAdminCanCreate(request.resource.data) ||
+      //     canCreateCompanyScoped()` — the exact pattern the employees/payroll
+      //     READ rules gained in Phase 8 for the "home company list Failed to
+      //     load" fix, applied here to WRITE: `groupAdminCanCreate()` is their
+      //     group-wide reach (sibling companies, needs a stamped groupId);
+      //     `canCreateCompanyScoped()` is their HOME company (plain sameCompany
+      //     companyId match — no groupId on the write, no dependence on
+      //     `user_auth_maps.groupId`). THIS is the fix: the old rule routed
+      //     every Group Admin through `sameGroup()` only, so a home-company
+      //     Registration was denied "missing or insufficient permissions"
+      //     whenever the write carried no groupId / the auth-map groupId was
+      //     stale — even though the SAME actor creates the parent Project fine
+      //     (leads/customers/projects use exactly this `canCreateCompanyScoped()
+      //     || groupAdminCanCreate()` shape). §9.6 group suspension still
+      //     applies via `canCreateCompanyScoped()` → `sameCompany()` →
+      //     `companyGroupIsActive()`.
+      //
+      //  3. Non-Group-Admin arm = `canCreateCompanyScoped()` (tenant) AND a
+      //     LEAN role gate — EXACTLY the leads/customers/projects posture:
+      //     `actorRoleMatches('Admin|Manager|TL|Partner')` (reads role once
+      //     from the cached auth-map → users path, no currentUser() re-entry;
+      //     resolves `Management` → `Admin` via roleStringMatches(), BD-5).
+      //     These are the roles roleBootstrap.ts seeds with
+      //     `scheme_registration: create`. There is NO per-record ownership
+      //     predicate at the rules layer — same as `leads` create: a Partner's
+      //     "file only for a project I own" and a Manager's team scope are
+      //     enforced in `createSchemeRegistration` (the ONLY write path —
+      //     `scheme_registrations` has no REST route), which resolves the
+      //     acting partner from `resolveCurrentPartnerDocId()` and rejects a
+      //     `project.partnerId` mismatch. A forged foreign `partnerId` on the
+      //     doc is the same low-severity exposure `leads` accepts (BD-1): the
+      //     forger cannot even read the row back (`schemeRegCanRead` requires
+      //     `partnerLinkedToSelf(data.partnerId)`). This is what keeps the
+      //     block in the emulator's 1000-expression budget for EVERY role.
+      //
+      //  BD-3 partner status (suspended/inactive/pending → deny NEW creates) is
+      //  gated ONCE by `partnerCreateEligible()`, identical to leads/customers/
+      //  projects.
+      allow create: if actorIsActive() && partnerCreateEligible()
         && (
           isGroupAdmin()
-            ? sameGroup(request.resource.data)
+            ? (groupAdminCanCreate(request.resource.data) || canCreateCompanyScoped())
             : (
-                sameCompany(request.resource.data)
-                && (
-                  isPartner()
-                    ? schemeRegPartnerOwnsProject(request.resource.data)
-                    : (isSchemeRegManagerRole()
-                        ? schemeRegManagerOwnsProject(request.resource.data)
-                        : isAdmin())
-                )
+                canCreateCompanyScoped()
+                && (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager|TL|Partner'))
               )
         );
-      // Partner self-edit: own record only, pre-completion states only
-      // (Draft/Submitted/Rejected/Failed sources) with partner-side targets
-      // (Draft/Submitted/Cancelled), identity fields immutable. Staff
-      // (Manager team / Admin) may manage team records — the service
-      // enforces the exact status machine + approval permission. Group Admin
-      // is Admin-equivalent (§5.2): same Group-scope, identity still immutable.
-      // Restructured to the file's ternary-discriminator shape (same as the
-      // create rule above, same reason — §10.4: the old non-lazy `||` chain
-      // evaluated the Admin check + the manager-role check + its manager-of-
-      // partner get + the Partner check + partnerLinkedToSelf and all their
-      // get()s for EVERY actor, and the emulator's create+update+fallback
-      // coverage summation put this block over 1000 expressions). Behaviour
-      // is identical — the
-      // exact same ALLOW/DENY set for every role. Partner self-edit is
-      // deliberately NOT gated by channelPartnerStatusActive (BD-3): a
-      // suspended partner may still edit existing/in-flight work.
+
+      // UPDATE — same three-part shape. Tenant: Group Admin =
+      // `groupAdminCanUpdate() || tenantWriteCanUpdate()` (the lean
+      // single-companyGroupIsActive() update-tenant check the sensitive
+      // collections use); everyone else = `tenantWriteCanUpdate(resource.data)`.
+      // `schemeRegIdentityUnchanged()` keeps partnerId/projectId/companyId
+      // immutable. Role (lazy ternary — Admin/Manager/Super never pay for the
+      // partner get()s): Admin/GroupAdmin/Management/Manager/TL
+      // (actorRoleMatches('Admin|Manager|TL'), Management→Admin via BD-5)
+      // manage any record in tenant scope; a Partner self-edit is limited to
+      // their OWN record (partnerLinkedToSelf), pre-completion source states
+      // and partner-side target states. Partner self-edit is NOT gated by
+      // partner status (BD-3: a suspended partner may still edit in-flight work).
       allow update: if actorIsActive() && schemeRegIdentityUnchanged()
-        && groupIdMatchesCompany(request.resource.data)
         && (
           isGroupAdmin()
-            ? (sameGroup(resource.data) && sameGroup(request.resource.data) && groupIdUnchanged())
+            ? (groupAdminCanUpdate(resource.data) || tenantWriteCanUpdate(resource.data))
             : (
-                sameCompany(request.resource.data) && companyIdUnchanged()
+                tenantWriteCanUpdate(resource.data)
                 && (
-                  isPartner()
-                    ? (partnerLinkedToSelf(resource.data.partnerId)
+                  (actorIsSuperAdmin() || actorRoleMatches('Admin|Manager|TL'))
+                    ? true
+                    : (partnerLinkedToSelf(resource.data.partnerId)
                         && resource.data.status in ['Draft', 'Submitted', 'Rejected', 'Failed']
                         && request.resource.data.status in ['Draft', 'Submitted', 'Cancelled'])
-                    : (isSchemeRegManagerRole()
-                        ? schemeRegManagerOfPartner(resource.data.partnerId)
-                        : isAdmin())
                 )
               )
         );
-      // Protected records: hard delete is Admin-only (the audited override
-      // path); everyone else must use the workflow's terminal transitions.
-      // Group Admin inherits the Admin hard-delete per §5.2 (Group-scoped).
-      allow delete: if actorIsActive() && ((isAdmin() && sameCompany(resource.data)) || (isGroupAdmin() && sameGroup(resource.data)));
+
+      // DELETE — the audited hard-delete override (Registration keeps this
+      // where leads/customers use `delete: if false`, because a mis-filed
+      // Vendor-Lock record must be removable by an administrator; everyone
+      // else uses the workflow's terminal Cancelled transition). Admin-tier
+      // only. Group Admin: own group (sameGroup()) or own company
+      // (canReadCompanyScoped() = signedIn() && sameCompany(resource.data),
+      // no request.resource.data on a delete). Others: actorRoleMatches('Admin')
+      // (Admin/Management) + sameCompany(resource.data). Manager/TL/Partner
+      // cannot hard-delete.
+      allow delete: if actorIsActive() && (
+        isGroupAdmin()
+          ? (sameGroup(resource.data) || canReadCompanyScoped())
+          : ((actorIsSuperAdmin() || actorRoleMatches('Admin')) && sameCompany(resource.data))
+      );
     }
 
     match /partner_wallet_transactions/{txnId} {

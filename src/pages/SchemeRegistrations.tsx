@@ -35,7 +35,10 @@ import { queryKeys } from '../lib/queryKeys';
 import { useAppStore } from '../store/useAppStore';
 import { usePermissions, isPartnerPortalUser } from '../lib/permissions';
 import { useSchemeRegistrations, useCreateSchemeRegistration } from '../features/scheme-registration/hooks/useSchemeRegistrations';
-import { registrationNextActionHint, schemeRegistrationStatusLabel, SchemeRegistrationStatusBadge } from '../features/scheme-registration/components/registrationShared';
+import {
+  DISCOM_SUGGESTIONS, registrationNextActionHint, SCHEME_OPTIONS, schemeRegistrationStatusLabel,
+  SchemeRegistrationStatusBadge, todayIsoDate,
+} from '../features/scheme-registration/components/registrationShared';
 import { RegistrationDetailModal } from '../features/scheme-registration/components/RegistrationDetailModal';
 import { type SchemeRegistrationRecord, type SchemeRegistrationStatus } from '../features/scheme-registration/types';
 import {
@@ -51,11 +54,24 @@ const STATUS_FILTERS: SchemeRegistrationStatus[] = [
   'Draft', 'Submitted', 'UnderVerification', 'VendorLocked', 'Completed', 'Rejected', 'Cancelled', 'Failed',
 ];
 
+// Application number / portal reference are deliberately NOT part of the
+// create form (Round 8 simplification) — they're facts about what happened
+// on the government/DISCOM portal, which hasn't happened yet at Draft
+// creation. They're captured (with validation) at Submit-for-verification
+// time, in the record's own detail view — see RegistrationDetailModal /
+// ProjectSchemeRegistrationWorkspace's SchemeRegistrationView.
 const FORM0 = {
-  projectId: '', vendorName: '', schemeName: '', portalType: '' as SchemeRegistrationRecord['portalType'],
-  discom: '', applicationNumber: '', portalReference: '', registrationDate: '',
+  projectId: '', vendorName: '', schemeName: '', schemeOther: '', portalType: '' as SchemeRegistrationRecord['portalType'],
+  discom: '', registrationDate: '',
   applicantName: '', applicantPhone: '', applicantEmail: '', notes: '',
 };
+
+/** A fresh form seeded with today's date (called at each "New Registration"
+ * open — never a module-load-time constant, which would go stale across
+ * midnight for a long-lived tab). */
+function freshForm() {
+  return { ...FORM0, registrationDate: todayIsoDate() };
+}
 
 function isRowOpenIgnored(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
@@ -79,6 +95,14 @@ export default function SchemeRegistrations() {
     queryKey: keys.partnersAll,
     queryFn: () => getAll(COLLECTIONS.CHANNEL_PARTNERS),
     staleTime: 60_000,
+  });
+  // Vendor auto-derivation (parity with the Project Workspace Registration
+  // stage form) — same companies_global cache, same "registering company"
+  // concept, no second source of truth.
+  const { data: companiesGlobal = [] } = useQuery<any[]>({
+    queryKey: ['companies_global'],
+    queryFn: () => getAll(COLLECTIONS.COMPANIES, []),
+    staleTime: 1000 * 60 * 30,
   });
 
   const records = useMemo(() => (registrationsQuery.data || []) as SchemeRegistrationRecord[], [registrationsQuery.data]);
@@ -165,28 +189,49 @@ export default function SchemeRegistrations() {
   function handleCreateSubmit() {
     if (createMutation.isPending) return;
     if (!form.projectId) return toast.error('Please select a project');
-    if (form.applicantPhone && !/^\d{10}$/.test(form.applicantPhone.trim())) return toast.error('A valid 10-digit mobile number is required');    createMutation.mutate(
+    if (form.applicantPhone && !/^\d{10}$/.test(form.applicantPhone.trim())) return toast.error('A valid 10-digit mobile number is required');
+    const resolvedScheme = form.schemeName === '__other__' ? form.schemeOther.trim() : form.schemeName.trim();
+    createMutation.mutate(
       {
         projectId: form.projectId,
         vendorName: form.vendorName.trim() || undefined,
-        schemeName: form.schemeName.trim() || undefined,
+        schemeName: resolvedScheme || undefined,
         portalType: form.portalType || undefined,
         discom: form.discom.trim() || undefined,
-        applicationNumber: form.applicationNumber.trim() || undefined,
-        portalReference: form.portalReference.trim() || undefined,
         registrationDate: form.registrationDate || undefined,
         applicantName: form.applicantName.trim() || undefined,
         applicantPhone: form.applicantPhone.trim() || undefined,
         applicantEmail: form.applicantEmail.trim() || undefined,
         notes: form.notes.trim() || undefined,
       },
-      { onSuccess: () => { setShowForm(false); setForm({ ...FORM0 }); } },
+      { onSuccess: () => { setShowForm(false); setForm(freshForm()); } },
     );
   }
 
   function toastError(message: string) {
     const { toast } = require('react-hot-toast') as typeof import('react-hot-toast');
     toast.error(message);
+  }
+
+  /** "Pick from Project" (parity with the Project Workspace Registration stage
+   * form): selecting a project pre-fills Vendor (from the project's own
+   * company) and Applicant name/phone (from the project's denormalized
+   * customer fields) — ONLY into fields the operator hasn't already typed
+   * into, so a manual edit always wins. Source is attributed in the field
+   * hint text below each input, never silently substituted. */
+  function handleProjectPick(projectId: string) {
+    const project = (projects as any[]).find((p) => p.id === projectId);
+    setForm((f) => {
+      const next = { ...f, projectId };
+      if (!next.vendorName.trim() && project) {
+        const co = (companiesGlobal as any[]).find((c) => c?.id === project.companyId);
+        const derivedVendor = String(co?.name ?? co?.companyName ?? co?.legalName ?? '').trim();
+        if (derivedVendor) next.vendorName = derivedVendor;
+      }
+      if (!next.applicantName.trim() && project?.customerName) next.applicantName = String(project.customerName).trim();
+      if (!next.applicantPhone.trim() && project?.customerPhone) next.applicantPhone = String(project.customerPhone).trim();
+      return next;
+    });
   }
 
   const projectOptions = [
@@ -221,9 +266,14 @@ export default function SchemeRegistrations() {
           ))}
         </div>
         <Card className="flex min-h-0 flex-1 flex-col overflow-hidden shadow-[0_4px_24px_rgba(0,0,0,0.04)]">
-          <Table><thead><tr>{Array.from({ length: 8 }).map((_, i) => (
-            <th key={i} className="px-4 py-2.5"><div className="skeleton h-4 w-20" /></th>
-          ))}</tr></thead><SkeletonRows cols={8} rows={6} /></Table>
+          <Table>
+            <Thead>
+              {Array.from({ length: 8 }).map((_, i) => (
+                <Th key={i}><div className="skeleton h-4 w-20" /></Th>
+              ))}
+            </Thead>
+            <Tbody><SkeletonRows cols={8} rows={6} /></Tbody>
+          </Table>
         </Card>
       </div>
     );
@@ -239,7 +289,7 @@ export default function SchemeRegistrations() {
             <Button variant="outline" size="sm" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => registrationsQuery.refetch()}>Refresh</Button>
             {perms.canCreate('scheme_registration') && (
               <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />}
-                onClick={() => { setForm({ ...FORM0 }); setShowForm(true); }}>
+                onClick={() => { setForm(freshForm()); setShowForm(true); }}>
                 New Registration
               </Button>
             )}
@@ -386,7 +436,7 @@ export default function SchemeRegistrations() {
               <div>
                 <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Project *</label>
                 <select value={form.projectId}
-                  onChange={(e) => setForm((f) => ({ ...f, projectId: e.target.value }))}
+                  onChange={(e) => handleProjectPick(e.target.value)}
                   className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]">
                   <option value="">Select project</option>
                   {(projects as any[])
@@ -395,19 +445,28 @@ export default function SchemeRegistrations() {
                       <option key={p.id} value={p.id}>{p.projectId || p.id} · {p.partnerName || p.customerName || ''}</option>
                     ))}
                 </select>
+                <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">Picking a project pre-fills Vendor and Applicant below from that project's own record — still editable.</p>
               </div>
               <div>
-                <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Vendor</label>
+                <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Vendor (registering company)</label>
                 <input type="text" value={form.vendorName}
                   onChange={(e) => setForm((f) => ({ ...f, vendorName: e.target.value }))}
-                  placeholder="Locked vendor (finalized at vendor lock)" className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
+                  placeholder="Auto-derived from the project's company" className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Scheme</label>
-                  <input type="text" value={form.schemeName}
+                  <select value={form.schemeName}
                     onChange={(e) => setForm((f) => ({ ...f, schemeName: e.target.value }))}
-                    className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
+                    className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]">
+                    <option value="">Select scheme…</option>
+                    {SCHEME_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+                    <option value="__other__">Other (type below)</option>
+                  </select>
+                  {form.schemeName === '__other__' && (
+                    <input type="text" value={form.schemeOther} onChange={(e) => setForm((f) => ({ ...f, schemeOther: e.target.value }))}
+                      placeholder="Scheme name" className="mt-1.5 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Portal</label>
@@ -423,30 +482,28 @@ export default function SchemeRegistrations() {
                   </select>
                 </div>
               </div>
-              <div>
-                <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Application Number</label>
-                <input type="text" value={form.applicationNumber}
-                  onChange={(e) => setForm((f) => ({ ...f, applicationNumber: e.target.value }))}
-                  placeholder="External portal application number" className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Portal Reference</label>
-                <input type="text" value={form.portalReference}
-                  onChange={(e) => setForm((f) => ({ ...f, portalReference: e.target.value }))}
-                  placeholder="External portal reference / ID" className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
-              </div>
+              <p className="text-[10px] text-[var(--color-text-muted)]">
+                This starts an internal record — the actual registration happens on the government/DISCOM portal. Application number and portal reference are recorded when you submit for verification, once the portal has issued them.
+              </p>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Registration Date</label>
-                  <input type="date" value={form.registrationDate}
-                    onChange={(e) => setForm((f) => ({ ...f, registrationDate: e.target.value }))}
-                    className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
+                  <div className="flex items-center gap-1.5">
+                    <input type="date" value={form.registrationDate} max={todayIsoDate()}
+                      onChange={(e) => setForm((f) => ({ ...f, registrationDate: e.target.value }))}
+                      className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
+                    <button type="button" onClick={() => setForm((f) => ({ ...f, registrationDate: todayIsoDate() }))}
+                      className="shrink-0 rounded-md border border-[var(--color-border)] px-2 py-1.5 text-[10px] font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]">Today</button>
+                  </div>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">DISCOM</label>
-                  <input type="text" value={form.discom}
+                  <input type="text" list="scheme-reg-page-discom-list" value={form.discom}
                     onChange={(e) => setForm((f) => ({ ...f, discom: e.target.value }))}
-                    className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
+                    placeholder="Power distribution utility" className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
+                  <datalist id="scheme-reg-page-discom-list">
+                    {DISCOM_SUGGESTIONS.map((d) => <option key={d} value={d} />)}
+                  </datalist>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2">
@@ -462,6 +519,12 @@ export default function SchemeRegistrations() {
                     onChange={(e) => setForm((f) => ({ ...f, applicantPhone: e.target.value }))}
                     className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
                 </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Applicant Email</label>
+                <input type="email" value={form.applicantEmail}
+                  onChange={(e) => setForm((f) => ({ ...f, applicantEmail: e.target.value }))}
+                  placeholder="Email address" className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]" />
               </div>
               <div>
                 <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Notes</label>

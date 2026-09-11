@@ -67,6 +67,7 @@ vi.mock('../firestore', () => ({
   getOne: mocks.getOne,
   getAll: mocks.getAll,
   genId: mocks.genId,
+  isRealCompanyId: (id: unknown): boolean => typeof id === 'string' && id.length > 0 && !['all', 'group', 'default', ''].includes(id),
   resolveWriteCompanyId: mocks.resolveWorkflowCompanyId,
 }));
 
@@ -83,7 +84,15 @@ vi.mock('../notifications', () => ({
   notifyRoleUsers: mocks.notifyRoleUsers,
 }));
 
-vi.mock('../permissions', () => ({ canDo: mocks.canDo }));
+vi.mock('../permissions', () => ({
+  canDo: mocks.canDo,
+  resolveCompatibleRole: (role?: string | null) => {
+    const key = String(role || '').trim().toLowerCase();
+    if (key === 'admin' || key === 'groupadmin' || key === 'management') return 'Admin';
+    if (key === 'manager' || key === 'tl') return 'Manager';
+    return key ? role : null;
+  },
+}));
 
 vi.mock('../partnerOwnership', () => ({
   resolveCurrentPartnerDocId: mocks.resolveCurrentPartnerDocId,
